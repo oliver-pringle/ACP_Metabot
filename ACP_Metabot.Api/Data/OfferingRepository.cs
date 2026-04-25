@@ -1,0 +1,226 @@
+using System.Globalization;
+using ACP_Metabot.Api.Models;
+
+namespace ACP_Metabot.Api.Data;
+
+public record UpsertResult(long Id, bool IsNew, bool ContentChanged);
+
+public class OfferingRepository
+{
+    private readonly Db _db;
+
+    public OfferingRepository(Db db) => _db = db;
+
+    public async Task<UpsertResult> UpsertAsync(
+        string agentAddress, string agentName, string offeringName,
+        string description, string? requirementSchemaJson, double priceUsdc,
+        string priceType, bool isPrivate, string chain, string contentHash,
+        DateTime nowUtc)
+    {
+        await using var conn = _db.OpenConnection();
+        var nowIso = nowUtc.ToString("O", CultureInfo.InvariantCulture);
+
+        // Check existing
+        await using (var get = conn.CreateCommand())
+        {
+            get.CommandText = "SELECT id, content_hash FROM offerings WHERE agent_address = $a AND offering_name = $n;";
+            get.Parameters.AddWithValue("$a", agentAddress);
+            get.Parameters.AddWithValue("$n", offeringName);
+            await using var reader = await get.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                var existingId = reader.GetInt64(0);
+                var existingHash = reader.GetString(1);
+                await reader.CloseAsync();
+
+                if (existingHash == contentHash)
+                {
+                    // Just bump last_seen_at
+                    await using var touch = conn.CreateCommand();
+                    touch.CommandText = "UPDATE offerings SET last_seen_at = $now WHERE id = $id;";
+                    touch.Parameters.AddWithValue("$now", nowIso);
+                    touch.Parameters.AddWithValue("$id", existingId);
+                    await touch.ExecuteNonQueryAsync();
+                    return new UpsertResult(existingId, IsNew: false, ContentChanged: false);
+                }
+
+                // Content changed — update fields
+                await using var upd = conn.CreateCommand();
+                upd.CommandText = @"
+                    UPDATE offerings
+                    SET agent_name              = $agentName,
+                        description             = $desc,
+                        requirement_schema_json = $schema,
+                        price_usdc              = $price,
+                        price_type              = $pType,
+                        is_private              = $priv,
+                        chain                   = $chain,
+                        content_hash            = $hash,
+                        last_seen_at            = $now
+                    WHERE id = $id;";
+                upd.Parameters.AddWithValue("$agentName", agentName);
+                upd.Parameters.AddWithValue("$desc", description);
+                upd.Parameters.AddWithValue("$schema", (object?)requirementSchemaJson ?? DBNull.Value);
+                upd.Parameters.AddWithValue("$price", priceUsdc);
+                upd.Parameters.AddWithValue("$pType", priceType);
+                upd.Parameters.AddWithValue("$priv", isPrivate ? 1 : 0);
+                upd.Parameters.AddWithValue("$chain", chain);
+                upd.Parameters.AddWithValue("$hash", contentHash);
+                upd.Parameters.AddWithValue("$now", nowIso);
+                upd.Parameters.AddWithValue("$id", existingId);
+                await upd.ExecuteNonQueryAsync();
+                return new UpsertResult(existingId, IsNew: false, ContentChanged: true);
+            }
+        }
+
+        // Insert
+        await using var ins = conn.CreateCommand();
+        ins.CommandText = @"
+            INSERT INTO offerings (
+                agent_address, agent_name, offering_name, description,
+                requirement_schema_json, price_usdc, price_type, is_private,
+                chain, content_hash, first_seen_at, last_seen_at)
+            VALUES (
+                $a, $agentName, $n, $desc,
+                $schema, $price, $pType, $priv,
+                $chain, $hash, $now, $now);
+            SELECT last_insert_rowid();";
+        ins.Parameters.AddWithValue("$a", agentAddress);
+        ins.Parameters.AddWithValue("$agentName", agentName);
+        ins.Parameters.AddWithValue("$n", offeringName);
+        ins.Parameters.AddWithValue("$desc", description);
+        ins.Parameters.AddWithValue("$schema", (object?)requirementSchemaJson ?? DBNull.Value);
+        ins.Parameters.AddWithValue("$price", priceUsdc);
+        ins.Parameters.AddWithValue("$pType", priceType);
+        ins.Parameters.AddWithValue("$priv", isPrivate ? 1 : 0);
+        ins.Parameters.AddWithValue("$chain", chain);
+        ins.Parameters.AddWithValue("$hash", contentHash);
+        ins.Parameters.AddWithValue("$now", nowIso);
+        var newId = (long)(await ins.ExecuteScalarAsync() ?? 0L);
+        return new UpsertResult(newId, IsNew: true, ContentChanged: true);
+    }
+
+    public async Task UpsertEmbeddingAsync(long offeringId, string model, int dimension, byte[] blob, DateTime nowUtc)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            INSERT INTO offering_embeddings (offering_id, model, dimension, embedding_blob, embedded_at)
+            VALUES ($id, $m, $d, $b, $t)
+            ON CONFLICT(offering_id) DO UPDATE SET
+                model          = excluded.model,
+                dimension      = excluded.dimension,
+                embedding_blob = excluded.embedding_blob,
+                embedded_at    = excluded.embedded_at;";
+        cmd.Parameters.AddWithValue("$id", offeringId);
+        cmd.Parameters.AddWithValue("$m", model);
+        cmd.Parameters.AddWithValue("$d", dimension);
+        cmd.Parameters.AddWithValue("$b", blob);
+        cmd.Parameters.AddWithValue("$t", nowUtc.ToString("O", CultureInfo.InvariantCulture));
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public async Task<Offering?> GetByIdAsync(long id)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT id, agent_address, agent_name, offering_name, description,
+                   requirement_schema_json, price_usdc, price_type, is_private,
+                   chain, content_hash, first_seen_at, last_seen_at
+            FROM offerings WHERE id = $id;";
+        cmd.Parameters.AddWithValue("$id", id);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) return null;
+        return MapOffering(reader);
+    }
+
+    public async Task<List<Offering>> ListNeedingEmbeddingAsync(int limit, int dimension)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT o.id, o.agent_address, o.agent_name, o.offering_name, o.description,
+                   o.requirement_schema_json, o.price_usdc, o.price_type, o.is_private,
+                   o.chain, o.content_hash, o.first_seen_at, o.last_seen_at
+            FROM offerings o
+            LEFT JOIN offering_embeddings e ON e.offering_id = o.id
+            WHERE e.offering_id IS NULL OR e.dimension != $d
+            ORDER BY o.id ASC
+            LIMIT $lim;";
+        cmd.Parameters.AddWithValue("$d", dimension);
+        cmd.Parameters.AddWithValue("$lim", limit);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        var result = new List<Offering>();
+        while (await reader.ReadAsync()) result.Add(MapOffering(reader));
+        return result;
+    }
+
+    /// <summary>
+    /// Returns ALL embedded offerings as (offering, embedding) pairs.
+    /// Used for in-memory cosine search. Fine up to ~50K offerings.
+    /// </summary>
+    public async Task<List<(Offering Offering, float[] Embedding)>> ListAllWithEmbeddingsAsync(string requiredModel)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT o.id, o.agent_address, o.agent_name, o.offering_name, o.description,
+                   o.requirement_schema_json, o.price_usdc, o.price_type, o.is_private,
+                   o.chain, o.content_hash, o.first_seen_at, o.last_seen_at,
+                   e.dimension, e.embedding_blob
+            FROM offerings o
+            INNER JOIN offering_embeddings e ON e.offering_id = o.id
+            WHERE e.model = $m;";
+        cmd.Parameters.AddWithValue("$m", requiredModel);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        var result = new List<(Offering, float[])>();
+        while (await reader.ReadAsync())
+        {
+            var o = MapOffering(reader);
+            var dim = reader.GetInt32(13);
+            var blob = (byte[])reader[14];
+            var emb = new float[dim];
+            Buffer.BlockCopy(blob, 0, emb, 0, dim * sizeof(float));
+            result.Add((o, emb));
+        }
+        return result;
+    }
+
+    public async Task<int> CountAsync()
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM offerings;";
+        var result = await cmd.ExecuteScalarAsync();
+        return Convert.ToInt32(result ?? 0);
+    }
+
+    public async Task<int> CountEmbeddedAsync(string model)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM offering_embeddings WHERE model = $m;";
+        cmd.Parameters.AddWithValue("$m", model);
+        var result = await cmd.ExecuteScalarAsync();
+        return Convert.ToInt32(result ?? 0);
+    }
+
+    private static Offering MapOffering(System.Data.Common.DbDataReader reader)
+    {
+        return new Offering(
+            Id: reader.GetInt64(0),
+            AgentAddress: reader.GetString(1),
+            AgentName: reader.GetString(2),
+            OfferingName: reader.GetString(3),
+            Description: reader.GetString(4),
+            RequirementSchemaJson: reader.IsDBNull(5) ? null : reader.GetString(5),
+            PriceUsdc: reader.GetDouble(6),
+            PriceType: reader.GetString(7),
+            IsPrivate: reader.GetInt32(8) != 0,
+            Chain: reader.GetString(9),
+            ContentHash: reader.GetString(10),
+            FirstSeenAt: DateTime.Parse(reader.GetString(11), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            LastSeenAt: DateTime.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+    }
+}

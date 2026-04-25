@@ -1,0 +1,22 @@
+{
+  "name": "acp-metabot-acp-v2",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "start": "tsx src/seller.ts",
+    "dev": "tsx watch src/seller.ts",
+    "print-offerings": "tsx scripts/print-offerings-for-registration.ts"
+  },
+  "dependencies": {
+    "@account-kit/infra": "^4.0.0",
+    "@virtuals-protocol/acp-node-v2": "^0.0.6",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

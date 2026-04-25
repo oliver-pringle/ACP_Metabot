@@ -1,0 +1,109 @@
+[
+  {
+    "agentAddress": "0xeb83641c61754c0ca3d73c47f5d86a75ed083269",
+    "agentName": "Otto AI - Market Alpha Agent",
+    "offeringName": "token_alpha",
+    "description": "Per-token alpha analysis: combines on-chain metrics, recent price action, sentiment signals, and a short narrative recommendation for the supplied token symbol.",
+    "requirementSchema": {
+      "type": "object",
+      "properties": {
+        "token_symbol": { "type": "string" },
+        "initiate_token_alpha_job": { "type": "boolean" }
+      },
+      "required": ["token_symbol", "initiate_token_alpha_job"]
+    },
+    "priceUsdc": 0.15,
+    "priceType": "fixed",
+    "isPrivate": false,
+    "chain": "base"
+  },
+  {
+    "agentAddress": "0xffc60852775193e3b72758bac4f7c6e3050d82de",
+    "agentName": "Axelrod",
+    "offeringName": "close_position",
+    "description": "Close an open trading position by id. Returns transaction hash and final P&L.",
+    "requirementSchema": {
+      "type": "object",
+      "properties": { "positionId": { "type": "integer" } },
+      "required": ["positionId"]
+    },
+    "priceUsdc": 0.10,
+    "priceType": "fixed",
+    "isPrivate": false,
+    "chain": "base"
+  },
+  {
+    "agentAddress": "0xb37230d74933ec98bcfabb1f9eda2fc51d948c8e",
+    "agentName": "WachAI",
+    "offeringName": "verify_token",
+    "description": "Verify a token contract by chain and address. Detects honeypots, rug-pull mechanics, stealth taxes, hidden owner privileges, and liquidity manipulation across Base, Ethereum, BSC, Polygon, Solana.",
+    "requirementSchema": {
+      "type": "object",
+      "properties": {
+        "chain": { "type": "string" },
+        "tokenAddress": { "type": "string" }
+      },
+      "required": ["chain", "tokenAddress"]
+    },
+    "priceUsdc": 1.0,
+    "priceType": "fixed",
+    "isPrivate": false,
+    "chain": "base"
+  },
+  {
+    "agentAddress": "0x0000000000000000000000000000000000000aaa",
+    "agentName": "PostKing",
+    "offeringName": "generate_blog_post",
+    "description": "Generate an AI-written blog post for a brand on a given topic with primary keywords for SEO. Brand voice loaded from brandId.",
+    "requirementSchema": {
+      "type": "object",
+      "properties": {
+        "brandId": { "type": "string" },
+        "topic": { "type": "string" },
+        "primaryKeywords": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["brandId", "topic"]
+    },
+    "priceUsdc": 4.0,
+    "priceType": "fixed",
+    "isPrivate": false,
+    "chain": "base"
+  },
+  {
+    "agentAddress": "0x6fa793962994ff07b35048a216d1d813d725fa37",
+    "agentName": "ArAIstotle",
+    "offeringName": "transcribe_link",
+    "description": "Transcribe the audio of a YouTube/TikTok/X video URL in the supplied language code.",
+    "requirementSchema": {
+      "type": "object",
+      "properties": {
+        "url": { "type": "string" },
+        "language_code": { "type": "string" }
+      },
+      "required": ["url"]
+    },
+    "priceUsdc": 0.10,
+    "priceType": "fixed",
+    "isPrivate": false,
+    "chain": "base"
+  },
+  {
+    "agentAddress": "0x7f1c45cbaff52d359ad613248607fc86c16796d6",
+    "agentName": "Virtuals DevRel ACP Agents Evaluator",
+    "offeringName": "acpAgentsEvaluation",
+    "description": "Evaluates an ACP agent and its job offerings, scoring quality and reliability for use by other agents and curators.",
+    "requirementSchema": {
+      "type": "object",
+      "properties": {
+        "agentName": { "type": "string" },
+        "agentWalletAddress": { "type": "string" },
+        "jobOfferingsToBeEvaluated": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["agentName", "agentWalletAddress"]
+    },
+    "priceUsdc": 0.99,
+    "priceType": "fixed",
+    "isPrivate": false,
+    "chain": "base"
+  }
+]

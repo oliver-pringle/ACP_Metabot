@@ -1,0 +1,23 @@
+# .NET
+bin/
+obj/
+*.user
+.vs/
+
+# Node
+node_modules/
+
+# SQLite
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/*.db
+data/*.db-*
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db

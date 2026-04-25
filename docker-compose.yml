@@ -1,0 +1,42 @@
+services:
+  acp-metabot-api:
+    build:
+      context: ./ACP_Metabot.Api
+    container_name: acp-metabot-api
+    restart: unless-stopped
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:5000
+      - ConnectionStrings__Sqlite=Data Source=/data/acp_metabot.db;Cache=Shared
+      # Marketplace source: "acp-api" (live upstream) or "json-file" (offline seed).
+      - Indexer__Source=acp-api
+      - Indexer__SourcePath=/data/seed/offerings.json
+      - Indexer__ApiBaseUrl=https://acpx.virtuals.io/
+      - Indexer__ApiPageSize=100
+      - Indexer__ApiRequestDelayMs=50
+      - Indexer__IntervalSeconds=600
+      - Embeddings__Provider=voyage
+      - Embeddings__Model=voyage-3-large
+      - Claude__Model=claude-sonnet-4-6
+      # Required — supply at deploy time
+      - VOYAGE_API_KEY=${VOYAGE_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      - ./data:/data
+    networks: [acp-metabot]
+    # No ports published — only the sidecar talks to it.
+
+  acp-metabot-acp:
+    build:
+      context: ./acp-v2
+    container_name: acp-metabot-acp
+    restart: unless-stopped
+    depends_on: [acp-metabot-api]
+    env_file: ./acp-v2/.env
+    environment:
+      - ACP_METABOT_API_URL=http://acp-metabot-api:5000
+    networks: [acp-metabot]
+
+networks:
+  acp-metabot:
+    driver: bridge
