@@ -21,6 +21,7 @@ public class VoyageEmbeddingProvider : IEmbeddingProvider
             ?? throw new InvalidOperationException("VOYAGE_API_KEY not set");
         _http = httpFactory.CreateClient(nameof(VoyageEmbeddingProvider));
         _http.BaseAddress ??= new Uri("https://api.voyageai.com/v1/");
+        _http.Timeout = TimeSpan.FromMinutes(5);
         _http.DefaultRequestHeaders.Authorization =
             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
         _logger = logger;

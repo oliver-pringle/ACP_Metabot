@@ -24,7 +24,7 @@ public class MarketplaceIndexerService : BackgroundService
         _logger = logger;
         var seconds = config.GetValue<int?>("Indexer:IntervalSeconds") ?? 600;
         _interval = TimeSpan.FromSeconds(Math.Max(30, seconds));
-        _embeddingBatchSize = config.GetValue<int?>("Indexer:EmbeddingConcurrency") ?? 4;
+        _embeddingBatchSize = config.GetValue<int?>("Indexer:EmbeddingConcurrency") ?? 2;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
