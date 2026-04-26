@@ -15,7 +15,7 @@ public class OfferingRepository
         string agentAddress, string agentName, string offeringName,
         string description, string? requirementSchemaJson, double priceUsdc,
         string priceType, bool isPrivate, string chain, string contentHash,
-        DateTime nowUtc)
+        long usageCount, long agentJobCount, DateTime nowUtc)
     {
         await using var conn = _db.OpenConnection();
         var nowIso = nowUtc.ToString("O", CultureInfo.InvariantCulture);
@@ -35,10 +35,19 @@ public class OfferingRepository
 
                 if (existingHash == contentHash)
                 {
-                    // Just bump last_seen_at
+                    // Same content — just bump last_seen_at + popularity counters
+                    // (counters change every fetch but aren't part of the hash;
+                    // tracking them in-band avoids a second update path).
                     await using var touch = conn.CreateCommand();
-                    touch.CommandText = "UPDATE offerings SET last_seen_at = $now WHERE id = $id;";
+                    touch.CommandText = @"
+                        UPDATE offerings
+                        SET last_seen_at    = $now,
+                            usage_count     = $usage,
+                            agent_job_count = $agentJobs
+                        WHERE id = $id;";
                     touch.Parameters.AddWithValue("$now", nowIso);
+                    touch.Parameters.AddWithValue("$usage", usageCount);
+                    touch.Parameters.AddWithValue("$agentJobs", agentJobCount);
                     touch.Parameters.AddWithValue("$id", existingId);
                     await touch.ExecuteNonQueryAsync();
                     return new UpsertResult(existingId, IsNew: false, ContentChanged: false);
@@ -56,7 +65,9 @@ public class OfferingRepository
                         is_private              = $priv,
                         chain                   = $chain,
                         content_hash            = $hash,
-                        last_seen_at            = $now
+                        last_seen_at            = $now,
+                        usage_count             = $usage,
+                        agent_job_count         = $agentJobs
                     WHERE id = $id;";
                 upd.Parameters.AddWithValue("$agentName", agentName);
                 upd.Parameters.AddWithValue("$desc", description);
@@ -67,6 +78,8 @@ public class OfferingRepository
                 upd.Parameters.AddWithValue("$chain", chain);
                 upd.Parameters.AddWithValue("$hash", contentHash);
                 upd.Parameters.AddWithValue("$now", nowIso);
+                upd.Parameters.AddWithValue("$usage", usageCount);
+                upd.Parameters.AddWithValue("$agentJobs", agentJobCount);
                 upd.Parameters.AddWithValue("$id", existingId);
                 await upd.ExecuteNonQueryAsync();
                 return new UpsertResult(existingId, IsNew: false, ContentChanged: true);
@@ -79,11 +92,13 @@ public class OfferingRepository
             INSERT INTO offerings (
                 agent_address, agent_name, offering_name, description,
                 requirement_schema_json, price_usdc, price_type, is_private,
-                chain, content_hash, first_seen_at, last_seen_at)
+                chain, content_hash, first_seen_at, last_seen_at,
+                usage_count, agent_job_count)
             VALUES (
                 $a, $agentName, $n, $desc,
                 $schema, $price, $pType, $priv,
-                $chain, $hash, $now, $now);
+                $chain, $hash, $now, $now,
+                $usage, $agentJobs);
             SELECT last_insert_rowid();";
         ins.Parameters.AddWithValue("$a", agentAddress);
         ins.Parameters.AddWithValue("$agentName", agentName);
@@ -96,6 +111,8 @@ public class OfferingRepository
         ins.Parameters.AddWithValue("$chain", chain);
         ins.Parameters.AddWithValue("$hash", contentHash);
         ins.Parameters.AddWithValue("$now", nowIso);
+        ins.Parameters.AddWithValue("$usage", usageCount);
+        ins.Parameters.AddWithValue("$agentJobs", agentJobCount);
         var newId = (long)(await ins.ExecuteScalarAsync() ?? 0L);
         return new UpsertResult(newId, IsNew: true, ContentChanged: true);
     }
@@ -127,7 +144,8 @@ public class OfferingRepository
         cmd.CommandText = @"
             SELECT id, agent_address, agent_name, offering_name, description,
                    requirement_schema_json, price_usdc, price_type, is_private,
-                   chain, content_hash, first_seen_at, last_seen_at
+                   chain, content_hash, first_seen_at, last_seen_at,
+                   usage_count, agent_job_count
             FROM offerings WHERE id = $id;";
         cmd.Parameters.AddWithValue("$id", id);
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -142,7 +160,8 @@ public class OfferingRepository
         cmd.CommandText = @"
             SELECT o.id, o.agent_address, o.agent_name, o.offering_name, o.description,
                    o.requirement_schema_json, o.price_usdc, o.price_type, o.is_private,
-                   o.chain, o.content_hash, o.first_seen_at, o.last_seen_at
+                   o.chain, o.content_hash, o.first_seen_at, o.last_seen_at,
+                   o.usage_count, o.agent_job_count
             FROM offerings o
             LEFT JOIN offering_embeddings e ON e.offering_id = o.id
             WHERE e.offering_id IS NULL OR e.dimension != $d
@@ -168,6 +187,7 @@ public class OfferingRepository
             SELECT o.id, o.agent_address, o.agent_name, o.offering_name, o.description,
                    o.requirement_schema_json, o.price_usdc, o.price_type, o.is_private,
                    o.chain, o.content_hash, o.first_seen_at, o.last_seen_at,
+                   o.usage_count, o.agent_job_count,
                    e.dimension, e.embedding_blob
             FROM offerings o
             INNER JOIN offering_embeddings e ON e.offering_id = o.id
@@ -178,13 +198,70 @@ public class OfferingRepository
         while (await reader.ReadAsync())
         {
             var o = MapOffering(reader);
-            var dim = reader.GetInt32(13);
-            var blob = (byte[])reader[14];
+            var dim = reader.GetInt32(15);
+            var blob = (byte[])reader[16];
             var emb = new float[dim];
             Buffer.BlockCopy(blob, 0, emb, 0, dim * sizeof(float));
             result.Add((o, emb));
         }
         return result;
+    }
+
+    public async Task<List<Offering>> ListAllAsync()
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT id, agent_address, agent_name, offering_name, description,
+                   requirement_schema_json, price_usdc, price_type, is_private,
+                   chain, content_hash, first_seen_at, last_seen_at,
+                   usage_count, agent_job_count
+            FROM offerings;";
+        await using var reader = await cmd.ExecuteReaderAsync();
+        var result = new List<Offering>();
+        while (await reader.ReadAsync()) result.Add(MapOffering(reader));
+        return result;
+    }
+
+    public async Task<List<Offering>> ListByAgentAsync(string agentAddress)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT id, agent_address, agent_name, offering_name, description,
+                   requirement_schema_json, price_usdc, price_type, is_private,
+                   chain, content_hash, first_seen_at, last_seen_at,
+                   usage_count, agent_job_count
+            FROM offerings
+            WHERE agent_address = $a;";
+        cmd.Parameters.AddWithValue("$a", agentAddress);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        var result = new List<Offering>();
+        while (await reader.ReadAsync()) result.Add(MapOffering(reader));
+        return result;
+    }
+
+    public async Task<int> WriteSnapshotIfMissingAsync(string snapshotDate)
+    {
+        await using var conn = _db.OpenConnection();
+
+        await using (var check = conn.CreateCommand())
+        {
+            check.CommandText = "SELECT 1 FROM agent_reputation_snapshots WHERE snapshot_date = $d LIMIT 1;";
+            check.Parameters.AddWithValue("$d", snapshotDate);
+            var exists = await check.ExecuteScalarAsync();
+            if (exists is not null) return 0;
+        }
+
+        // Single INSERT...SELECT runs in one statement so SQLite's implicit
+        // transaction is sufficient. ~34K rows write in well under a second.
+        await using var ins = conn.CreateCommand();
+        ins.CommandText = @"
+            INSERT INTO agent_reputation_snapshots
+                (snapshot_date, offering_id, usage_count, agent_job_count)
+            SELECT $d, id, usage_count, agent_job_count FROM offerings;";
+        ins.Parameters.AddWithValue("$d", snapshotDate);
+        return await ins.ExecuteNonQueryAsync();
     }
 
     public async Task<int> CountAsync()
@@ -221,6 +298,8 @@ public class OfferingRepository
             Chain: reader.GetString(9),
             ContentHash: reader.GetString(10),
             FirstSeenAt: DateTime.Parse(reader.GetString(11), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-            LastSeenAt: DateTime.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+            LastSeenAt: DateTime.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            UsageCount: reader.GetInt64(13),
+            AgentJobCount: reader.GetInt64(14));
     }
 }

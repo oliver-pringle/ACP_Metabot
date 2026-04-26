@@ -34,4 +34,13 @@ public class MarketplaceOfferingDto
 
     [JsonPropertyName("chain")]
     public string Chain { get; set; } = "base";
+
+    // Lifetime job counts pulled straight from the upstream API. Used to
+    // derive the agentReputation score in v1; aggregated into daily
+    // snapshots for v2 time-window deltas.
+    [JsonPropertyName("usageCount")]
+    public long UsageCount { get; set; }
+
+    [JsonPropertyName("agentJobCount")]
+    public long AgentJobCount { get; set; }
 }

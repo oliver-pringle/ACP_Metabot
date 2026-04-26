@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace ACP_Metabot.Api.Models;
 
 public record OfferingMatch(
@@ -9,4 +11,6 @@ public record OfferingMatch(
     double PriceUsdc,
     string PriceType,
     string Chain,
-    double Score);
+    double Score,
+    [property: JsonPropertyName("reputation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        ReputationSummary? Reputation = null);

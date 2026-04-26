@@ -30,6 +30,7 @@ switch (indexerSource)
             $"Unknown Indexer:Source value '{indexerSource}'. Expected 'acp-api' or 'json-file'.");
 }
 
+builder.Services.AddSingleton<ReputationService>();
 builder.Services.AddSingleton<SearchService>();
 builder.Services.AddSingleton<StackComposerService>();
 builder.Services.AddSingleton<WebhookDeliveryService>();
@@ -168,6 +169,34 @@ async Task<IResult> HandleCompose(ComposeRequest req, StackComposerService svc, 
 app.MapPost("/search", HandleSearch);
 app.MapPost("/composeStack", HandleCompose);
 
+app.MapPost("/agentReputation", async (
+    AgentReputationRequest req, OfferingRepository repo, ReputationService reputation) =>
+{
+    if (string.IsNullOrWhiteSpace(req.AgentAddress))
+        return Results.BadRequest(new { error = "agentAddress is required" });
+
+    if (!reputation.IsReady)
+        return Results.Json(
+            new { error = "reputation unavailable, indexer warming up" },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+
+    // Match the indexer's lowercase address normalisation.
+    var addr = req.AgentAddress.Trim().ToLowerInvariant();
+    var offerings = await repo.ListByAgentAsync(addr);
+    if (offerings.Count == 0)
+        return Results.NotFound(new { error = "agent not found" });
+
+    try
+    {
+        var result = reputation.Build(offerings, req.OfferingName);
+        return Results.Ok(result);
+    }
+    catch (KeyNotFoundException)
+    {
+        return Results.NotFound(new { error = "offering not found for this agent" });
+    }
+});
+
 // Public gateway — same logic, no X-API-Key, IP rate-limited.
 app.MapPost("/v1/search", HandleSearch).RequireRateLimiting("public-search");
 app.MapPost("/v1/composeStack", HandleCompose).RequireRateLimiting("public-compose");
@@ -239,3 +268,4 @@ app.Run();
 
 public record SearchRequest(string Query, int? Limit, double? MinScore, double? PriceMaxUsdc);
 public record ComposeRequest(string UseCase, double? BudgetUsdc, int? MaxOfferings);
+public record AgentReputationRequest(string AgentAddress, string? OfferingName);

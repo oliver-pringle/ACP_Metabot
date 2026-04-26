@@ -62,6 +62,29 @@ export interface RegisterWatchResponse {
   initialMatches: OfferingMatch[];
 }
 
+export interface AgentReputationRequest {
+  agentAddress: string;
+  offeringName?: string;
+}
+
+export interface OfferingReputation {
+  name: string;
+  score: number;
+  hires: number;
+  percentile: number;
+}
+
+export interface AgentReputationResponse {
+  agentAddress: string;
+  agentName: string;
+  agentScore: number;
+  agentTotalJobs: number;
+  agentPercentile: number;
+  computedAt: string;
+  offering?: OfferingReputation;
+  offerings?: OfferingReputation[];
+}
+
 export interface ApiClient {
   health(): Promise<HealthResponse>;
   search(req: {
@@ -72,6 +95,7 @@ export interface ApiClient {
   }): Promise<SearchResponse>;
   composeStack(req: { useCase: string; budgetUsdc?: number; maxOfferings?: number }): Promise<ComposedStack>;
   registerWatch(req: RegisterWatchRequest): Promise<RegisterWatchResponse>;
+  agentReputation(req: AgentReputationRequest): Promise<AgentReputationResponse>;
 }
 
 export function createApiClient(
@@ -139,5 +163,10 @@ export function createApiClient(
       request<ComposedStack>("/composeStack", { method: "POST", body: JSON.stringify(req) }),
     registerWatch: (req) =>
       request<RegisterWatchResponse>("/watches", { method: "POST", body: JSON.stringify(req) }),
+    agentReputation: (req) =>
+      request<AgentReputationResponse>("/agentReputation", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
   };
 }

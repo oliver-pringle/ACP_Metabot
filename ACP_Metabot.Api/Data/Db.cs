@@ -38,11 +38,24 @@ public class Db
                 content_hash             TEXT    NOT NULL,
                 first_seen_at            TEXT    NOT NULL,
                 last_seen_at             TEXT    NOT NULL,
+                usage_count              INTEGER NOT NULL DEFAULT 0,
+                agent_job_count          INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(agent_address, offering_name)
             );
 
             CREATE INDEX IF NOT EXISTS ix_offerings_content_hash ON offerings(content_hash);
-            CREATE INDEX IF NOT EXISTS ix_offerings_last_seen   ON offerings(last_seen_at);
+            CREATE INDEX IF NOT EXISTS ix_offerings_last_seen    ON offerings(last_seen_at);
+            CREATE INDEX IF NOT EXISTS ix_offerings_agent        ON offerings(agent_address);
+
+            CREATE TABLE IF NOT EXISTS agent_reputation_snapshots (
+                snapshot_date    TEXT    NOT NULL,
+                offering_id      INTEGER NOT NULL,
+                usage_count      INTEGER NOT NULL,
+                agent_job_count  INTEGER NOT NULL,
+                PRIMARY KEY (snapshot_date, offering_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_repsnap_offering ON agent_reputation_snapshots(offering_id);
 
             CREATE TABLE IF NOT EXISTS offering_embeddings (
                 offering_id     INTEGER PRIMARY KEY,
@@ -82,5 +95,27 @@ public class Db
                 FOREIGN KEY (watch_id) REFERENCES watches(id) ON DELETE CASCADE
             );";
         await cmd.ExecuteNonQueryAsync();
+
+        // Idempotent column additions for databases created before reputation
+        // columns existed. SQLite has no `ADD COLUMN IF NOT EXISTS`, so each
+        // ALTER is run in isolation and "duplicate column name" errors are
+        // swallowed.
+        foreach (var alter in new[]
+        {
+            "ALTER TABLE offerings ADD COLUMN usage_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE offerings ADD COLUMN agent_job_count INTEGER NOT NULL DEFAULT 0",
+        })
+        {
+            try
+            {
+                await using var alterCmd = conn.CreateCommand();
+                alterCmd.CommandText = alter;
+                await alterCmd.ExecuteNonQueryAsync();
+            }
+            catch (SqliteException ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
+            {
+                // Already added on a prior boot. No action.
+            }
+        }
     }
 }

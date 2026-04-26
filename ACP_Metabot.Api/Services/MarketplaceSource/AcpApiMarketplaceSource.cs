@@ -129,7 +129,9 @@ public class AcpApiMarketplaceSource : IMarketplaceSource
             PriceUsdc = priceValue,
             PriceType = priceType,
             IsPrivate = false,
-            Chain = "base"
+            Chain = "base",
+            UsageCount = row.Skill?.UsageCount ?? 0,
+            AgentJobCount = row.Agent?.JobCount ?? 0
         };
     }
 

@@ -63,6 +63,7 @@ public class MarketplaceIndexerService : BackgroundService
         var source = scope.ServiceProvider.GetRequiredService<IMarketplaceSource>();
         var repo = scope.ServiceProvider.GetRequiredService<OfferingRepository>();
         var embedder = scope.ServiceProvider.GetRequiredService<VoyageEmbeddingProvider>();
+        var reputation = scope.ServiceProvider.GetRequiredService<ReputationService>();
 
         var fetched = await source.FetchAsync(ct);
         var nowUtc = DateTime.UtcNow;
@@ -90,7 +91,7 @@ public class MarketplaceIndexerService : BackgroundService
             var result = await repo.UpsertAsync(
                 dto.AgentAddress, agentName, offeringName, description,
                 schemaJson, dto.PriceUsdc, dto.PriceType, dto.IsPrivate, dto.Chain,
-                hash, nowUtc);
+                hash, dto.UsageCount, dto.AgentJobCount, nowUtc);
             if (result.IsNew) added++;
             else if (result.ContentChanged) updated++;
             else unchanged++;
@@ -100,6 +101,23 @@ public class MarketplaceIndexerService : BackgroundService
         LastFetchCount = fetched.Count;
         _logger.LogInformation("[indexer] fetch complete: total={Total} added={Added} updated={Updated} unchanged={Unchanged}",
             fetched.Count, added, updated, unchanged);
+
+        // Refresh reputation caches with the freshly-persisted corpus.
+        // Pull from DB (not the DTO list) so we have the assigned offering ids
+        // and any pre-existing rows we didn't see this fetch.
+        if (fetched.Count > 0)
+        {
+            var corpus = await repo.ListAllAsync();
+            reputation.RebuildFromCorpus(corpus);
+            _logger.LogInformation("[indexer] reputation cache rebuilt with {N} offerings", corpus.Count);
+
+            // Daily snapshot — once per UTC day. INSERT...SELECT is a no-op
+            // if today's snapshot already exists.
+            var today = nowUtc.ToString("yyyy-MM-dd");
+            var snapped = await repo.WriteSnapshotIfMissingAsync(today);
+            if (snapped > 0)
+                _logger.LogInformation("[indexer] reputation snapshot written for {Date}: {N} rows", today, snapped);
+        }
 
         // Embed any rows missing an embedding for the current model
         await EmbedPendingAsync(repo, embedder, ct);

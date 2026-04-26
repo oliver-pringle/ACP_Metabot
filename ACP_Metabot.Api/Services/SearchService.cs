@@ -7,13 +7,15 @@ public class SearchService
 {
     private readonly OfferingRepository _repo;
     private readonly VoyageEmbeddingProvider _embedder;
+    private readonly ReputationService _reputation;
     private readonly ILogger<SearchService> _logger;
 
     public SearchService(OfferingRepository repo, VoyageEmbeddingProvider embedder,
-        ILogger<SearchService> logger)
+        ReputationService reputation, ILogger<SearchService> logger)
     {
         _repo = repo;
         _embedder = embedder;
+        _reputation = reputation;
         _logger = logger;
     }
 
@@ -52,7 +54,8 @@ public class SearchService
                 PriceUsdc: s.O.PriceUsdc,
                 PriceType: s.O.PriceType,
                 Chain: s.O.Chain,
-                Score: Math.Round(s.Score, 4)))
+                Score: Math.Round(s.Score, 4),
+                Reputation: _reputation.BuildSearchSummary(s.O)))
             .ToArray();
     }
 

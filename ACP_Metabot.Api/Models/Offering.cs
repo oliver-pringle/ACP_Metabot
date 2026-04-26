@@ -13,4 +13,6 @@ public record Offering(
     string Chain,
     string ContentHash,
     DateTime FirstSeenAt,
-    DateTime LastSeenAt);
+    DateTime LastSeenAt,
+    long UsageCount,
+    long AgentJobCount);
