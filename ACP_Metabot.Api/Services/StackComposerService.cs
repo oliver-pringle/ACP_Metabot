@@ -59,7 +59,9 @@ Rules:
                 TotalPriceUsdc: 0);
         }
 
-        var candidates = await _search.SearchAsync(useCase, CandidatePoolSize, 0.0, double.PositiveInfinity, staleAfterDays: null, ct);
+        // Rerank ON for composeStack: Claude curates the final stack but a
+        // better-ordered candidate pool gives the LLM a head start.
+        var candidates = await _search.SearchAsync(useCase, CandidatePoolSize, 0.0, double.PositiveInfinity, staleAfterDays: null, rerank: true, ct);
         if (candidates.Count == 0)
         {
             return new ComposedStack(

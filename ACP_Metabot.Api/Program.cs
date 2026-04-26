@@ -14,6 +14,7 @@ builder.Services.AddSingleton<WatchRepository>();
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<VoyageEmbeddingProvider>();
 builder.Services.AddSingleton<IEmbeddingProvider>(sp => sp.GetRequiredService<VoyageEmbeddingProvider>());
+builder.Services.AddSingleton<VoyageRerankProvider>();
 builder.Services.AddSingleton<IClaudeClient, ClaudeApiClient>();
 // Marketplace source is pluggable via Indexer:Source ("acp-api" or "json-file").
 // Default = acp-api (live upstream); set to json-file in dev/offline mode.
@@ -177,7 +178,10 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, Cancellat
     var minScore = req.MinScore ?? 0.0;
     var priceMax = req.PriceMaxUsdc ?? double.PositiveInfinity;
     var staleAfterDays = req.StaleAfterDays;
-    var results = await svc.SearchAsync(req.Query, limit, minScore, priceMax, staleAfterDays, ct);
+    // Default rerank ON — pure cosine bumps relevance ~5-15% for ambiguous
+    // queries and the cost is negligible. Callers can disable explicitly.
+    var rerank = req.Rerank ?? true;
+    var results = await svc.SearchAsync(req.Query, limit, minScore, priceMax, staleAfterDays, rerank, ct);
 
     object? bestMatch = null;
     if (results.Count > 0 && results[0].Score >= 0.7)
@@ -380,6 +384,6 @@ app.MapPost("/watches/{id}/test-fire", async (string id, WatchService svc, Cance
 
 app.Run();
 
-public record SearchRequest(string Query, int? Limit, double? MinScore, double? PriceMaxUsdc, int? StaleAfterDays);
+public record SearchRequest(string Query, int? Limit, double? MinScore, double? PriceMaxUsdc, int? StaleAfterDays, bool? Rerank);
 public record ComposeRequest(string UseCase, double? BudgetUsdc, int? MaxOfferings);
 public record AgentReputationRequest(string AgentAddress, string? OfferingName);

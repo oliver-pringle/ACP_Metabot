@@ -7,8 +7,14 @@ public class SearchService
 {
     private readonly OfferingRepository _repo;
     private readonly VoyageEmbeddingProvider _embedder;
+    private readonly VoyageRerankProvider _reranker;
     private readonly ReputationService _reputation;
     private readonly ILogger<SearchService> _logger;
+
+    // Pool size for the rerank pass. The reranker is much more expensive
+    // per-doc than cosine, so we feed it a generous-but-bounded shortlist
+    // and let it pick the final top-`limit`.
+    private const int RerankPoolSize = 50;
 
     // Embedded-corpus cache. Refreshed at the end of each indexer cycle.
     // Reads are lock-free via Volatile.Read on an immutable list reference;
@@ -21,10 +27,12 @@ public class SearchService
     public int CorpusCount => Volatile.Read(ref _corpus)?.Count ?? 0;
 
     public SearchService(OfferingRepository repo, VoyageEmbeddingProvider embedder,
-        ReputationService reputation, ILogger<SearchService> logger)
+        VoyageRerankProvider reranker, ReputationService reputation,
+        ILogger<SearchService> logger)
     {
         _repo = repo;
         _embedder = embedder;
+        _reranker = reranker;
         _reputation = reputation;
         _logger = logger;
     }
@@ -39,7 +47,7 @@ public class SearchService
 
     public async Task<IReadOnlyList<OfferingMatch>> SearchAsync(
         string query, int limit, double minScore, double priceMaxUsdc,
-        int? staleAfterDays, CancellationToken ct)
+        int? staleAfterDays, bool rerank, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query))
             return Array.Empty<OfferingMatch>();
@@ -89,8 +97,32 @@ public class SearchService
             scored.Add((offering, cosine, blended, rep));
         }
 
-        return scored
-            .OrderByDescending(s => s.Blended)
+        var ordered = scored.OrderByDescending(s => s.Blended).ToList();
+
+        // Optional rerank pass: feed the top-K cosine candidates to Voyage's
+        // reranker for a more discerning final ordering. Falls back to pure
+        // cosine ordering on any failure so a Voyage outage doesn't take the
+        // search endpoint with it.
+        if (rerank && ordered.Count > 1)
+        {
+            var poolSize = Math.Min(RerankPoolSize, ordered.Count);
+            var pool = ordered.Take(poolSize).ToList();
+            try
+            {
+                var docs = pool.Select(s => BuildRerankDocument(s.O)).ToArray();
+                var sortedIndices = await _reranker.RerankAsync(query, docs, ct);
+                // Replace the head of `ordered` with the rerank-sorted pool;
+                // the long tail (>poolSize) keeps its cosine order.
+                var rerankedHead = sortedIndices.Select(i => pool[i]).ToList();
+                ordered = rerankedHead.Concat(ordered.Skip(poolSize)).ToList();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[search] rerank failed; falling back to cosine ordering");
+            }
+        }
+
+        return ordered
             .Take(limit)
             .Select(s => new OfferingMatch(
                 OfferingId: s.O.Id,
@@ -104,6 +136,13 @@ public class SearchService
                 Score: Math.Round(s.Cosine, 4),
                 Reputation: s.Rep))
             .ToArray();
+    }
+
+    // Mirrors MarketplaceIndexerService.BuildEmbeddingText so the reranker
+    // sees the same document representation we embedded.
+    private static string BuildRerankDocument(Offering o)
+    {
+        return $"Offering: {o.OfferingName}\nAgent: {o.AgentName}\nPrice: {o.PriceUsdc} USDC\nDescription: {o.Description}";
     }
 
     private static double CosineSimilarity(float[] a, float[] b)

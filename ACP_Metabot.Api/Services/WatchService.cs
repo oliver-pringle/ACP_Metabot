@@ -53,7 +53,7 @@ public class WatchService
         var minScore = req.MinScore ?? 0.0;
         var priceMax = req.PriceMaxUsdc ?? double.PositiveInfinity;
 
-        var initial = await _search.SearchAsync(req.Query, InitialMatchLimit, minScore, priceMax, staleAfterDays: null, ct);
+        var initial = await _search.SearchAsync(req.Query, InitialMatchLimit, minScore, priceMax, staleAfterDays: null, rerank: false, ct);
 
         var now = DateTime.UtcNow;
         var watch = new Watch(
@@ -141,7 +141,7 @@ public class WatchService
     {
         var minScore = w.MinScore ?? 0.0;
         var priceMax = w.PriceMaxUsdc ?? double.PositiveInfinity;
-        var results = await _search.SearchAsync(w.Query, InitialMatchLimit, minScore, priceMax, staleAfterDays: null, ct);
+        var results = await _search.SearchAsync(w.Query, InitialMatchLimit, minScore, priceMax, staleAfterDays: null, rerank: false, ct);
 
         var seen = await _repo.GetSeenIdsAsync(w.Id);
         var newMatches = results.Where(r => !seen.Contains(r.OfferingId)).ToList();
