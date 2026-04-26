@@ -27,7 +27,8 @@ SECURITY:
 
 Rules:
 - Only pick offerings from the candidate list. Never invent offering names or agent names.
-- Prefer cheaper offerings when two candidates are functionally equivalent.
+- Each candidate has a `reputation` block: `score` is 0-100 (log-scaled lifetime hire count), `offeringHires` is the offering's lifetime hires, `agentTotalJobs` is the agent's lifetime jobs across all their offerings. Prefer offerings with stronger reputation when two candidates are functionally equivalent — a battle-tested offering with hundreds of hires is much safer than one with zero. Reputation 0 doesn't disqualify, but call it out in the rationale (""new / unproven"") so the buyer knows.
+- Prefer cheaper offerings when two candidates are functionally equivalent and their reputations are similar.
 - Keep the stack as small as possible — no more than the maxOfferings the buyer specified.
 - If the candidates don't actually solve the use case, say so honestly in the rationale and return an empty stack.
 - Output JSON ONLY in this exact shape (no prose outside JSON, no markdown fences):
@@ -101,6 +102,14 @@ Rules:
             sb.AppendLine($"  priceUsdc: {c.PriceUsdc}");
             sb.AppendLine($"  description: <candidate-description>{SanitizeForPrompt(c.Description)}</candidate-description>");
             sb.AppendLine($"  similarity: {c.Score:0.000}");
+            if (c.Reputation is not null)
+            {
+                sb.AppendLine($"  reputation: score={c.Reputation.Score} offeringHires={c.Reputation.OfferingHires} agentTotalJobs={c.Reputation.AgentTotalJobs}");
+            }
+            else
+            {
+                sb.AppendLine("  reputation: (unknown — indexer warming up)");
+            }
         }
         return sb.ToString();
     }

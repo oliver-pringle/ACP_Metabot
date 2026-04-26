@@ -68,7 +68,10 @@ public class MarketplaceIndexerService : BackgroundService
         var fetched = await source.FetchAsync(ct);
         var nowUtc = DateTime.UtcNow;
 
-        int added = 0, updated = 0, unchanged = 0;
+        // Build the bulk upsert input list. All field truncation, schema
+        // serialisation, and hashing happens here so the repo layer just sees
+        // a clean list of canonical UpsertItems.
+        var items = new List<UpsertItem>(fetched.Count);
         foreach (var dto in fetched)
         {
             // Third-party agents can put anything in these fields. Truncate at
@@ -88,19 +91,18 @@ public class MarketplaceIndexerService : BackgroundService
 
             var hash = ContentHash(dto.AgentAddress, offeringName, description,
                 dto.PriceUsdc, dto.PriceType, dto.Chain, schemaJson);
-            var result = await repo.UpsertAsync(
+            items.Add(new UpsertItem(
                 dto.AgentAddress, agentName, offeringName, description,
                 schemaJson, dto.PriceUsdc, dto.PriceType, dto.IsPrivate, dto.Chain,
-                hash, dto.UsageCount, dto.AgentJobCount, nowUtc);
-            if (result.IsNew) added++;
-            else if (result.ContentChanged) updated++;
-            else unchanged++;
+                hash, dto.UsageCount, dto.AgentJobCount));
         }
+
+        var summary = await repo.UpsertManyAsync(items, nowUtc);
 
         LastFetchAt = nowUtc;
         LastFetchCount = fetched.Count;
         _logger.LogInformation("[indexer] fetch complete: total={Total} added={Added} updated={Updated} unchanged={Unchanged}",
-            fetched.Count, added, updated, unchanged);
+            fetched.Count, summary.Added, summary.Updated, summary.Unchanged);
 
         // Refresh reputation caches with the freshly-persisted corpus.
         // Pull from DB (not the DTO list) so we have the assigned offering ids

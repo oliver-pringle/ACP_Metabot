@@ -31,6 +31,7 @@ switch (indexerSource)
 }
 
 builder.Services.AddSingleton<ReputationService>();
+builder.Services.AddSingleton<DigestService>();
 builder.Services.AddSingleton<SearchService>();
 builder.Services.AddSingleton<StackComposerService>();
 builder.Services.AddSingleton<WebhookDeliveryService>();
@@ -81,6 +82,17 @@ builder.Services.AddRateLimiter(options =>
     // Reputation lookup is cheap (no embeddings, single DB query), so a
     // higher per-IP cap is fine.
     options.AddPolicy("public-reputation", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 60,
+                Window = TimeSpan.FromHours(1),
+                QueueLimit = 0
+            }));
+
+    // Digest is two indexed reads — same cost class as reputation.
+    options.AddPolicy("public-digest", ctx =>
         RateLimitPartition.GetFixedWindowLimiter(
             partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
             factory: _ => new FixedWindowRateLimiterOptions
@@ -207,14 +219,23 @@ async Task<IResult> HandleReputation(AgentReputationRequest req,
     }
 }
 
+async Task<IResult> HandleDigest(int? days, DigestService svc)
+{
+    var window = days is null ? 1 : Math.Clamp(days.Value, 1, 30);
+    var result = await svc.BuildAsync(window);
+    return Results.Ok(result);
+}
+
 app.MapPost("/search", HandleSearch);
 app.MapPost("/composeStack", HandleCompose);
 app.MapPost("/agentReputation", HandleReputation);
+app.MapGet("/digest", (int? days, DigestService svc) => HandleDigest(days, svc));
 
 // Public gateway — same logic, no X-API-Key, IP rate-limited.
 app.MapPost("/v1/search", HandleSearch).RequireRateLimiting("public-search");
 app.MapPost("/v1/composeStack", HandleCompose).RequireRateLimiting("public-compose");
 app.MapPost("/v1/agentReputation", HandleReputation).RequireRateLimiting("public-reputation");
+app.MapGet("/v1/digest", (int? days, DigestService svc) => HandleDigest(days, svc)).RequireRateLimiting("public-digest");
 
 app.MapGet("/index/stats", async (OfferingRepository repo, MarketplaceIndexerService idx,
     VoyageEmbeddingProvider emb) =>
