@@ -15,7 +15,7 @@ public class VoyageEmbeddingProvider : IEmbeddingProvider
     public VoyageEmbeddingProvider(IConfiguration config, IHttpClientFactory httpFactory,
         ILogger<VoyageEmbeddingProvider> logger)
     {
-        ModelId = config["Embeddings:Model"] ?? "voyage-3-large";
+        ModelId = config["Embeddings:Model"] ?? "voyage-finance-2";
         Dimension = config.GetValue<int?>("Embeddings:Dimension") ?? DimensionForModel(ModelId);
         _apiKey = Environment.GetEnvironmentVariable("VOYAGE_API_KEY")
             ?? throw new InvalidOperationException("VOYAGE_API_KEY not set");
@@ -80,6 +80,7 @@ public class VoyageEmbeddingProvider : IEmbeddingProvider
         "voyage-3-large" => 1024,
         "voyage-3" => 1024,
         "voyage-3-lite" => 512,
+        "voyage-finance-2" => 1024,
         _ => 1024
     };
 

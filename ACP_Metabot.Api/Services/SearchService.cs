@@ -9,6 +9,7 @@ public class SearchService
     private readonly VoyageEmbeddingProvider _embedder;
     private readonly VoyageRerankProvider _reranker;
     private readonly ReputationService _reputation;
+    private readonly CategoryService _categories;
     private readonly ILogger<SearchService> _logger;
 
     // Pool size for the rerank pass. The reranker is much more expensive
@@ -16,11 +17,10 @@ public class SearchService
     // and let it pick the final top-`limit`.
     private const int RerankPoolSize = 50;
 
-    // Embedded-corpus cache. Refreshed at the end of each indexer cycle.
-    // Reads are lock-free via Volatile.Read on an immutable list reference;
-    // refresh swaps in a freshly-built list atomically. ~140 MB at 34K rows
-    // × 1024 floats × 4 bytes — fine on the 2 GB droplet.
-    private List<(Offering Offering, float[] Embedding)>? _corpus;
+    // Embedded-corpus cache. Each row is pre-tagged with its nearest
+    // category at refresh time so search responses can include `category`
+    // without an extra cosine pass per request.
+    private List<(Offering Offering, float[] Embedding, string? Category)>? _corpus;
     private DateTime _corpusRefreshedAtUtc;
 
     public DateTime CorpusRefreshedAtUtc => _corpusRefreshedAtUtc;
@@ -28,21 +28,25 @@ public class SearchService
 
     public SearchService(OfferingRepository repo, VoyageEmbeddingProvider embedder,
         VoyageRerankProvider reranker, ReputationService reputation,
-        ILogger<SearchService> logger)
+        CategoryService categories, ILogger<SearchService> logger)
     {
         _repo = repo;
         _embedder = embedder;
         _reranker = reranker;
         _reputation = reputation;
+        _categories = categories;
         _logger = logger;
     }
 
     public async Task RefreshCorpusAsync()
     {
         var fresh = await _repo.ListAllWithEmbeddingsAsync(_embedder.ModelId);
-        Volatile.Write(ref _corpus, fresh);
+        var tagged = fresh
+            .Select(t => (t.Offering, t.Embedding, _categories.Classify(t.Embedding)))
+            .ToList();
+        Volatile.Write(ref _corpus, tagged);
         _corpusRefreshedAtUtc = DateTime.UtcNow;
-        _logger.LogInformation("[search] corpus cache rebuilt with {N} embedded offerings", fresh.Count);
+        _logger.LogInformation("[search] corpus cache rebuilt with {N} embedded offerings", tagged.Count);
     }
 
     public async Task<IReadOnlyList<OfferingMatch>> SearchAsync(
@@ -57,8 +61,10 @@ public class SearchService
         if (corpus is null)
         {
             // Cold start — first request before the indexer has finished a
-            // cycle. Fall back to a direct read so the request still succeeds.
-            corpus = await _repo.ListAllWithEmbeddingsAsync(_embedder.ModelId);
+            // cycle. Fall back to a direct read so the request still succeeds;
+            // category tagging is null for this slow path.
+            var raw = await _repo.ListAllWithEmbeddingsAsync(_embedder.ModelId);
+            corpus = raw.Select(t => (t.Offering, t.Embedding, (string?)null)).ToList();
         }
         if (corpus.Count == 0)
         {
@@ -83,8 +89,8 @@ public class SearchService
         const double CosineWeight = 0.7;
         const double ReputationWeight = 0.3;
 
-        var scored = new List<(Offering O, double Cosine, double Blended, ReputationSummary? Rep)>(corpus.Count);
-        foreach (var (offering, embedding) in corpus)
+        var scored = new List<(Offering O, double Cosine, double Blended, ReputationSummary? Rep, string? Category)>(corpus.Count);
+        foreach (var (offering, embedding, category) in corpus)
         {
             if (offering.PriceUsdc > priceMaxUsdc) continue;
             if (freshIds is not null && !freshIds.Contains(offering.Id)) continue;
@@ -94,7 +100,7 @@ public class SearchService
             var blended = rep is null
                 ? cosine
                 : CosineWeight * cosine + ReputationWeight * (rep.Score / 100.0);
-            scored.Add((offering, cosine, blended, rep));
+            scored.Add((offering, cosine, blended, rep, category));
         }
 
         var ordered = scored.OrderByDescending(s => s.Blended).ToList();
@@ -134,7 +140,8 @@ public class SearchService
                 PriceType: s.O.PriceType,
                 Chain: s.O.Chain,
                 Score: Math.Round(s.Cosine, 4),
-                Reputation: s.Rep))
+                Reputation: s.Rep,
+                Category: s.Category))
             .ToArray();
     }
 

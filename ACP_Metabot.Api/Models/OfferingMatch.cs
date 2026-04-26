@@ -13,4 +13,6 @@ public record OfferingMatch(
     string Chain,
     double Score,
     [property: JsonPropertyName("reputation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        ReputationSummary? Reputation = null);
+        ReputationSummary? Reputation = null,
+    [property: JsonPropertyName("category"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        string? Category = null);

@@ -315,7 +315,7 @@ public class OfferingRepository
         return MapOffering(reader);
     }
 
-    public async Task<List<Offering>> ListNeedingEmbeddingAsync(int limit, int dimension)
+    public async Task<List<Offering>> ListNeedingEmbeddingAsync(int limit, int dimension, string model)
     {
         await using var conn = _db.OpenConnection();
         await using var cmd = conn.CreateCommand();
@@ -326,10 +326,13 @@ public class OfferingRepository
                    o.usage_count, o.agent_job_count
             FROM offerings o
             LEFT JOIN offering_embeddings e ON e.offering_id = o.id
-            WHERE e.offering_id IS NULL OR e.dimension != $d
+            WHERE e.offering_id IS NULL
+               OR e.dimension != $d
+               OR e.model != $m
             ORDER BY o.id ASC
             LIMIT $lim;";
         cmd.Parameters.AddWithValue("$d", dimension);
+        cmd.Parameters.AddWithValue("$m", model);
         cmd.Parameters.AddWithValue("$lim", limit);
         await using var reader = await cmd.ExecuteReaderAsync();
         var result = new List<Offering>();

@@ -33,6 +33,7 @@ switch (indexerSource)
 }
 
 builder.Services.AddSingleton<ReputationService>();
+builder.Services.AddSingleton<CategoryService>();
 builder.Services.AddSingleton<DigestService>();
 builder.Services.AddSingleton<SearchService>();
 builder.Services.AddSingleton<StackComposerService>();
@@ -309,6 +310,7 @@ app.MapGet("/digest", (int? days, DigestService svc) => HandleDigest(days, svc))
 app.MapGet("/agent/{address}", (string address,
     OfferingRepository repo, ReputationService reputation)
     => HandleBrowseAgent(address, repo, reputation));
+app.MapGet("/categories", (CategoryService svc) => Results.Ok(new { categories = svc.Categories }));
 
 // Public gateway — same logic, no X-API-Key, IP rate-limited.
 app.MapPost("/v1/search", HandleSearch).RequireRateLimiting("public-search");
@@ -318,6 +320,8 @@ app.MapGet("/v1/digest", (int? days, DigestService svc) => HandleDigest(days, sv
 app.MapGet("/v1/agent/{address}", (string address,
     OfferingRepository repo, ReputationService reputation)
     => HandleBrowseAgent(address, repo, reputation)).RequireRateLimiting("public-browse-agent");
+// Static list — no per-IP limit; CDN-cacheable in front of Caddy if abuse appears.
+app.MapGet("/v1/categories", (CategoryService svc) => Results.Ok(new { categories = svc.Categories }));
 
 app.MapGet("/index/stats", async (OfferingRepository repo, MarketplaceIndexerService idx,
     VoyageEmbeddingProvider emb) =>

@@ -1,0 +1,22 @@
+[
+  { "name": "DEX Swap", "description": "Token swaps and trade execution on decentralized exchanges (Uniswap, 0x, Aerodrome, Jupiter, etc.). Same-chain spot swaps." },
+  { "name": "Perpetual Futures", "description": "Open, close, and manage perpetual futures positions on Hyperliquid, GMX, dYdX, and similar perp DEXs." },
+  { "name": "Wallet Intelligence", "description": "Wallet behavior analysis, transaction history, holder profiling, on-chain risk scoring, behavior flags, counterparty analysis." },
+  { "name": "Token Risk Detection", "description": "Rugpull detection, honeypot detection, contract safety verification, scam detection, malicious token flagging." },
+  { "name": "Yield Analysis", "description": "Yield farming, staking returns, lending rates, liquid staking, APY tracking, yield optimization." },
+  { "name": "Technical Analysis", "description": "Chart analysis, technical indicators, AI-powered trade suggestions, signals, multi-timeframe analysis, sentiment." },
+  { "name": "Portfolio Management", "description": "Portfolio tracking, balance summaries, P&L reporting, asset allocation across multiple wallets." },
+  { "name": "Market Data", "description": "Token prices, market cap, trending assets, liquidity, volume, OHLC data, ecosystem-wide metrics." },
+  { "name": "NFT Analytics", "description": "NFT collection analysis, floor prices, rarity ranking, holder data, mint activity." },
+  { "name": "Bridging", "description": "Cross-chain asset bridges and transfers between L1s and L2s, bridge route optimization." },
+  { "name": "DCA and Limit Orders", "description": "Dollar-cost averaging strategies, limit orders, scheduled trades, automated recurring buys." },
+  { "name": "Memecoin Discovery", "description": "Memecoin discovery, launchpad analysis, viral token tracking, early-stage token detection." },
+  { "name": "Strategy Backtesting", "description": "Backtest trading strategies on historical data, performance simulation, returns analysis." },
+  { "name": "Whale Tracking", "description": "Track large wallets, whale alerts, on-chain whale activity monitoring, smart-money following." },
+  { "name": "Stablecoin Analytics", "description": "Stablecoin reserve analysis, peg monitoring, depeg risk assessment, supply tracking." },
+  { "name": "Smart Contract Audit", "description": "Smart contract analysis, vulnerability scanning, audit reports, code-level security review." },
+  { "name": "Liquidity and AMM", "description": "Liquidity pool analysis, AMM dynamics, LP position management, impermanent loss." },
+  { "name": "Alerts and Monitoring", "description": "On-chain event alerts, price alerts, transaction notifications, webhook delivery." },
+  { "name": "Trading Bots", "description": "Automated trading agents, copy trading, MEV-protected execution, order routing." },
+  { "name": "Research and Discovery", "description": "Token research, project due diligence, market research, alpha discovery, ecosystem reports." }
+]
