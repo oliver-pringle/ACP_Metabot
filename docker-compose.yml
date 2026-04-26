@@ -14,7 +14,7 @@ services:
       - Indexer__ApiBaseUrl=https://acpx.virtuals.io/
       - Indexer__ApiPageSize=100
       - Indexer__ApiRequestDelayMs=50
-      - Indexer__IntervalSeconds=600
+      - Indexer__IntervalSeconds=120
       - Embeddings__Provider=voyage
       - Embeddings__Model=voyage-3-large
       - Claude__Model=claude-sonnet-4-6
