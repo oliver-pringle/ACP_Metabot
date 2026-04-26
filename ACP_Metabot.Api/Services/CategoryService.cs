@@ -79,9 +79,13 @@ public class CategoryService
     {
         // Search a few likely paths so this works in dev (next to the project)
         // and prod (next to the published assemblies in the docker image).
+        // Linux is case-sensitive; the source folder is `Data/seed` so check
+        // both casings to keep dev (Windows) and prod (Linux) happy.
         var candidates = new[]
         {
+            Path.Combine(AppContext.BaseDirectory, "Data", "seed", "categories.json"),
             Path.Combine(AppContext.BaseDirectory, "data", "seed", "categories.json"),
+            Path.Combine(Directory.GetCurrentDirectory(), "Data", "seed", "categories.json"),
             Path.Combine(Directory.GetCurrentDirectory(), "data", "seed", "categories.json"),
         };
         foreach (var path in candidates)
