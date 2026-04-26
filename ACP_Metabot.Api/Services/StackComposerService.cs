@@ -51,7 +51,7 @@ Rules:
                 TotalPriceUsdc: 0);
         }
 
-        var candidates = await _search.SearchAsync(useCase, CandidatePoolSize, 0.0, ct);
+        var candidates = await _search.SearchAsync(useCase, CandidatePoolSize, 0.0, double.PositiveInfinity, ct);
         if (candidates.Count == 0)
         {
             return new ComposedStack(

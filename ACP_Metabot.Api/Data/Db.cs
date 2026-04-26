@@ -51,6 +51,35 @@ public class Db
                 embedding_blob  BLOB    NOT NULL,
                 embedded_at     TEXT    NOT NULL,
                 FOREIGN KEY (offering_id) REFERENCES offerings(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS watches (
+                id                            TEXT    PRIMARY KEY,
+                job_id                        INTEGER NOT NULL UNIQUE,
+                buyer_address                 TEXT    NOT NULL,
+                query                         TEXT    NOT NULL,
+                webhook_url                   TEXT    NOT NULL,
+                duration_days                 INTEGER NOT NULL,
+                interval_hours                INTEGER NOT NULL,
+                min_score                     REAL,
+                price_max_usdc                REAL,
+                max_alerts                    INTEGER NOT NULL,
+                alerts_delivered              INTEGER NOT NULL DEFAULT 0,
+                webhook_consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+                status                        TEXT    NOT NULL DEFAULT 'active',
+                created_at                    TEXT    NOT NULL,
+                expires_at                    TEXT    NOT NULL,
+                last_polled_at                TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_watches_status_polled ON watches(status, last_polled_at);
+
+            CREATE TABLE IF NOT EXISTS watch_seen (
+                watch_id        TEXT    NOT NULL,
+                offering_id     INTEGER NOT NULL,
+                first_seen_at   TEXT    NOT NULL,
+                PRIMARY KEY (watch_id, offering_id),
+                FOREIGN KEY (watch_id) REFERENCES watches(id) ON DELETE CASCADE
             );";
         await cmd.ExecuteNonQueryAsync();
     }

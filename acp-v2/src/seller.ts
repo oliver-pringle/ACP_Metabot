@@ -102,7 +102,7 @@ async function main() {
       console.warn(`[seller] job.funded without stashed requirement, jobId=${session.jobId}`);
       return;
     }
-    const outcome = await route(stash.offeringName, stash.requirement, { client });
+    const outcome = await route(stash.offeringName, stash.requirement, { client, session });
     if (!outcome.ok) {
       await session.sendMessage(`execution failed: ${outcome.reason}`);
       return;

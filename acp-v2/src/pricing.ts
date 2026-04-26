@@ -6,11 +6,12 @@ export interface Price {
 }
 
 const PRICE_USDC: Record<string, number> = {
-  search: 0.05,
-  composeStack: 0.20,
+  search: 0.01,
+  composeStack: 0.50,
+  watchOffering: 0.50,
 };
 
-const DEFAULT_PRICE_USDC = 0.05;
+const DEFAULT_PRICE_USDC = 0.01;
 
 export function priceFor(offeringName: string): Price {
   const amount = PRICE_USDC[offeringName] ?? DEFAULT_PRICE_USDC;

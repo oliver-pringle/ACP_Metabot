@@ -6,6 +6,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton<Db>();
 builder.Services.AddSingleton<OfferingRepository>();
+builder.Services.AddSingleton<WatchRepository>();
 
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<VoyageEmbeddingProvider>();
@@ -29,9 +30,12 @@ switch (indexerSource)
 
 builder.Services.AddSingleton<SearchService>();
 builder.Services.AddSingleton<StackComposerService>();
+builder.Services.AddSingleton<WebhookDeliveryService>();
+builder.Services.AddSingleton<WatchService>();
 
 builder.Services.AddSingleton<MarketplaceIndexerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MarketplaceIndexerService>());
+builder.Services.AddHostedService<WatchPollerBackgroundService>();
 
 builder.Services.AddOpenApi();
 
@@ -62,8 +66,22 @@ app.MapPost("/search", async (SearchRequest req, SearchService svc, Cancellation
         return Results.BadRequest(new { error = "query is required" });
     var limit = req.Limit is null ? 10 : Math.Clamp(req.Limit.Value, 1, 50);
     var minScore = req.MinScore ?? 0.0;
-    var results = await svc.SearchAsync(req.Query, limit, minScore, ct);
-    return Results.Ok(new { query = req.Query, count = results.Count, results });
+    var priceMax = req.PriceMaxUsdc ?? double.PositiveInfinity;
+    var results = await svc.SearchAsync(req.Query, limit, minScore, priceMax, ct);
+
+    object? bestMatch = null;
+    if (results.Count > 0 && results[0].Score >= 0.7)
+    {
+        var top = results[0];
+        bestMatch = new
+        {
+            agentAddress = top.AgentAddress,
+            offeringName = top.OfferingName,
+            score = top.Score
+        };
+    }
+
+    return Results.Ok(new { query = req.Query, count = results.Count, results, bestMatch });
 });
 
 app.MapPost("/composeStack", async (ComposeRequest req, StackComposerService svc, CancellationToken ct) =>
@@ -98,7 +116,47 @@ app.MapPost("/index/refresh", async (MarketplaceIndexerService idx, Cancellation
     return Results.Ok(new { ok = true });
 });
 
+app.MapPost("/watches", async (RegisterWatchRequest req, WatchService svc, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Query))
+        return Results.BadRequest(new { error = "query is required" });
+    if (req.JobId <= 0)
+        return Results.BadRequest(new { error = "jobId is required" });
+    if (string.IsNullOrWhiteSpace(req.BuyerAddress))
+        return Results.BadRequest(new { error = "buyerAddress is required" });
+
+    var urlCheck = await WebhookUrlValidator.ValidateAsync(req.WebhookUrl, ct);
+    if (!urlCheck.Ok)
+        return Results.BadRequest(new { error = urlCheck.Reason });
+
+    var result = await svc.RegisterWatchAsync(req, ct);
+    return Results.Ok(new
+    {
+        watchId = result.WatchId,
+        expiresAt = result.ExpiresAt.ToString("O"),
+        intervalHours = result.IntervalHours,
+        maxAlerts = result.MaxAlerts,
+        initialMatches = result.InitialMatches
+    });
+});
+
+// Operator-only: read a watch's state for debugging.
+app.MapGet("/watches/{id}", async (string id, WatchRepository repo) =>
+{
+    var w = await repo.GetByIdAsync(id);
+    return w is null ? Results.NotFound() : Results.Ok(w);
+});
+
+// Operator-only: clear watch_seen and force an immediate poll. Useful for
+// verifying webhook delivery without waiting for a genuinely new offering.
+app.MapPost("/watches/{id}/test-fire", async (string id, WatchService svc, CancellationToken ct) =>
+{
+    var fired = await svc.TestFireAsync(id, ct);
+    if (fired is null) return Results.NotFound();
+    return Results.Ok(new { watchId = id, fired = fired.Value });
+});
+
 app.Run();
 
-public record SearchRequest(string Query, int? Limit, double? MinScore);
+public record SearchRequest(string Query, int? Limit, double? MinScore, double? PriceMaxUsdc);
 public record ComposeRequest(string UseCase, double? BudgetUsdc, int? MaxOfferings);

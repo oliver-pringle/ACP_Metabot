@@ -10,10 +10,17 @@ export interface OfferingMatch {
   score: number;
 }
 
+export interface BestMatch {
+  agentAddress: string;
+  offeringName: string;
+  score: number;
+}
+
 export interface SearchResponse {
   query: string;
   count: number;
   results: OfferingMatch[];
+  bestMatch: BestMatch | null;
 }
 
 export interface StackEntry {
@@ -35,36 +42,88 @@ export interface HealthResponse {
   time: string;
 }
 
+export interface RegisterWatchRequest {
+  jobId: number;
+  buyerAddress: string;
+  query: string;
+  webhookUrl: string;
+  durationDays?: number;
+  intervalHours?: number;
+  minScore?: number;
+  priceMaxUsdc?: number;
+  maxAlerts?: number;
+}
+
+export interface RegisterWatchResponse {
+  watchId: string;
+  expiresAt: string;
+  intervalHours: number;
+  maxAlerts: number;
+  initialMatches: OfferingMatch[];
+}
+
 export interface ApiClient {
   health(): Promise<HealthResponse>;
-  search(req: { query: string; limit?: number; minScore?: number }): Promise<SearchResponse>;
+  search(req: {
+    query: string;
+    limit?: number;
+    minScore?: number;
+    priceMaxUsdc?: number;
+  }): Promise<SearchResponse>;
   composeStack(req: { useCase: string; budgetUsdc?: number; maxOfferings?: number }): Promise<ComposedStack>;
+  registerWatch(req: RegisterWatchRequest): Promise<RegisterWatchResponse>;
 }
 
 export function createApiClient(baseUrl: string, timeoutMs = 60_000): ApiClient {
+  // Retry policy:
+  //   - 5xx and network errors → retry up to 2 times (3 attempts total) with
+  //     1s and 4s backoff. Matters most for /watches because the buyer has
+  //     already been funded by the time it runs.
+  //   - 4xx errors propagate immediately — they signal a deliberate rejection
+  //     (e.g. SSRF guard) and retrying would only burn time.
+  const retryDelaysMs = [1000, 4000];
+
   async function request<T>(
     path: string,
     init?: RequestInit & { method?: string }
   ): Promise<T> {
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), timeoutMs);
-    try {
-      const res = await fetch(`${baseUrl}${path}`, {
-        ...init,
-        signal: ctl.signal,
-        headers: {
-          "Content-Type": "application/json",
-          ...(init?.headers ?? {}),
-        },
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`acp-metabot-api ${res.status}: ${text}`);
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, retryDelaysMs[attempt - 1]));
       }
-      return (await res.json()) as T;
-    } finally {
-      clearTimeout(timer);
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), timeoutMs);
+      try {
+        const res = await fetch(`${baseUrl}${path}`, {
+          ...init,
+          signal: ctl.signal,
+          headers: {
+            "Content-Type": "application/json",
+            ...(init?.headers ?? {}),
+          },
+        });
+        if (res.ok) return (await res.json()) as T;
+
+        const text = await res.text();
+        const err = new Error(`acp-metabot-api ${res.status}: ${text}`);
+        if (res.status >= 400 && res.status < 500) {
+          // Client error — do not retry.
+          throw err;
+        }
+        lastError = err;
+      } catch (err) {
+        // AbortError, network errors, JSON parse errors → retryable.
+        // 4xx Errors thrown above are also caught here, so re-throw them.
+        if (err instanceof Error && /^acp-metabot-api 4\d\d:/.test(err.message)) {
+          throw err;
+        }
+        lastError = err;
+      } finally {
+        clearTimeout(timer);
+      }
     }
+    throw lastError ?? new Error("acp-metabot-api: request failed after retries");
   }
 
   return {
@@ -73,5 +132,7 @@ export function createApiClient(baseUrl: string, timeoutMs = 60_000): ApiClient 
       request<SearchResponse>("/search", { method: "POST", body: JSON.stringify(req) }),
     composeStack: (req) =>
       request<ComposedStack>("/composeStack", { method: "POST", body: JSON.stringify(req) }),
+    registerWatch: (req) =>
+      request<RegisterWatchResponse>("/watches", { method: "POST", body: JSON.stringify(req) }),
   };
 }

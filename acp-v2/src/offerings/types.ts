@@ -1,8 +1,10 @@
 import type { ValidationResult } from "../validators.js";
 import type { ApiClient } from "../apiClient.js";
+import type { JobSession } from "@virtuals-protocol/acp-node-v2";
 
 export interface OfferingContext {
   client: ApiClient;
+  session: JobSession;
 }
 
 export interface Offering {

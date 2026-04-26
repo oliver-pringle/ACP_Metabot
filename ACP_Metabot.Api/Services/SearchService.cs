@@ -18,7 +18,7 @@ public class SearchService
     }
 
     public async Task<IReadOnlyList<OfferingMatch>> SearchAsync(
-        string query, int limit, double minScore, CancellationToken ct)
+        string query, int limit, double minScore, double priceMaxUsdc, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query))
             return Array.Empty<OfferingMatch>();
@@ -35,6 +35,7 @@ public class SearchService
         var scored = new List<(Offering O, double Score)>(corpus.Count);
         foreach (var (offering, embedding) in corpus)
         {
+            if (offering.PriceUsdc > priceMaxUsdc) continue;
             var score = CosineSimilarity(queryEmb, embedding);
             if (score >= minScore) scored.Add((offering, score));
         }
