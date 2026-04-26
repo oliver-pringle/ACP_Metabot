@@ -65,15 +65,19 @@ async function main() {
   async function handleRequirement(session: JobSession, entry: JobRoomEntry) {
     if (entry.kind !== "message") return;
 
-    let parsed: { name?: string; requirement?: Record<string, unknown> };
+    let requirement: Record<string, unknown>;
     try {
-      parsed = JSON.parse(entry.content);
+      requirement = JSON.parse(entry.content);
     } catch {
       await session.sendMessage("invalid requirement payload");
       return;
     }
-    const offeringName = parsed.name ?? "";
-    const requirement = parsed.requirement ?? {};
+
+    // Offering name lives on the on-chain job description, not in the message body.
+    // The SDK's createJobFromOffering sends the raw requirement payload as the "requirement"
+    // message and stores offering.name in AcpJob.description.
+    const job = session.job ?? (await session.fetchJob());
+    const offeringName = job.description;
 
     const offering = getOffering(offeringName);
     if (!offering) {
