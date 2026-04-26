@@ -1,0 +1,4 @@
+# Shell scripts must keep LF line endings even when checked out on Windows,
+# otherwise the Linux droplet sees a `\r` after `#!/usr/bin/env bash` and
+# refuses to execute.
+*.sh   text eol=lf

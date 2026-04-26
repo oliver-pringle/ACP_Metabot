@@ -1,5 +1,6 @@
 using System.Threading.RateLimiting;
 using ACP_Metabot.Api.Data;
+using ACP_Metabot.Api.Models;
 using ACP_Metabot.Api.Services;
 using ACP_Metabot.Api.Services.MarketplaceSource;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -93,6 +94,17 @@ builder.Services.AddRateLimiter(options =>
 
     // Digest is two indexed reads — same cost class as reputation.
     options.AddPolicy("public-digest", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 60,
+                Window = TimeSpan.FromHours(1),
+                QueueLimit = 0
+            }));
+
+    // Agent browse — single ListByAgent query + reputation map. Cheap.
+    options.AddPolicy("public-browse-agent", ctx =>
         RateLimitPartition.GetFixedWindowLimiter(
             partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
             factory: _ => new FixedWindowRateLimiterOptions
@@ -226,16 +238,82 @@ async Task<IResult> HandleDigest(int? days, DigestService svc)
     return Results.Ok(result);
 }
 
+async Task<IResult> HandleBrowseAgent(string address,
+    OfferingRepository repo, ReputationService reputation)
+{
+    if (string.IsNullOrWhiteSpace(address))
+        return Results.BadRequest(new { error = "agentAddress is required" });
+
+    if (!reputation.IsReady)
+        return Results.Json(
+            new { error = "reputation unavailable, indexer warming up" },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+
+    var addr = address.Trim().ToLowerInvariant();
+    var offerings = await repo.ListByAgentAsync(addr);
+    if (offerings.Count == 0)
+        return Results.NotFound(new { error = "agent not found" });
+
+    var rep = reputation.Build(offerings, offeringName: null);
+
+    var browseOfferings = offerings
+        .OrderByDescending(o => o.UsageCount)
+        .Select(o =>
+        {
+            System.Text.Json.JsonElement? schema = null;
+            if (!string.IsNullOrEmpty(o.RequirementSchemaJson))
+            {
+                try
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(o.RequirementSchemaJson);
+                    schema = doc.RootElement.Clone();
+                }
+                catch
+                {
+                    // Upstream schema may be malformed — surface it as null
+                    // rather than failing the whole browse call.
+                }
+            }
+            return new AgentBrowseOffering(
+                OfferingId: o.Id,
+                OfferingName: o.OfferingName,
+                Description: o.Description,
+                PriceUsdc: o.PriceUsdc,
+                PriceType: o.PriceType,
+                Chain: o.Chain,
+                IsPrivate: o.IsPrivate,
+                RequirementSchema: schema,
+                FirstSeenAt: o.FirstSeenAt.ToString("O"),
+                LastSeenAt: o.LastSeenAt.ToString("O"),
+                Reputation: reputation.BuildSearchSummary(o));
+        })
+        .ToArray();
+
+    var result = new AgentBrowseResult(
+        AgentAddress: addr,
+        AgentName: offerings[0].AgentName,
+        Reputation: rep,
+        Offerings: browseOfferings);
+
+    return Results.Ok(result);
+}
+
 app.MapPost("/search", HandleSearch);
 app.MapPost("/composeStack", HandleCompose);
 app.MapPost("/agentReputation", HandleReputation);
 app.MapGet("/digest", (int? days, DigestService svc) => HandleDigest(days, svc));
+app.MapGet("/agent/{address}", (string address,
+    OfferingRepository repo, ReputationService reputation)
+    => HandleBrowseAgent(address, repo, reputation));
 
 // Public gateway — same logic, no X-API-Key, IP rate-limited.
 app.MapPost("/v1/search", HandleSearch).RequireRateLimiting("public-search");
 app.MapPost("/v1/composeStack", HandleCompose).RequireRateLimiting("public-compose");
 app.MapPost("/v1/agentReputation", HandleReputation).RequireRateLimiting("public-reputation");
 app.MapGet("/v1/digest", (int? days, DigestService svc) => HandleDigest(days, svc)).RequireRateLimiting("public-digest");
+app.MapGet("/v1/agent/{address}", (string address,
+    OfferingRepository repo, ReputationService reputation)
+    => HandleBrowseAgent(address, repo, reputation)).RequireRateLimiting("public-browse-agent");
 
 app.MapGet("/index/stats", async (OfferingRepository repo, MarketplaceIndexerService idx,
     VoyageEmbeddingProvider emb) =>

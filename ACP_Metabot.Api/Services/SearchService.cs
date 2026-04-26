@@ -10,6 +10,16 @@ public class SearchService
     private readonly ReputationService _reputation;
     private readonly ILogger<SearchService> _logger;
 
+    // Embedded-corpus cache. Refreshed at the end of each indexer cycle.
+    // Reads are lock-free via Volatile.Read on an immutable list reference;
+    // refresh swaps in a freshly-built list atomically. ~140 MB at 34K rows
+    // × 1024 floats × 4 bytes — fine on the 2 GB droplet.
+    private List<(Offering Offering, float[] Embedding)>? _corpus;
+    private DateTime _corpusRefreshedAtUtc;
+
+    public DateTime CorpusRefreshedAtUtc => _corpusRefreshedAtUtc;
+    public int CorpusCount => Volatile.Read(ref _corpus)?.Count ?? 0;
+
     public SearchService(OfferingRepository repo, VoyageEmbeddingProvider embedder,
         ReputationService reputation, ILogger<SearchService> logger)
     {
@@ -17,6 +27,14 @@ public class SearchService
         _embedder = embedder;
         _reputation = reputation;
         _logger = logger;
+    }
+
+    public async Task RefreshCorpusAsync()
+    {
+        var fresh = await _repo.ListAllWithEmbeddingsAsync(_embedder.ModelId);
+        Volatile.Write(ref _corpus, fresh);
+        _corpusRefreshedAtUtc = DateTime.UtcNow;
+        _logger.LogInformation("[search] corpus cache rebuilt with {N} embedded offerings", fresh.Count);
     }
 
     public async Task<IReadOnlyList<OfferingMatch>> SearchAsync(
@@ -27,7 +45,13 @@ public class SearchService
             return Array.Empty<OfferingMatch>();
 
         var queryEmb = await _embedder.EmbedQueryAsync(query, ct);
-        var corpus = await _repo.ListAllWithEmbeddingsAsync(_embedder.ModelId);
+        var corpus = Volatile.Read(ref _corpus);
+        if (corpus is null)
+        {
+            // Cold start — first request before the indexer has finished a
+            // cycle. Fall back to a direct read so the request still succeeds.
+            corpus = await _repo.ListAllWithEmbeddingsAsync(_embedder.ModelId);
+        }
         if (corpus.Count == 0)
         {
             _logger.LogWarning("[search] corpus is empty — has the indexer run yet?");

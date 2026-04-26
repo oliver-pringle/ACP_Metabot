@@ -64,6 +64,7 @@ public class MarketplaceIndexerService : BackgroundService
         var repo = scope.ServiceProvider.GetRequiredService<OfferingRepository>();
         var embedder = scope.ServiceProvider.GetRequiredService<VoyageEmbeddingProvider>();
         var reputation = scope.ServiceProvider.GetRequiredService<ReputationService>();
+        var search = scope.ServiceProvider.GetRequiredService<SearchService>();
 
         var fetched = await source.FetchAsync(ct);
         var nowUtc = DateTime.UtcNow;
@@ -123,6 +124,10 @@ public class MarketplaceIndexerService : BackgroundService
 
         // Embed any rows missing an embedding for the current model
         await EmbedPendingAsync(repo, embedder, ct);
+
+        // Rebuild the search corpus cache last so it picks up rows that were
+        // freshly embedded in this cycle.
+        await search.RefreshCorpusAsync();
     }
 
     private async Task EmbedPendingAsync(OfferingRepository repo, VoyageEmbeddingProvider embedder, CancellationToken ct)
