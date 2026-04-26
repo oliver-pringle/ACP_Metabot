@@ -57,6 +57,38 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  # Public HTTPS gateway. Terminates TLS via Let's Encrypt, reverse-proxies to
+  # the C# API's /v1/* endpoints (rate-limited, no X-API-Key). Set
+  # ACP_METABOT_DOMAIN=api.your-domain.tld in the root .env to activate;
+  # without it Caddy falls back to a localhost cert and is silent.
+  acp-metabot-caddy:
+    image: caddy:2-alpine
+    container_name: acp-metabot-caddy
+    restart: unless-stopped
+    depends_on:
+      acp-metabot-api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - ACP_METABOT_DOMAIN=${ACP_METABOT_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [acp-metabot]
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
 networks:
   acp-metabot:
     driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

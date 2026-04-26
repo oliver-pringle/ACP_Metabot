@@ -1,6 +1,8 @@
+using System.Threading.RateLimiting;
 using ACP_Metabot.Api.Data;
 using ACP_Metabot.Api.Services;
 using ACP_Metabot.Api.Services.MarketplaceSource;
+using Microsoft.AspNetCore.HttpOverrides;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -39,6 +41,43 @@ builder.Services.AddHostedService<WatchPollerBackgroundService>();
 
 builder.Services.AddOpenApi();
 
+// Trust X-Forwarded-* from the local Caddy reverse proxy so per-IP rate
+// limiting partitions on the real client IP, not the proxy container's IP.
+builder.Services.Configure<ForwardedHeadersOptions>(opts =>
+{
+    opts.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    opts.KnownIPNetworks.Clear();
+    opts.KnownProxies.Clear();
+});
+
+// Per-IP rate limiting for public /v1/* endpoints. Two policies because the
+// search call is cheap (one Voyage embedding) and the compose call is
+// expensive (Claude Sonnet on top-K candidates).
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    options.AddPolicy("public-search", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
+                Window = TimeSpan.FromHours(1),
+                QueueLimit = 0
+            }));
+
+    options.AddPolicy("public-compose", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 5,
+                Window = TimeSpan.FromHours(1),
+                QueueLimit = 0
+            }));
+});
+
 var app = builder.Build();
 
 // Bootstrap SQLite schema
@@ -50,13 +89,20 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-// X-API-Key middleware: enforce on every endpoint except /health.
-// Fail-closed: if the key isn't configured, refuse all auth'd requests.
-// Set INTERNAL_API_KEY in the environment for both this container and the sidecar.
+app.UseForwardedHeaders();
+app.UseRateLimiter();
+
+// X-API-Key middleware: enforce on every endpoint except /health and /v1/*.
+// /v1/* are the public, rate-limited gateway endpoints used by the acp-find
+// Claude Code plugin. Fail-closed: if the key isn't configured, refuse all
+// auth'd requests. Set INTERNAL_API_KEY in the environment for both this
+// container and the sidecar.
 var apiKey = builder.Configuration["INTERNAL_API_KEY"];
 app.Use(async (ctx, next) =>
 {
-    if (ctx.Request.Path.Equals("/health", StringComparison.OrdinalIgnoreCase))
+    var path = ctx.Request.Path;
+    if (path.Equals("/health", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWithSegments("/v1", StringComparison.OrdinalIgnoreCase))
     {
         await next();
         return;
@@ -83,7 +129,10 @@ app.MapGet("/health", () => Results.Ok(new
     time = DateTime.UtcNow.ToString("O")
 }));
 
-app.MapPost("/search", async (SearchRequest req, SearchService svc, CancellationToken ct) =>
+// Shared handlers — mounted twice: once on the internal X-API-Key path used
+// by the sidecar, and once on the public /v1/* path used by the acp-find
+// plugin (rate-limited per IP).
+async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, CancellationToken ct)
 {
     if (string.IsNullOrWhiteSpace(req.Query))
         return Results.BadRequest(new { error = "query is required" });
@@ -105,16 +154,23 @@ app.MapPost("/search", async (SearchRequest req, SearchService svc, Cancellation
     }
 
     return Results.Ok(new { query = req.Query, count = results.Count, results, bestMatch });
-});
+}
 
-app.MapPost("/composeStack", async (ComposeRequest req, StackComposerService svc, CancellationToken ct) =>
+async Task<IResult> HandleCompose(ComposeRequest req, StackComposerService svc, CancellationToken ct)
 {
     if (string.IsNullOrWhiteSpace(req.UseCase))
         return Results.BadRequest(new { error = "useCase is required" });
     var max = req.MaxOfferings is null ? 5 : Math.Clamp(req.MaxOfferings.Value, 1, 10);
     var stack = await svc.ComposeAsync(req.UseCase, req.BudgetUsdc, max, ct);
     return Results.Ok(stack);
-});
+}
+
+app.MapPost("/search", HandleSearch);
+app.MapPost("/composeStack", HandleCompose);
+
+// Public gateway — same logic, no X-API-Key, IP rate-limited.
+app.MapPost("/v1/search", HandleSearch).RequireRateLimiting("public-search");
+app.MapPost("/v1/composeStack", HandleCompose).RequireRateLimiting("public-compose");
 
 app.MapGet("/index/stats", async (OfferingRepository repo, MarketplaceIndexerService idx,
     VoyageEmbeddingProvider emb) =>

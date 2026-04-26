@@ -1,0 +1,27 @@
+# Caddy config for the ACP_Metabot public gateway.
+#
+# ACP_METABOT_DOMAIN is supplied at runtime via docker-compose env. When unset,
+# Caddy falls back to `localhost` (uses its internal CA, no Let's Encrypt
+# attempt) so the container is harmless before a real domain is wired up.
+#
+# Caddy automatically obtains and renews a Let's Encrypt cert via the HTTP-01
+# challenge on port 80. Persistence (certs + ACME account) lives on the
+# `caddy_data` volume so a `docker compose down && up` doesn't re-issue.
+
+{$ACP_METABOT_DOMAIN:localhost} {
+	encode gzip
+
+	reverse_proxy acp-metabot-api:5000 {
+		# Increase from default 30s — composeStack can take ~15s for the
+		# Claude call + a buffer for slow upstream responses.
+		transport http {
+			read_timeout 60s
+			write_timeout 60s
+		}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
