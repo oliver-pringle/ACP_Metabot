@@ -3,10 +3,11 @@
 Two audiences:
 
 - **Operators** — running the bot (setup, deploy, monitor, troubleshoot).
-- **Buyers** — paying the bot for `search` / `composeStack` via ACP.
+- **Buyers** — paying the bot for `search` / `composeStack` / `watchOffering` via ACP.
 
 If you're skimming, [Operator quickstart](#operator-quickstart) is the
-shortest useful read.
+shortest useful read. For deploying to a production server, follow
+[`docs/deploy/oracle-cloud.md`](deploy/oracle-cloud.md).
 
 ---
 
@@ -19,10 +20,8 @@ Goal: get the bot running, indexed, and serving live ACP traffic.
 - Docker Desktop (Windows/Mac) or Docker Engine (Linux).
 - A **Voyage AI** API key — free at https://www.voyageai.com/.
   Add a payment method at https://dashboard.voyageai.com/ to unlock
-  standard rate limits. The 200M free tokens still apply afterwards;
-  a full marketplace embed uses ~7M tokens.
+  standard rate limits.
 - An **Anthropic** API key — https://console.anthropic.com/settings/keys.
-  Load some credits in **Settings → Billing**.
 - An ACP v2 agent — create or upgrade one at
   https://app.virtuals.io/acp/agents/. From the **Signers** tab, copy
   `walletAddress`, `walletId`, and `signerPrivateKey`.
@@ -32,8 +31,8 @@ Goal: get the bot running, indexed, and serving live ACP traffic.
 Two `.env` files live at:
 
 ```
-.env                    ← VOYAGE_API_KEY, ANTHROPIC_API_KEY
-acp-v2/.env             ← ACP wallet credentials, ACP_CHAIN
+.env                    ← VOYAGE_API_KEY, ANTHROPIC_API_KEY, INTERNAL_API_KEY
+acp-v2/.env             ← ACP wallet credentials, ACP_CHAIN, INTERNAL_API_KEY
 ```
 
 Both are gitignored. Templates:
@@ -42,22 +41,27 @@ Both are gitignored. Templates:
 # .env (project root)
 VOYAGE_API_KEY=pa-...
 ANTHROPIC_API_KEY=sk-ant-...
+INTERNAL_API_KEY=<openssl rand -hex 32>
 ```
 
 ```
 # acp-v2/.env
 ACP_WALLET_ADDRESS=0x...
 ACP_WALLET_ID=...
-ACP_SIGNER_PRIVATE_KEY=0x...
+ACP_SIGNER_PRIVATE_KEY=...
 ACP_BUILDER_CODE=
-ACP_CHAIN=baseSepolia
+ACP_CHAIN=base
 ACP_METABOT_API_URL=http://acp-metabot-api:5000
+INTERNAL_API_KEY=<same value as above>
 ```
+
+`INTERNAL_API_KEY` MUST be identical in both files. The C# API rejects
+all calls without a matching header.
 
 Verify Compose can resolve them:
 
 ```powershell
-docker compose config | Select-String "VOYAGE_API_KEY|ANTHROPIC_API_KEY"
+docker compose config | Select-String "VOYAGE_API_KEY|ANTHROPIC_API_KEY|INTERNAL_API_KEY"
 ```
 
 You should see the keys expanded inline. If they show as empty, the
@@ -76,35 +80,29 @@ You will see, in this order:
 
 1. `[indexer] starting, interval=600s`
 2. `[indexer] api source: total reported=34507 pageCount=346 pageSize=100`
-3. ~6 minutes of (suppressed) HTTP fetch logs
-4. `[indexer] api source: fetched 34507 offerings across 346 page(s)`
-5. ~1–2 minutes of silent SQLite upsert
-6. `[indexer] fetch complete: total=34507 added=34507 updated=0 unchanged=0`
-7. `[indexer] embedding 10000 offerings with model=voyage-3-large`
-8. ~5–10 minutes of embedding (Voyage calls in batches of 4)
-9. Cycle repeats every 600s; the next two ticks finish the remaining ~24k.
+3. `[watch-poller] started; tick=00:30:00`
+4. ~6 minutes of (suppressed) HTTP fetch logs
+5. `[indexer] api source: fetched 34507 offerings across 346 page(s)`
+6. ~1–2 minutes of silent SQLite upsert
+7. `[indexer] fetch complete: total=34507 added=34507 updated=0 unchanged=0`
+8. `[indexer] embedding 10000 offerings with model=voyage-3-large`
+9. ~5–10 minutes of embedding (Voyage calls in batches)
+10. Cycle repeats every 600s; the next two ticks finish the remaining ~24k.
 
 ### 4. Watch the index fill
 
-Open a second PowerShell window. The API has no published port, so we
-hit it from a one-shot container on the same Docker network:
+The API has no published port. Hit it from a one-shot container with
+the API key, on the same Docker network:
 
 ```powershell
-docker run --rm --network acp_metabot_acp-metabot curlimages/curl -s http://acp-metabot-api:5000/index/stats
+$key = (Get-Content .env | Where-Object { $_ -match 'INTERNAL_API_KEY=' }) -replace 'INTERNAL_API_KEY=',''
+docker run --rm --network acp_metabot_acp-metabot curlimages/curl -s `
+  -H "X-API-Key: $key" `
+  http://acp-metabot-api:5000/index/stats
 ```
 
-Sample output:
-
-```json
-{
-  "offeringsTotal": 34508,
-  "offeringsEmbedded": 34508,
-  "embeddingModel": "voyage-3-large",
-  "embeddingDimension": 1024,
-  "lastFetchAt": "2026-04-25T11:24:39.5000189Z",
-  "lastFetchCount": 34506
-}
-```
+`/health` is the one endpoint that does NOT need the header — useful
+for liveness checks.
 
 The index is fully loaded when `offeringsEmbedded` equals
 `offeringsTotal`. Total wall time on first boot: ~30 minutes.
@@ -113,13 +111,13 @@ The index is fully loaded when `offeringsEmbedded` equals
 
 ```powershell
 docker run --rm --network acp_metabot_acp-metabot curlimages/curl -s `
+  -H "X-API-Key: $key" `
   -X POST -H "Content-Type: application/json" `
   -d '{\"query\":\"verify a token contract for honeypot risk\",\"limit\":5}' `
   http://acp-metabot-api:5000/search
 ```
 
-You should see WachAI's `verify_token` near the top, with a cosine score
-above ~0.7.
+You should see WachAI's `verify_token` near the top.
 
 ### 6. Bring up the sidecar
 
@@ -136,15 +134,17 @@ the bot is live on the chain configured by `ACP_CHAIN`.
 ### 7. Register offerings on app.virtuals.io
 
 ACP v2 has no programmatic offering registration. Print the registration
-blocks:
+blocks for all three offerings:
 
 ```powershell
 docker compose exec acp-metabot-acp npm run print-offerings
 ```
 
-Copy each block (search and composeStack) into
+Copy each block (`search`, `composeStack`, `watchOffering`) into
 **Offerings → New offering** in your agent's dashboard at
-https://app.virtuals.io/acp/agents/.
+https://app.virtuals.io/acp/agents/. Per-offering pricing in the
+dashboard must match `acp-v2/src/pricing.ts` (search 0.01, composeStack
+0.50, watchOffering 0.50).
 
 ---
 
@@ -154,7 +154,8 @@ https://app.virtuals.io/acp/agents/.
 
 ```powershell
 docker run --rm --network acp_metabot_acp-metabot curlimages/curl `
-  -s -X POST --max-time 1800 http://acp-metabot-api:5000/index/refresh
+  -s -H "X-API-Key: $key" -X POST --max-time 1800 `
+  http://acp-metabot-api:5000/index/refresh
 ```
 
 Synchronous. The request hangs until the full
@@ -164,6 +165,21 @@ fetch + upsert + embed pass completes. Returns `{ "ok": true }`.
 fetches share the same HttpClient and will saturate the connection pool,
 causing 30s timeouts. Wait for `lastFetchAt` to advance before forcing
 another.
+
+### Verify a webhook is firing
+
+After a buyer hires `watchOffering`, you can deterministically verify
+their webhook delivery without waiting for new offerings to be indexed:
+
+```powershell
+docker run --rm --network acp_metabot_acp-metabot curlimages/curl `
+  -s -H "X-API-Key: $key" -X POST `
+  http://acp-metabot-api:5000/watches/<watch-id>/test-fire
+```
+
+Clears `watch_seen` for the watch and runs an immediate poll, so all
+current matches count as "new" and the webhook fires. Returns
+`{ "watchId": "...", "fired": true|false }`.
 
 ### Switch to offline mode
 
@@ -186,33 +202,43 @@ docker compose up --build acp-metabot-api
 ```
 
 The schema bootstrap runs on every startup, so a deleted DB is recreated
-empty and the next indexer tick repopulates it.
+empty and the next indexer tick repopulates it. **This wipes all
+registered watches** — use only if you actually mean to reset state.
 
 ### Common failure modes
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
+| `401 Unauthorized` on every C# call | `X-API-Key` header missing or wrong | Set `INTERNAL_API_KEY` in BOTH `.env` files to the same value, restart. |
+| `500 INTERNAL_API_KEY is not configured` | Env var not picked up by the api container | Check `docker compose config` shows the var. Restart compose. |
 | `429 TooManyRequests` from Voyage | No payment method on Voyage account; capped at 3 RPM / 10K TPM | Add a card at https://dashboard.voyageai.com/. Free tokens still apply. |
 | `lastFetchAt: null` after fetch logs already showed | Upsert phase still running (silent, ~1–2 min for 34k rows) | Wait. |
 | `offeringsEmbedded` stuck after a fail message | BackgroundService is in 600s cooldown after exception | Either wait, or hit `/index/refresh` once. |
+| `[webhook] url validation failed pre-POST: ...` | Buyer-supplied webhook resolves to a private/internal IP | Working as intended; SSRF guard caught it. Watch is marked `webhook_failing` after 3 such failures. |
+| `[webhook] non-2xx (5xx) on attempt N` | Buyer's endpoint is briefly down | Bot retries with backoff. After 5 consecutive cycle-level failures, status becomes `cancelled`. |
 | `unable to get image ... open //./pipe/dockerDesktopLinuxEngine` | Docker Desktop isn't running | Start Docker Desktop, wait until the tray icon stops animating. |
-| `wget: executable file not found in $PATH` when `docker compose exec` | The aspnet base image is minimal | Use `docker run --rm --network acp_metabot_acp-metabot curlimages/curl ...` instead. |
 | Two `[indexer] api source: total reported=...` lines back-to-back, then `TaskCanceledException` | Concurrent fetches (boot tick + manual refresh) | Don't call `/index/refresh` during boot. Bot recovers on next tick. |
+
+### Production deploy
+
+The canonical target is Oracle Cloud Ampere A1 (free tier). Full runbook
+including VM provisioning, security-list lockdown, bootstrap script, and
+.env wiring lives at [`docs/deploy/oracle-cloud.md`](deploy/oracle-cloud.md).
 
 ---
 
-## Buyer guide — using `search` and `composeStack`
+## Buyer guide — using `search`, `composeStack`, and `watchOffering`
 
 This section is for ACP buyers paying the bot for results.
 
 ### Discoverability
 
-The agent advertises two offerings on app.virtuals.io. Look for:
+The agent advertises three offerings on app.virtuals.io. Look for:
 
-- **Agent:** the wallet address you provisioned.
-- **Offerings:** `search` and `composeStack`.
+- **Agent:** the wallet address provisioned on app.virtuals.io.
+- **Offerings:** `search`, `composeStack`, and `watchOffering`.
 
-### `search` — 0.05 USDC per call
+### `search` — 0.01 USDC per call
 
 Semantic search over every ACP offering the bot has indexed.
 
@@ -222,15 +248,17 @@ Semantic search over every ACP offering the bot has indexed.
 {
   "query": "close a trading position on a perp DEX",
   "limit": 5,
-  "minScore": 0.0
+  "minScore": 0.0,
+  "priceMaxUsdc": 1.00
 }
 ```
 
-| Field      | Type    | Required | Notes                                       |
-|------------|---------|----------|---------------------------------------------|
-| `query`    | string  | yes      | Free-form natural language.                 |
-| `limit`    | integer | no       | Default 10, clamped to [1, 50].             |
-| `minScore` | number  | no       | Cosine similarity threshold. Default 0.0.   |
+| Field          | Type    | Required | Notes                                            |
+|----------------|---------|----------|--------------------------------------------------|
+| `query`        | string  | yes      | Free-form natural language. ≤ 2048 chars.        |
+| `limit`        | integer | no       | Default 10, clamped to [1, 50].                  |
+| `minScore`     | number  | no       | Cosine similarity threshold. Default 0.0.        |
+| `priceMaxUsdc` | number  | no       | Excludes offerings priced above this from results. |
 
 **Deliverable:**
 
@@ -250,14 +278,20 @@ Semantic search over every ACP offering the bot has indexed.
       "chain": "base",
       "score": 0.847
     }
-  ]
+  ],
+  "bestMatch": {
+    "agentAddress": "0xffc60852...",
+    "offeringName": "close_position",
+    "score": 0.847
+  }
 }
 ```
 
-Use the result list to drive your own job creation against the
-recommended agent + offering pair.
+`bestMatch` is `null` when the top result scores below 0.7. Use it as a
+short-circuit when you want to dispatch directly to the top match
+without showing the buyer a list.
 
-### `composeStack` — 0.20 USDC per call
+### `composeStack` — 0.50 USDC per call
 
 LLM-curated multi-offering stack for a stated use case. Useful when you
 don't know the marketplace well enough to assemble the pieces yourself.
@@ -274,7 +308,7 @@ don't know the marketplace well enough to assemble the pieces yourself.
 
 | Field          | Type    | Required | Notes                                            |
 |----------------|---------|----------|--------------------------------------------------|
-| `useCase`      | string  | yes      | Free-form. Describe the *goal*, not the agents.  |
+| `useCase`      | string  | yes      | Free-form. Describe the *goal*, not the agents. ≤ 4096 chars. |
 | `budgetUsdc`   | number  | no       | Total cap in USDC. Stack will respect it.        |
 | `maxOfferings` | integer | no       | Default 5, clamped to [1, 10].                   |
 
@@ -299,13 +333,86 @@ don't know the marketplace well enough to assemble the pieces yourself.
 Each stack entry tells you which agent + offering to call, in what role,
 and at what price. Total is summed for budget transparency.
 
+### `watchOffering` — 0.50 USDC per watch
+
+Standing semantic search delivered via webhook. Pay once, register a
+query plus an HTTPS `webhookUrl`, and the bot polls every `intervalHours`
+for `durationDays`. Each new offering matching your query is POSTed to
+your webhook.
+
+**Requirement payload:**
+
+```json
+{
+  "query": "wallet intelligence and on-chain analytics",
+  "webhookUrl": "https://example.com/acp-watch-webhook",
+  "durationDays": 7,
+  "intervalHours": 6,
+  "minScore": 0.65,
+  "priceMaxUsdc": 0.20,
+  "maxAlerts": 20
+}
+```
+
+| Field           | Type    | Required | Notes                                                        |
+|-----------------|---------|----------|--------------------------------------------------------------|
+| `query`         | string  | yes      | Natural-language description of offerings to watch for. ≤ 2048 chars. |
+| `webhookUrl`    | string  | yes      | HTTPS only. Must not resolve to a private/internal IP.       |
+| `durationDays`  | integer | no       | 1–30. Default 7.                                              |
+| `intervalHours` | integer | no       | 1–24. Default 6.                                              |
+| `minScore`      | number  | no       | Optional cosine threshold for an offering to count as a match. |
+| `priceMaxUsdc`  | number  | no       | Optional max price filter.                                   |
+| `maxAlerts`     | integer | no       | Cap on total alerts over the watch lifetime. 1–100. Default 20. |
+
+**Initial deliverable** (returned on the ACP job, synchronously):
+
+```json
+{
+  "watchId": "1487f6e9-4cfe-4e5a-9e91-8995016b9018",
+  "expiresAt": "2026-05-03T10:32:28.141Z",
+  "intervalHours": 6,
+  "maxAlerts": 20,
+  "initialMatches": [/* current top-N matches, NOT counted toward alert cap */]
+}
+```
+
+**Webhook payload** (POSTed each time new matches appear):
+
+```
+POST <your webhookUrl>
+Content-Type: application/json; charset=utf-8
+User-Agent: TheMetaBot/1.0 (acp-watch)
+X-Watch-Id: 1487f6e9-4cfe-4e5a-9e91-8995016b9018
+X-Alert-Number: 3
+
+{
+  "watchId": "1487f6e9-4cfe-4e5a-9e91-8995016b9018",
+  "alertNumber": 3,
+  "remainingAlerts": 17,
+  "query": "wallet intelligence and on-chain analytics",
+  "matches": [/* OfferingMatch entries, only those new since last poll */],
+  "polledAt": "2026-04-26T16:07:25.141Z"
+}
+```
+
+**Reliability:**
+
+- 5-second per-attempt timeout, 3 retries with exponential backoff.
+- 3 consecutive cycle-level failures → bot marks the watch
+  `webhook_failing` (still polled, retries continue).
+- 5 consecutive failures → `cancelled`. No refund — make sure your URL
+  is reachable before paying.
+- Use `(watchId, alertNumber)` as an idempotency key on your side so
+  retries don't double-process.
+
 ### Cost control tips
 
-- `search` is cheap — 50 calls = 2.50 USDC. Use it freely for discovery.
-- `composeStack` is more expensive because it runs Claude. Use it once
+- `search` is cheap — 100 calls = 1.00 USDC. Use it freely for discovery.
+- `composeStack` is more expensive because it runs an LLM. Use it once
   per use case, not per query.
-- The bot itself is rate-limited only by ACP infrastructure. There are
-  no per-buyer quotas inside the bot.
+- `watchOffering` is a one-shot 0.50 USDC for monitoring up to 20 alerts
+  over a window — works out cheaper than polling `search` repeatedly if
+  you're watching for new entrants in a category.
 
 ### Data freshness
 
