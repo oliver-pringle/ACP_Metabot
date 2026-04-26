@@ -49,10 +49,10 @@ export const watchOffering: Offering = {
     required: ["query", "webhookUrl"],
   },
   validate(req) {
-    const q = requireString(req.query, "query");
+    const q = requireString(req.query, "query", 2048);
     if (!q.valid) return q;
 
-    const url = requireString(req.webhookUrl, "webhookUrl");
+    const url = requireString(req.webhookUrl, "webhookUrl", 2048);
     if (!url.valid) return url;
     if (typeof req.webhookUrl !== "string" || !req.webhookUrl.startsWith("https://")) {
       return { valid: false, reason: "webhookUrl must start with https://" };

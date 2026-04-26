@@ -30,7 +30,7 @@ export const composeStack: Offering = {
     required: ["useCase"]
   },
   validate(req) {
-    const u = requireString(req.useCase, "useCase");
+    const u = requireString(req.useCase, "useCase", 4096);
     if (!u.valid) return u;
     const b = requirePositiveNumberOrNothing(req.budgetUsdc, "budgetUsdc");
     if (!b.valid) return b;

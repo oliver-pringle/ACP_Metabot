@@ -34,7 +34,7 @@ export const search: Offering = {
     required: ["query"]
   },
   validate(req) {
-    const q = requireString(req.query, "query");
+    const q = requireString(req.query, "query", 2048);
     if (!q.valid) return q;
     const lim = requirePositiveIntOrNothing(req.limit, "limit", 50);
     if (!lim.valid) return lim;

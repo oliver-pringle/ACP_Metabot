@@ -6,6 +6,7 @@ export interface AcpEnv {
   signerPrivateKey: string;
   chain: ChainName;
   apiUrl: string;
+  apiKey: string;
   builderCode?: string;
 }
 
@@ -15,6 +16,7 @@ const REQUIRED = [
   "ACP_SIGNER_PRIVATE_KEY",
   "ACP_CHAIN",
   "ACP_METABOT_API_URL",
+  "INTERNAL_API_KEY",
 ] as const;
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AcpEnv {
@@ -40,6 +42,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AcpEnv {
     signerPrivateKey: source.ACP_SIGNER_PRIVATE_KEY!,
     chain,
     apiUrl: source.ACP_METABOT_API_URL!,
+    apiKey: source.INTERNAL_API_KEY!,
     builderCode,
   };
 }

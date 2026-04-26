@@ -15,7 +15,7 @@ type PendingJob = {
 
 async function main() {
   const env = loadEnv();
-  const client = createApiClient(env.apiUrl);
+  const client = createApiClient(env.apiUrl, env.apiKey);
 
   console.log(`[seller] chain=${env.chain} wallet=${env.walletAddress}`);
   console.log(`[seller] api=${env.apiUrl}`);
@@ -78,6 +78,18 @@ async function main() {
     // message and stores offering.name in AcpJob.description.
     const job = session.job ?? (await session.fetchJob());
     const offeringName = job.description;
+
+    // Refuse jobs with a non-zero evaluator. With a buyer-controlled evaluator,
+    // the buyer can take our deliverable and then reject() to deny payment.
+    // Insisting on the zero-address evaluator means submission auto-completes
+    // on-chain.
+    const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+    if (job.evaluatorAddress.toLowerCase() !== ZERO_ADDRESS) {
+      await session.sendMessage(
+        `unsupported: this seller only accepts jobs with evaluatorAddress=${ZERO_ADDRESS}. Got: ${job.evaluatorAddress}`
+      );
+      return;
+    }
 
     const offering = getOffering(offeringName);
     if (!offering) {

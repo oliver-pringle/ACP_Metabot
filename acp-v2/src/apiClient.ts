@@ -74,7 +74,11 @@ export interface ApiClient {
   registerWatch(req: RegisterWatchRequest): Promise<RegisterWatchResponse>;
 }
 
-export function createApiClient(baseUrl: string, timeoutMs = 60_000): ApiClient {
+export function createApiClient(
+  baseUrl: string,
+  apiKey: string,
+  timeoutMs = 60_000
+): ApiClient {
   // Retry policy:
   //   - 5xx and network errors → retry up to 2 times (3 attempts total) with
   //     1s and 4s backoff. Matters most for /watches because the buyer has
@@ -100,6 +104,7 @@ export function createApiClient(baseUrl: string, timeoutMs = 60_000): ApiClient 
           signal: ctl.signal,
           headers: {
             "Content-Type": "application/json",
+            "X-API-Key": apiKey,
             ...(init?.headers ?? {}),
           },
         });

@@ -9,6 +9,11 @@ namespace ACP_Metabot.Api.Services;
 
 public class MarketplaceIndexerService : BackgroundService
 {
+    // Trust-boundary caps for third-party agent fields.
+    private const int MaxFieldLen = 256;
+    private const int MaxDescriptionLen = 4096;
+    private const int MaxSchemaJsonLen = 16384;
+
     private readonly IServiceProvider _services;
     private readonly ILogger<MarketplaceIndexerService> _logger;
     private readonly TimeSpan _interval;
@@ -65,13 +70,25 @@ public class MarketplaceIndexerService : BackgroundService
         int added = 0, updated = 0, unchanged = 0;
         foreach (var dto in fetched)
         {
-            var schemaJson = dto.RequirementSchema is null
-                ? null
-                : JsonSerializer.Serialize(dto.RequirementSchema);
-            var hash = ContentHash(dto.AgentAddress, dto.OfferingName, dto.Description,
+            // Third-party agents can put anything in these fields. Truncate at
+            // the trust boundary so DB rows, embedding inputs, and LLM prompts
+            // are all bounded regardless of upstream behavior.
+            var agentName = Truncate(dto.AgentName, MaxFieldLen);
+            var offeringName = Truncate(dto.OfferingName, MaxFieldLen);
+            var description = Truncate(dto.Description, MaxDescriptionLen);
+
+            string? schemaJson = null;
+            if (dto.RequirementSchema is not null)
+            {
+                schemaJson = JsonSerializer.Serialize(dto.RequirementSchema);
+                if (schemaJson.Length > MaxSchemaJsonLen)
+                    schemaJson = schemaJson.Substring(0, MaxSchemaJsonLen);
+            }
+
+            var hash = ContentHash(dto.AgentAddress, offeringName, description,
                 dto.PriceUsdc, dto.PriceType, dto.Chain, schemaJson);
             var result = await repo.UpsertAsync(
-                dto.AgentAddress, dto.AgentName, dto.OfferingName, dto.Description,
+                dto.AgentAddress, agentName, offeringName, description,
                 schemaJson, dto.PriceUsdc, dto.PriceType, dto.IsPrivate, dto.Chain,
                 hash, nowUtc);
             if (result.IsNew) added++;
@@ -117,6 +134,12 @@ public class MarketplaceIndexerService : BackgroundService
                 break;
             }
         }
+    }
+
+    private static string Truncate(string? s, int max)
+    {
+        if (string.IsNullOrEmpty(s)) return s ?? string.Empty;
+        return s.Length <= max ? s : s.Substring(0, max);
     }
 
     private static string BuildEmbeddingText(Offering o)

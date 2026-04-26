@@ -3,9 +3,19 @@ export interface ValidationResult {
   reason?: string;
 }
 
-export function requireString(value: unknown, name: string): ValidationResult {
+export function requireString(
+  value: unknown,
+  name: string,
+  maxLen?: number
+): ValidationResult {
   if (typeof value !== "string" || value.trim() === "") {
     return { valid: false, reason: `${name} is required` };
+  }
+  if (maxLen !== undefined && value.length > maxLen) {
+    return {
+      valid: false,
+      reason: `${name} must be at most ${maxLen} characters (got ${value.length})`,
+    };
   }
   return { valid: true };
 }

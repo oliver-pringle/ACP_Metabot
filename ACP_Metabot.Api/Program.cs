@@ -50,9 +50,32 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-// TODO: add X-API-Key middleware here if you expose this API publicly.
-// Boilerplate ships with no auth — both containers share a private docker network
-// and the API does not publish any ports.
+// X-API-Key middleware: enforce on every endpoint except /health.
+// Fail-closed: if the key isn't configured, refuse all auth'd requests.
+// Set INTERNAL_API_KEY in the environment for both this container and the sidecar.
+var apiKey = builder.Configuration["INTERNAL_API_KEY"];
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.Equals("/health", StringComparison.OrdinalIgnoreCase))
+    {
+        await next();
+        return;
+    }
+    if (string.IsNullOrEmpty(apiKey))
+    {
+        ctx.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        await ctx.Response.WriteAsync("INTERNAL_API_KEY is not configured");
+        return;
+    }
+    if (!ctx.Request.Headers.TryGetValue("X-API-Key", out var provided)
+        || !string.Equals(provided.ToString(), apiKey, StringComparison.Ordinal))
+    {
+        ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await ctx.Response.WriteAsync("Unauthorized");
+        return;
+    }
+    await next();
+});
 
 app.MapGet("/health", () => Results.Ok(new
 {
