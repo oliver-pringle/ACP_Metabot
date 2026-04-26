@@ -26,18 +26,36 @@ services:
       - ./data:/data
     networks: [acp-metabot]
     # No ports published — only the sidecar talks to it.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   acp-metabot-acp:
     build:
       context: ./acp-v2
     container_name: acp-metabot-acp
     restart: unless-stopped
-    depends_on: [acp-metabot-api]
+    depends_on:
+      acp-metabot-api:
+        condition: service_healthy
     env_file: ./acp-v2/.env
     environment:
       - ACP_METABOT_API_URL=http://acp-metabot-api:5000
       - INTERNAL_API_KEY=${INTERNAL_API_KEY}
     networks: [acp-metabot]
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
 networks:
   acp-metabot:
