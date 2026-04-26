@@ -29,6 +29,12 @@ export const search: Offering = {
       priceMaxUsdc: {
         type: "number",
         description: "Optional maximum priceUsdc; offerings above this price are excluded."
+      },
+      staleAfterDays: {
+        type: "integer",
+        description: "Optional. Excludes offerings whose hire count hasn't grown within this lookback window. Pass 0 or omit to disable.",
+        minimum: 0,
+        maximum: 365
       }
     },
     required: ["query"]
@@ -45,6 +51,12 @@ export const search: Offering = {
     }
     const priceMax = requirePositiveNumberOrNothing(req.priceMaxUsdc, "priceMaxUsdc");
     if (!priceMax.valid) return priceMax;
+    if (req.staleAfterDays !== undefined && req.staleAfterDays !== null) {
+      if (typeof req.staleAfterDays !== "number" || !Number.isInteger(req.staleAfterDays)
+          || req.staleAfterDays < 0 || req.staleAfterDays > 365) {
+        return { valid: false, reason: "staleAfterDays must be an integer between 0 and 365" };
+      }
+    }
     return { valid: true };
   },
   async execute(req, { client }) {
@@ -54,6 +66,8 @@ export const search: Offering = {
       minScore: typeof req.minScore === "number" ? req.minScore : undefined,
       priceMaxUsdc:
         typeof req.priceMaxUsdc === "number" ? req.priceMaxUsdc : undefined,
+      staleAfterDays:
+        typeof req.staleAfterDays === "number" ? req.staleAfterDays : undefined,
     });
   },
 };

@@ -241,6 +241,32 @@ public class OfferingRepository
         return result;
     }
 
+    // Returns the ids of offerings that are NOT stale relative to a cutoff
+    // date. An offering is "fresh" if its current usage_count is greater than
+    // the snapshot for the cutoff date — i.e. it was hired at least once
+    // during the lookback window. When no snapshot row exists for the cutoff
+    // (historic data hasn't accumulated yet), the filter degrades to
+    // "exclude offerings that have never been hired at all".
+    public async Task<List<long>> ListFreshOfferingIdsAsync(string cutoffDate)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT o.id
+            FROM offerings o
+            LEFT JOIN agent_reputation_snapshots s
+              ON s.offering_id = o.id AND s.snapshot_date = $cutoff
+            WHERE
+              (s.snapshot_date IS NOT NULL AND o.usage_count > s.usage_count)
+              OR
+              (s.snapshot_date IS NULL AND o.usage_count > 0);";
+        cmd.Parameters.AddWithValue("$cutoff", cutoffDate);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        var result = new List<long>();
+        while (await reader.ReadAsync()) result.Add(reader.GetInt64(0));
+        return result;
+    }
+
     public async Task<int> WriteSnapshotIfMissingAsync(string snapshotDate)
     {
         await using var conn = _db.OpenConnection();

@@ -77,6 +77,18 @@ builder.Services.AddRateLimiter(options =>
                 Window = TimeSpan.FromHours(1),
                 QueueLimit = 0
             }));
+
+    // Reputation lookup is cheap (no embeddings, single DB query), so a
+    // higher per-IP cap is fine.
+    options.AddPolicy("public-reputation", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 60,
+                Window = TimeSpan.FromHours(1),
+                QueueLimit = 0
+            }));
 });
 
 var app = builder.Build();
@@ -140,7 +152,8 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, Cancellat
     var limit = req.Limit is null ? 10 : Math.Clamp(req.Limit.Value, 1, 50);
     var minScore = req.MinScore ?? 0.0;
     var priceMax = req.PriceMaxUsdc ?? double.PositiveInfinity;
-    var results = await svc.SearchAsync(req.Query, limit, minScore, priceMax, ct);
+    var staleAfterDays = req.StaleAfterDays;
+    var results = await svc.SearchAsync(req.Query, limit, minScore, priceMax, staleAfterDays, ct);
 
     object? bestMatch = null;
     if (results.Count > 0 && results[0].Score >= 0.7)
@@ -166,11 +179,8 @@ async Task<IResult> HandleCompose(ComposeRequest req, StackComposerService svc, 
     return Results.Ok(stack);
 }
 
-app.MapPost("/search", HandleSearch);
-app.MapPost("/composeStack", HandleCompose);
-
-app.MapPost("/agentReputation", async (
-    AgentReputationRequest req, OfferingRepository repo, ReputationService reputation) =>
+async Task<IResult> HandleReputation(AgentReputationRequest req,
+    OfferingRepository repo, ReputationService reputation)
 {
     if (string.IsNullOrWhiteSpace(req.AgentAddress))
         return Results.BadRequest(new { error = "agentAddress is required" });
@@ -195,11 +205,16 @@ app.MapPost("/agentReputation", async (
     {
         return Results.NotFound(new { error = "offering not found for this agent" });
     }
-});
+}
+
+app.MapPost("/search", HandleSearch);
+app.MapPost("/composeStack", HandleCompose);
+app.MapPost("/agentReputation", HandleReputation);
 
 // Public gateway — same logic, no X-API-Key, IP rate-limited.
 app.MapPost("/v1/search", HandleSearch).RequireRateLimiting("public-search");
 app.MapPost("/v1/composeStack", HandleCompose).RequireRateLimiting("public-compose");
+app.MapPost("/v1/agentReputation", HandleReputation).RequireRateLimiting("public-reputation");
 
 app.MapGet("/index/stats", async (OfferingRepository repo, MarketplaceIndexerService idx,
     VoyageEmbeddingProvider emb) =>
@@ -266,6 +281,6 @@ app.MapPost("/watches/{id}/test-fire", async (string id, WatchService svc, Cance
 
 app.Run();
 
-public record SearchRequest(string Query, int? Limit, double? MinScore, double? PriceMaxUsdc);
+public record SearchRequest(string Query, int? Limit, double? MinScore, double? PriceMaxUsdc, int? StaleAfterDays);
 public record ComposeRequest(string UseCase, double? BudgetUsdc, int? MaxOfferings);
 public record AgentReputationRequest(string AgentAddress, string? OfferingName);

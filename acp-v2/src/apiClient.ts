@@ -92,6 +92,7 @@ export interface ApiClient {
     limit?: number;
     minScore?: number;
     priceMaxUsdc?: number;
+    staleAfterDays?: number;
   }): Promise<SearchResponse>;
   composeStack(req: { useCase: string; budgetUsdc?: number; maxOfferings?: number }): Promise<ComposedStack>;
   registerWatch(req: RegisterWatchRequest): Promise<RegisterWatchResponse>;

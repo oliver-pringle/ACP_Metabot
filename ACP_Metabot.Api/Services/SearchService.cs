@@ -20,7 +20,8 @@ public class SearchService
     }
 
     public async Task<IReadOnlyList<OfferingMatch>> SearchAsync(
-        string query, int limit, double minScore, double priceMaxUsdc, CancellationToken ct)
+        string query, int limit, double minScore, double priceMaxUsdc,
+        int? staleAfterDays, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query))
             return Array.Empty<OfferingMatch>();
@@ -33,17 +34,39 @@ public class SearchService
             return Array.Empty<OfferingMatch>();
         }
 
-        // In-memory cosine. Acceptable up to ~50K offerings.
-        var scored = new List<(Offering O, double Score)>(corpus.Count);
+        // Optional stale-offering filter. Pulls a HashSet of "fresh" ids and
+        // skips anything not in the set. Falls back to "any hires at all" when
+        // there's no historical snapshot for the cutoff date (early days).
+        HashSet<long>? freshIds = null;
+        if (staleAfterDays is int days && days > 0)
+        {
+            var cutoff = DateTime.UtcNow.Date.AddDays(-days).ToString("yyyy-MM-dd");
+            var ids = await _repo.ListFreshOfferingIdsAsync(cutoff);
+            freshIds = new HashSet<long>(ids);
+        }
+
+        // In-memory cosine. Acceptable up to ~50K offerings. Final ordering
+        // blends reputation in so battle-tested offerings win narrow ties;
+        // the displayed `score` stays as raw cosine for backwards compat.
+        const double CosineWeight = 0.7;
+        const double ReputationWeight = 0.3;
+
+        var scored = new List<(Offering O, double Cosine, double Blended, ReputationSummary? Rep)>(corpus.Count);
         foreach (var (offering, embedding) in corpus)
         {
             if (offering.PriceUsdc > priceMaxUsdc) continue;
-            var score = CosineSimilarity(queryEmb, embedding);
-            if (score >= minScore) scored.Add((offering, score));
+            if (freshIds is not null && !freshIds.Contains(offering.Id)) continue;
+            var cosine = CosineSimilarity(queryEmb, embedding);
+            if (cosine < minScore) continue;
+            var rep = _reputation.BuildSearchSummary(offering);
+            var blended = rep is null
+                ? cosine
+                : CosineWeight * cosine + ReputationWeight * (rep.Score / 100.0);
+            scored.Add((offering, cosine, blended, rep));
         }
 
         return scored
-            .OrderByDescending(s => s.Score)
+            .OrderByDescending(s => s.Blended)
             .Take(limit)
             .Select(s => new OfferingMatch(
                 OfferingId: s.O.Id,
@@ -54,8 +77,8 @@ public class SearchService
                 PriceUsdc: s.O.PriceUsdc,
                 PriceType: s.O.PriceType,
                 Chain: s.O.Chain,
-                Score: Math.Round(s.Score, 4),
-                Reputation: _reputation.BuildSearchSummary(s.O)))
+                Score: Math.Round(s.Cosine, 4),
+                Reputation: s.Rep))
             .ToArray();
     }
 
