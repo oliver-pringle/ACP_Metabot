@@ -51,7 +51,7 @@ public class SearchService
 
     public async Task<IReadOnlyList<OfferingMatch>> SearchAsync(
         string query, int limit, double minScore, double priceMaxUsdc,
-        int? staleAfterDays, bool rerank, CancellationToken ct)
+        int? staleAfterDays, bool rerank, string? categoryFilter, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query))
             return Array.Empty<OfferingMatch>();
@@ -94,6 +94,9 @@ public class SearchService
         {
             if (offering.PriceUsdc > priceMaxUsdc) continue;
             if (freshIds is not null && !freshIds.Contains(offering.Id)) continue;
+            if (categoryFilter is not null
+                && !string.Equals(category, categoryFilter, StringComparison.OrdinalIgnoreCase))
+                continue;
             var cosine = CosineSimilarity(queryEmb, embedding);
             if (cosine < minScore) continue;
             var rep = _reputation.BuildSearchSummary(offering);

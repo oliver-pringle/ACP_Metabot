@@ -182,7 +182,8 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, Cancellat
     // Default rerank ON — pure cosine bumps relevance ~5-15% for ambiguous
     // queries and the cost is negligible. Callers can disable explicitly.
     var rerank = req.Rerank ?? true;
-    var results = await svc.SearchAsync(req.Query, limit, minScore, priceMax, staleAfterDays, rerank, ct);
+    var category = string.IsNullOrWhiteSpace(req.Category) ? null : req.Category.Trim();
+    var results = await svc.SearchAsync(req.Query, limit, minScore, priceMax, staleAfterDays, rerank, category, ct);
 
     object? bestMatch = null;
     if (results.Count > 0 && results[0].Score >= 0.7)
@@ -323,6 +324,33 @@ app.MapGet("/v1/agent/{address}", (string address,
 // Static list — no per-IP limit; CDN-cacheable in front of Caddy if abuse appears.
 app.MapGet("/v1/categories", (CategoryService svc) => Results.Ok(new { categories = svc.Categories }));
 
+// Public diagnostic — used by the acp-find plugin's acp_health tool.
+// Cheap (in-memory reads only); no rate-limit policy needed.
+app.MapGet("/v1/health", (SearchService search, MarketplaceIndexerService idx, CategoryService cats) =>
+    Results.Ok(new
+    {
+        status = "ok",
+        time = DateTime.UtcNow.ToString("O"),
+        version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "unknown",
+        corpus = new
+        {
+            count = search.CorpusCount,
+            refreshedAt = search.CorpusRefreshedAtUtc == default
+                ? null
+                : search.CorpusRefreshedAtUtc.ToString("O"),
+        },
+        indexer = new
+        {
+            lastFetchAt = idx.LastFetchAt?.ToString("O"),
+            lastFetchCount = idx.LastFetchCount,
+        },
+        categories = new
+        {
+            count = cats.Categories.Count,
+            ready = cats.IsReady,
+        },
+    }));
+
 app.MapGet("/index/stats", async (OfferingRepository repo, MarketplaceIndexerService idx,
     VoyageEmbeddingProvider emb) =>
 {
@@ -388,6 +416,6 @@ app.MapPost("/watches/{id}/test-fire", async (string id, WatchService svc, Cance
 
 app.Run();
 
-public record SearchRequest(string Query, int? Limit, double? MinScore, double? PriceMaxUsdc, int? StaleAfterDays, bool? Rerank);
+public record SearchRequest(string Query, int? Limit, double? MinScore, double? PriceMaxUsdc, int? StaleAfterDays, bool? Rerank, string? Category);
 public record ComposeRequest(string UseCase, double? BudgetUsdc, int? MaxOfferings);
 public record AgentReputationRequest(string AgentAddress, string? OfferingName);
