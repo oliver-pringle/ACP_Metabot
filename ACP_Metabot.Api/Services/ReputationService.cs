@@ -214,14 +214,14 @@ public class ReputationService
     // -------------------------------------------------------------------------
 
     public async Task<AgentReputationResultV2> GetOrComputeAsync(
-        string agentAddress, string? offeringName, CancellationToken ct)
+        string agentAddress, CancellationToken ct)
     {
         var addr = agentAddress.ToLowerInvariant();
         var nowUtc = DateTime.UtcNow;
         var cached = await _cacheRepo.GetAsync(addr, nowUtc);
         if (cached is not null)
         {
-            return await DeserializeAsync(cached, offeringName, warmHit: cached.Source == "warmer", ct);
+            return Deserialize(cached, warmHit: cached.Source == "warmer");
         }
 
         var sem = _computeLocks.GetOrAdd(addr, _ => new SemaphoreSlim(1, 1));
@@ -230,7 +230,7 @@ public class ReputationService
         {
             // Another thread is computing; re-read after timeout.
             var late = await _cacheRepo.GetAsync(addr, DateTime.UtcNow);
-            if (late is not null) return await DeserializeAsync(late, offeringName, warmHit: false, ct);
+            if (late is not null) return Deserialize(late, warmHit: false);
             throw new InvalidOperationException("concurrent compute timed out");
         }
         try
@@ -238,10 +238,9 @@ public class ReputationService
             // Re-check cache under the lock (another thread may have just written).
             cached = await _cacheRepo.GetAsync(addr, DateTime.UtcNow);
             if (cached is not null)
-                return await DeserializeAsync(cached, offeringName, warmHit: cached.Source == "warmer", ct);
+                return Deserialize(cached, warmHit: cached.Source == "warmer");
 
-            var fresh = await ComputeAsync(addr, source: "lazy", ct);
-            return await AttachOfferingAsync(fresh, offeringName, ct);
+            return await ComputeAsync(addr, source: "lazy", ct);
         }
         finally
         {
@@ -312,8 +311,7 @@ public class ReputationService
             WindowDays:   90,
             SubScores:    AttachPercentiles(score.SubScores),
             RawCounts:    rawCounts,
-            Flags:        flags,
-            Offering:     null);
+            Flags:        flags);
     }
 
     public async Task RebuildPercentilesFromCacheAsync(DateTime nowUtc)
@@ -393,14 +391,13 @@ public class ReputationService
         return (long)Math.Max(100, v[^1] * 10L);
     }
 
-    private async Task<AgentReputationResultV2> DeserializeAsync(
-        CachedReputationRow row, string? offeringName, bool warmHit, CancellationToken ct)
+    private AgentReputationResultV2 Deserialize(CachedReputationRow row, bool warmHit)
     {
         var subScores = System.Text.Json.JsonSerializer.Deserialize<SubScoreSet>(row.SubScoresJson)!;
         var rawCounts = System.Text.Json.JsonSerializer.Deserialize<RawCounts>(row.RawCountsJson)!;
         var flagsRaw  = System.Text.Json.JsonSerializer.Deserialize<ReputationFlags>(row.FlagsJson)!;
         var flags     = flagsRaw with { WarmCacheHit = warmHit };
-        var result = new AgentReputationResultV2(
+        return new AgentReputationResultV2(
             AgentAddress: row.AgentAddress,
             AgentName:    row.AgentName,
             AgentScore:   row.AgentScore,
@@ -408,33 +405,6 @@ public class ReputationService
             WindowDays:   90,
             SubScores:    AttachPercentiles(subScores),
             RawCounts:    rawCounts,
-            Flags:        flags,
-            Offering:     null);
-        return await AttachOfferingAsync(result, offeringName, ct);
-    }
-
-    private async Task<AgentReputationResultV2> AttachOfferingAsync(
-        AgentReputationResultV2 baseResult, string? offeringName, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(offeringName)) return baseResult;
-        var offerings = await _offeringRepo.ListByAgentAsync(baseResult.AgentAddress);
-        var match = offerings.FirstOrDefault(o =>
-            string.Equals(o.OfferingName, offeringName, StringComparison.OrdinalIgnoreCase));
-        if (match is null) throw new KeyNotFoundException("offering not found for this agent");
-
-        var allHires = offerings.Select(o => o.UsageCount).OrderBy(x => x).ToArray();
-        var idx = Array.BinarySearch(allHires, match.UsageCount);
-        int rank = idx < 0 ? ~idx : idx + 1;
-        while (rank < allHires.Length && allHires[rank] == match.UsageCount) rank++;
-        var pct = allHires.Length == 0 ? 0 : Math.Round(100.0 * rank / allHires.Length, 1);
-
-        return baseResult with
-        {
-            Offering = new OfferingHireRef(
-                Name: match.OfferingName,
-                Hires: match.UsageCount,
-                Percentile: pct,
-                Evidence: "Per-offering hire count from marketplace metrics. Behavioural metrics above are agent-level — chain events do not carry offering names.")
-        };
+            Flags:        flags);
     }
 }

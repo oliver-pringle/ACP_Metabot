@@ -11,9 +11,7 @@ public record AgentReputationResultV2(
     [property: JsonPropertyName("windowDays")]   int WindowDays,
     [property: JsonPropertyName("subScores")]    SubScoreSet SubScores,
     [property: JsonPropertyName("rawCounts")]    RawCounts RawCounts,
-    [property: JsonPropertyName("flags")]        ReputationFlags Flags,
-    [property: JsonPropertyName("offering"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        OfferingHireRef? Offering);
+    [property: JsonPropertyName("flags")]        ReputationFlags Flags);
 
 public record SubScoreSet(
     [property: JsonPropertyName("completion")]   SubScore Completion,
@@ -42,12 +40,6 @@ public record ReputationFlags(
     [property: JsonPropertyName("isColdStart")]      bool IsColdStart,
     [property: JsonPropertyName("insufficientData")] bool InsufficientData,
     [property: JsonPropertyName("warmCacheHit")]     bool WarmCacheHit);
-
-public record OfferingHireRef(
-    [property: JsonPropertyName("name")]       string Name,
-    [property: JsonPropertyName("hires")]      long Hires,
-    [property: JsonPropertyName("percentile")] double Percentile,
-    [property: JsonPropertyName("evidence")]   string Evidence);
 
 // Internal: what ChainEventScanner returns. NOT serialised.
 public record ChainScanResult(
