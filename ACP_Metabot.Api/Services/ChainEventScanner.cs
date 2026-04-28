@@ -66,7 +66,6 @@ public class ChainEventScanner
     // Block-timestamp LRU; bounded so it can't grow without limit during a long warmer pass.
     private readonly Dictionary<long, DateTime> _blockTimestamps = new(capacity: 4096);
 
-    // Base mainnet block time. Used to translate "90 days" into a block-count cap.
     private const long BaseBlockTimeSeconds = 2;
 
     public ChainEventScanner(IConfiguration config, ILogger<ChainEventScanner> logger)
@@ -248,19 +247,31 @@ public class ChainEventScanner
         return all;
     }
 
+    // Lock guarding the non-concurrent _blockTimestamps. Held only around
+    // dictionary access — never across the await for the RPC fetch.
+    private readonly object _blockTimestampsLock = new();
+
     private async Task<DateTime> GetBlockTimeAsync(long blockNumber, CancellationToken ct)
     {
-        if (_blockTimestamps.TryGetValue(blockNumber, out var cached)) return cached;
+        lock (_blockTimestampsLock)
+        {
+            if (_blockTimestamps.TryGetValue(blockNumber, out var cached)) return cached;
+        }
         var block = await _web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(
             new HexBigInteger(blockNumber));
         var ts = DateTimeOffset.FromUnixTimeSeconds((long)block.Timestamp.Value).UtcDateTime;
-        // Cap cache size; evict oldest-by-insertion when full.
-        if (_blockTimestamps.Count >= 4096)
+        lock (_blockTimestampsLock)
         {
-            var firstKey = _blockTimestamps.Keys.First();
-            _blockTimestamps.Remove(firstKey);
+            // Re-check in case another thread populated the same block while we waited.
+            if (_blockTimestamps.TryGetValue(blockNumber, out var nowCached)) return nowCached;
+            // Cap cache size; evict oldest-by-insertion when full.
+            if (_blockTimestamps.Count >= 4096)
+            {
+                var firstKey = _blockTimestamps.Keys.First();
+                _blockTimestamps.Remove(firstKey);
+            }
+            _blockTimestamps[blockNumber] = ts;
+            return ts;
         }
-        _blockTimestamps[blockNumber] = ts;
-        return ts;
     }
 }
