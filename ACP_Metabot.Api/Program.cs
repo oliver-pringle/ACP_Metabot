@@ -235,12 +235,8 @@ async Task<IResult> HandleReputation(AgentReputationRequest req,
 
     try
     {
-        var result = await reputation.GetOrComputeAsync(addr, req.OfferingName, ct);
+        var result = await reputation.GetOrComputeAsync(addr, ct);
         return Results.Ok(result);
-    }
-    catch (KeyNotFoundException)
-    {
-        return Results.NotFound(new { error = "offering_not_found", message = "offering not found for this agent" });
     }
     catch (Exception ex)
     {
@@ -357,8 +353,7 @@ app.MapGet("/v1/agentReputation", async ([FromQuery] string agent,
         WindowDays:   90,
         SubScores:    subScores!,
         RawCounts:    rawCounts!,
-        Flags:        flags!,
-        Offering:     null);
+        Flags:        flags!);
 
     var hash = System.Security.Cryptography.SHA1.HashData(
         System.Text.Encoding.UTF8.GetBytes(row.ComputedAt.ToString("O")));
@@ -472,7 +467,7 @@ app.Run();
 
 public record SearchRequest(string Query, int? Limit, double? MinScore, double? PriceMaxUsdc, int? StaleAfterDays, bool? Rerank, string? Category);
 public record ComposeRequest(string UseCase, double? BudgetUsdc, int? MaxOfferings);
-public record AgentReputationRequest(string AgentAddress, string? OfferingName);
+public record AgentReputationRequest(string AgentAddress);
 
 class HeaderedJsonResult : IResult
 {
