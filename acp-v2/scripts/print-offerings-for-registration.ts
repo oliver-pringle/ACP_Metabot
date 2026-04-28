@@ -17,6 +17,10 @@ function main() {
     console.log(`  ${offering.description}`);
     console.log(`Requirement schema (JSON):`);
     console.log(JSON.stringify(offering.requirementSchema, null, 2));
+    if (offering.deliverableSchema) {
+      console.log(`Deliverable schema (JSON):`);
+      console.log(JSON.stringify(offering.deliverableSchema, null, 2));
+    }
     console.log("");
   }
   console.log("=".repeat(72));

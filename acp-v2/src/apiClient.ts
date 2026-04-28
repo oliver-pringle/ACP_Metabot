@@ -64,7 +64,6 @@ export interface RegisterWatchResponse {
 
 export interface AgentReputationRequest {
   agentAddress: string;
-  offeringName?: string;
 }
 
 export interface SubScore {
@@ -98,13 +97,6 @@ export interface ReputationFlags {
   warmCacheHit: boolean;
 }
 
-export interface OfferingHireRef {
-  name: string;
-  hires: number;
-  percentile: number;
-  evidence: string;
-}
-
 export interface AgentReputationResponse {
   agentAddress: string;
   agentName: string;
@@ -114,7 +106,6 @@ export interface AgentReputationResponse {
   subScores: SubScoreSet;
   rawCounts: ReputationRawCounts;
   flags: ReputationFlags;
-  offering?: OfferingHireRef;
 }
 
 export interface ApiClient {
