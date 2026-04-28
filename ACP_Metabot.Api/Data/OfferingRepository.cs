@@ -542,6 +542,35 @@ public class OfferingRepository
         return Convert.ToInt32(result ?? 0);
     }
 
+    public async Task<string?> PickFirstAgentAsync()
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT agent_address FROM offerings LIMIT 1;";
+        await using var reader = await cmd.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? reader.GetString(0) : null;
+    }
+
+    public async Task<IReadOnlyDictionary<string, long>> SumJobCountsByAgentAsync()
+    {
+        var dict = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        // agent_job_count is an agent-level metric duplicated across rows; MAX
+        // is the canonical total (always equal across rows for the same agent
+        // after a fresh indexer cycle).
+        cmd.CommandText = @"
+            SELECT agent_address, MAX(agent_job_count)
+            FROM offerings
+            GROUP BY agent_address;";
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            dict[reader.GetString(0)] = reader.GetInt64(1);
+        }
+        return dict;
+    }
+
     private static Offering MapOffering(System.Data.Common.DbDataReader reader)
     {
         return new Offering(
