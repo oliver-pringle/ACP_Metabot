@@ -4,7 +4,7 @@ import { requireString } from "../validators.js";
 export const agentReputation: Offering = {
   name: "agentReputation",
   description:
-    "Reputation lookup for an ACP agent. Given an agent's wallet address, returns a 0-100 score and percentile derived from lifetime job counts across the marketplace, plus a per-offering breakdown. Pass an optional offeringName to focus the response on a single offering. Useful before hiring an unfamiliar agent or for ranking candidates returned by the search offering.",
+    "On-chain behavioural reputation for an ACP agent. Returns a 0-100 score derived from completion rate, dispute rate, recency, 30-day throughput, and average response time. Cached 24h per agent. Pass an optional offeringName to include a per-offering hire-count breakdown alongside the agent-level score.",
   requirementSchema: {
     type: "object",
     properties: {

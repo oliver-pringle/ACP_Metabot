@@ -67,22 +67,54 @@ export interface AgentReputationRequest {
   offeringName?: string;
 }
 
-export interface OfferingReputation {
-  name: string;
+export interface SubScore {
+  value: number;
   score: number;
+  percentile: number;
+  evidence: string;
+  insufficientData: boolean;
+}
+
+export interface SubScoreSet {
+  completion: SubScore;
+  dispute: SubScore;
+  recency: SubScore;
+  volume30d: SubScore;
+  responseTime: SubScore;
+}
+
+export interface ReputationRawCounts {
+  totalJobs: number;
+  completed: number;
+  rejected: number;
+  expired: number;
+  completedLast30d: number;
+  lastActiveAt?: string;
+}
+
+export interface ReputationFlags {
+  isColdStart: boolean;
+  insufficientData: boolean;
+  warmCacheHit: boolean;
+}
+
+export interface OfferingHireRef {
+  name: string;
   hires: number;
   percentile: number;
+  evidence: string;
 }
 
 export interface AgentReputationResponse {
   agentAddress: string;
   agentName: string;
   agentScore: number;
-  agentTotalJobs: number;
-  agentPercentile: number;
   computedAt: string;
-  offering?: OfferingReputation;
-  offerings?: OfferingReputation[];
+  windowDays: number;
+  subScores: SubScoreSet;
+  rawCounts: ReputationRawCounts;
+  flags: ReputationFlags;
+  offering?: OfferingHireRef;
 }
 
 export interface ApiClient {
