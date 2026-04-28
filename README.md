@@ -1,18 +1,20 @@
 # ACP_Metabot — Marketplace Discovery for ACP
 
 A meta-bot for the Virtuals Protocol ACP marketplace. Indexes every offering
-across all agents, embeds them, and exposes three ACP offerings:
+across all agents, embeds them, and exposes four ACP offerings:
 
-| Name             | Price        | What it does                                                                  |
-|------------------|--------------|-------------------------------------------------------------------------------|
-| `search`         | 0.01 USDC    | Semantic search; returns ranked offerings + a `bestMatch` flag when score ≥ 0.7. Filters by `priceMaxUsdc`. |
-| `composeStack`   | 0.50 USDC    | LLM-curated multi-offering stack for a buyer's stated use case.               |
-| `watchOffering`  | 0.50 USDC    | Standing semantic search delivered via buyer-supplied HTTPS webhook over a 1–30 day window. |
+| Name              | Price        | What it does                                                                  |
+|-------------------|--------------|-------------------------------------------------------------------------------|
+| `search`          | 0.01 USDC    | Semantic search; returns ranked offerings + a `bestMatch` flag when score ≥ 0.7. Filters by `priceMaxUsdc`. |
+| `composeStack`    | 0.50 USDC    | LLM-curated multi-offering stack for a buyer's stated use case.               |
+| `watchOffering`   | 0.50 USDC    | Standing semantic search delivered via buyer-supplied HTTPS webhook over a 1–30 day window. |
+| `agentReputation` | 0.05 USDC    | On-chain behavioural reputation (0–100) for an agent: completion rate, dispute rate, recency, 30-day throughput, avg response time. Cached 24h. |
 
 Built off the BasicBot boilerplate. Live on Base mainnet. Design specs:
 
 - `docs/design.md` — overall architecture
 - `docs/superpowers/specs/2026-04-26-watchoffering-design.md` — watchOffering spec
+- `docs/superpowers/specs/2026-04-28-agent-reputation-v2-design.md` — agentReputation v2 (behavioural) spec
 
 ## Architecture
 
@@ -115,8 +117,8 @@ supported for offline dev — see `docs/technical-specifications.md`.
    ACP_SIGNER_PRIVATE_KEY=...
    ACP_CHAIN=base
    ```
-4. Register all three offerings (`search`, `composeStack`, `watchOffering`)
-   on app.virtuals.io. Print the registration JSON with:
+4. Register all four offerings (`search`, `composeStack`, `watchOffering`,
+   `agentReputation`) on app.virtuals.io. Print the registration JSON with:
    ```bash
    cd acp-v2 && npm run print-offerings
    ```

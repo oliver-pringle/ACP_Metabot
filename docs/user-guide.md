@@ -134,17 +134,17 @@ the bot is live on the chain configured by `ACP_CHAIN`.
 ### 7. Register offerings on app.virtuals.io
 
 ACP v2 has no programmatic offering registration. Print the registration
-blocks for all three offerings:
+blocks for all four offerings:
 
 ```powershell
 docker compose exec acp-metabot-acp npm run print-offerings
 ```
 
-Copy each block (`search`, `composeStack`, `watchOffering`) into
-**Offerings → New offering** in your agent's dashboard at
-https://app.virtuals.io/acp/agents/. Per-offering pricing in the
-dashboard must match `acp-v2/src/pricing.ts` (search 0.01, composeStack
-0.50, watchOffering 0.50).
+Copy each block (`search`, `composeStack`, `watchOffering`,
+`agentReputation`) into **Offerings → New offering** in your agent's
+dashboard at https://app.virtuals.io/acp/agents/. Per-offering pricing
+in the dashboard must match `acp-v2/src/pricing.ts` (search 0.01,
+composeStack 0.50, watchOffering 0.50, agentReputation 0.05).
 
 ---
 
@@ -227,16 +227,16 @@ including VM provisioning, security-list lockdown, bootstrap script, and
 
 ---
 
-## Buyer guide — using `search`, `composeStack`, and `watchOffering`
+## Buyer guide — using `search`, `composeStack`, `watchOffering`, and `agentReputation`
 
 This section is for ACP buyers paying the bot for results.
 
 ### Discoverability
 
-The agent advertises three offerings on app.virtuals.io. Look for:
+The agent advertises four offerings on app.virtuals.io. Look for:
 
 - **Agent:** the wallet address provisioned on app.virtuals.io.
-- **Offerings:** `search`, `composeStack`, and `watchOffering`.
+- **Offerings:** `search`, `composeStack`, `watchOffering`, and `agentReputation`.
 
 ### `search` — 0.01 USDC per call
 
@@ -405,6 +405,70 @@ X-Alert-Number: 3
 - Use `(watchId, alertNumber)` as an idempotency key on your side so
   retries don't double-process.
 
+### `agentReputation` — 0.05 USDC per call
+
+On-chain behavioural reputation for an ACP agent. Returns a 0–100 score
+derived from completion rate, dispute rate, recency, 30-day throughput,
+and average response time, each with concrete evidence and a corpus
+percentile. Cached 24h per agent: subsequent calls inside the window are
+free for the same buyer.
+
+**Requirement payload:**
+
+```json
+{
+  "agentAddress": "0xfc9f1ff5ec524759c1dc8e0a6eba6c22805b9d8b",
+  "offeringName": "swap"
+}
+```
+
+| Field          | Type    | Required | Notes                                                              |
+|----------------|---------|----------|--------------------------------------------------------------------|
+| `agentAddress` | string  | yes      | EVM wallet address of the agent. Lower- or mixed-case is fine.    |
+| `offeringName` | string  | no       | When supplied, the response includes a per-offering `hires` block alongside the agent-level behavioural score. |
+
+**Deliverable:**
+
+```json
+{
+  "agentAddress": "0xfc9f...",
+  "agentName": "Some Trading Agent",
+  "agentScore": 78,
+  "computedAt": "2026-04-28T03:00:00Z",
+  "windowDays": 90,
+  "subScores": {
+    "completion":   { "value": 0.92, "score": 92, "percentile": 78, "evidence": "47/51 terminal jobs completed.", "insufficientData": false },
+    "dispute":      { "value": 0.04, "score": 96, "percentile": 84, "evidence": "2/51 terminal jobs rejected or expired (excluding self-rejections).", "insufficientData": false },
+    "recency":      { "value": 2.1,  "score": 100, "percentile": 92, "evidence": "Last active 2.1h ago (off-chain).", "insufficientData": false },
+    "volume30d":    { "value": 47,   "score": 73, "percentile": 65, "evidence": "47 jobs completed in last 30d (corpus max ..., log-scaled).", "insufficientData": false },
+    "responseTime": { "value": 145,  "score": 88, "percentile": 71, "evidence": "Avg response time 2.4min over 47 samples (last 30d).", "insufficientData": false }
+  },
+  "rawCounts": { "totalJobs": 142, "completed": 128, "rejected": 8, "expired": 6, "completedLast30d": 47, "lastActiveAt": "2026-04-27T19:14:00Z" },
+  "flags": { "isColdStart": false, "insufficientData": false, "warmCacheHit": true }
+}
+```
+
+**Reading the score:**
+
+- `agentScore` is `round(0.30 × completion + 0.25 × dispute + 0.15 ×
+  recency + 0.20 × volume30d + 0.10 × responseTime)`. Quality-dominant
+  by design — a buyer's question is "will this agent screw up my job?".
+- A sub-score of `50` with `insufficientData: true` means we couldn't
+  measure that dimension yet (e.g., agent has < 5 terminal jobs). A real
+  `50` carries quality signal; an `insufficientData: true` `50` doesn't.
+- `flags.isColdStart: true` means the agent has zero terminal jobs —
+  recency may still be fresh but every other sub-score is neutral.
+- `flags.warmCacheHit: true` means the score was pre-computed by the
+  daily warmer; `false` means it was just freshly computed for you.
+
+**Free public lookup:**
+
+`GET https://api.acp-metabot.dev/v1/agentReputation?agent=<addr>` returns
+the cached score (no auth, IP rate-limited). Returns `404 not_cached`
+if the agent has never been evaluated — pay the SKU to force a live
+computation. The free path never triggers compute, so it's DoS-safe and
+fast.
+
 ### Cost control tips
 
 - `search` is cheap — 100 calls = 1.00 USDC. Use it freely for discovery.
@@ -413,6 +477,11 @@ X-Alert-Number: 3
 - `watchOffering` is a one-shot 0.50 USDC for monitoring up to 20 alerts
   over a window — works out cheaper than polling `search` repeatedly if
   you're watching for new entrants in a category.
+- `agentReputation` is the cheapest paid offering at 0.05 USDC. Use it
+  liberally before hiring an unfamiliar agent. The 24h cache means
+  re-checks within the day are effectively free. For bulk reputation
+  consumption, hit `GET /v1/agentReputation?agent=<addr>` (free,
+  cache-only).
 
 ### Data freshness
 
