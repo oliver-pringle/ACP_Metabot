@@ -60,9 +60,14 @@ public class ChainEventScanner
     private readonly Web3 _web3;
     private readonly string _contractAddress;
     private readonly long _deployBlock;
+    private readonly long _chunkSize;
+    private readonly int _maxFirstScanDays;
     private readonly ILogger<ChainEventScanner> _logger;
     // Block-timestamp LRU; bounded so it can't grow without limit during a long warmer pass.
     private readonly Dictionary<long, DateTime> _blockTimestamps = new(capacity: 4096);
+
+    // Base mainnet block time. Used to translate "90 days" into a block-count cap.
+    private const long BaseBlockTimeSeconds = 2;
 
     public ChainEventScanner(IConfiguration config, ILogger<ChainEventScanner> logger)
     {
@@ -71,7 +76,9 @@ public class ChainEventScanner
             ?? throw new InvalidOperationException("BASE_RPC_URL not configured");
         _contractAddress = config["ACP_CONTRACT_ADDRESS_BASE"]
             ?? throw new InvalidOperationException("ACP_CONTRACT_ADDRESS_BASE not configured");
-        _deployBlock = config.GetValue<long?>("Reputation:ContractDeployBlock") ?? 0L;
+        _deployBlock      = config.GetValue<long?>("Reputation:ContractDeployBlock") ?? 0L;
+        _chunkSize        = config.GetValue<long?>("Reputation:ChunkSize")           ?? 10_000L;
+        _maxFirstScanDays = config.GetValue<int?>("Reputation:MaxFirstScanDays")     ?? 90;
         _web3 = new Web3(rpcUrl);
     }
 
@@ -79,37 +86,53 @@ public class ChainEventScanner
         string agentAddress, long fromBlock, DateTime nowUtc, CancellationToken ct)
     {
         var headBlock = (long)(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
-        var startBlock = Math.Max(fromBlock, _deployBlock);
 
-        var fromBP = new BlockParameter(new HexBigInteger(startBlock));
-        var toBP   = new BlockParameter(new HexBigInteger(headBlock));
+        // Cold-start cap: if the caller is asking us to scan from at-or-before
+        // the deploy block (first ever scan for this agent), restrict the
+        // initial scan to the last MaxFirstScanDays. Subsequent calls pass
+        // LastScannedBlock+1 which is well past the deploy block, so the cap
+        // is a no-op — delta scans always cover the whole gap since the last run.
+        long startBlock = Math.Max(fromBlock, _deployBlock);
+        if (fromBlock <= _deployBlock && _maxFirstScanDays > 0)
+        {
+            long capBlocks = (long)_maxFirstScanDays * 86_400L / BaseBlockTimeSeconds;
+            long capStart  = headBlock - capBlocks;
+            if (capStart > startBlock) startBlock = capStart;
+        }
+        if (startBlock > headBlock)
+        {
+            // Edge: cap pushed past head (config sanity issue). Return zeros.
+            return new ChainScanResult(
+                AgentAddress:               agentAddress,
+                TotalJobs:                  0, Completed: 0, Rejected: 0, Expired: 0,
+                CompletedLast30d:           0,
+                LastJobSubmittedAt:         null,
+                AvgResponseSeconds30d:      null,
+                ResponseTimeSampleCount30d: 0,
+                HighestScannedBlock:        headBlock);
+        }
 
         // 1. JobCreated filtered on provider (topic3) — gives the agent's full jobId set.
         //    topic1 (jobId) = any, topic2 (client) = any, topic3 (provider) = agentAddress
         var createdHandler = _web3.Eth.GetEvent<JobCreatedEvent>(_contractAddress);
-        var createdFilter = createdHandler.CreateFilterInput(
-            (object[]?)null,
-            (object[]?)null,
-            new object[] { agentAddress },
-            fromBP,
-            toBP);
-        var createdLogs = await createdHandler.GetAllChangesAsync(createdFilter);
+        var createdLogs = await RunChunkedAsync(createdHandler,
+            (fromBP, toBP) => createdHandler.CreateFilterInput(
+                (object[]?)null, (object[]?)null, new object[] { agentAddress }, fromBP, toBP),
+            startBlock, headBlock, ct);
 
         var jobIds = new HashSet<System.Numerics.BigInteger>();
-        var fundedTimestamps     = new Dictionary<System.Numerics.BigInteger, DateTime>();
-        var submittedTimestamps  = new Dictionary<System.Numerics.BigInteger, DateTime>();
-        DateTime? lastSubmitted  = null;
+        var fundedTimestamps    = new Dictionary<System.Numerics.BigInteger, DateTime>();
+        var submittedTimestamps = new Dictionary<System.Numerics.BigInteger, DateTime>();
+        DateTime? lastSubmitted = null;
         foreach (var log in createdLogs) jobIds.Add(log.Event.JobId);
 
         // 2. JobSubmitted filtered on provider (topic2) — gives T1 for response time.
         //    topic1 (jobId) = any, topic2 (provider) = agentAddress
         var submittedHandler = _web3.Eth.GetEvent<JobSubmittedEvent>(_contractAddress);
-        var submittedFilter = submittedHandler.CreateFilterInput(
-            (object[]?)null,
-            new object[] { agentAddress },
-            fromBP,
-            toBP);
-        var submittedLogs = await submittedHandler.GetAllChangesAsync(submittedFilter);
+        var submittedLogs = await RunChunkedAsync(submittedHandler,
+            (fromBP, toBP) => submittedHandler.CreateFilterInput(
+                (object[]?)null, new object[] { agentAddress }, fromBP, toBP),
+            startBlock, headBlock, ct);
         foreach (var log in submittedLogs)
         {
             if (!jobIds.Contains(log.Event.JobId)) continue;
@@ -136,12 +159,10 @@ public class ChainEventScanner
             var topicJobIds = batch.Select(id => (object)id).ToArray();
 
             // JobFunded: topic1 = jobId (indexed), topic2 = client (indexed) — filter only by jobId
-            var fundedBatch = await fundedHandler.GetAllChangesAsync(
-                fundedHandler.CreateFilterInput(
-                    topicJobIds,
-                    (object[]?)null,
-                    fromBP,
-                    toBP));
+            var fundedBatch = await RunChunkedAsync(fundedHandler,
+                (fromBP, toBP) => fundedHandler.CreateFilterInput(
+                    topicJobIds, (object[]?)null, fromBP, toBP),
+                startBlock, headBlock, ct);
             foreach (var log in fundedBatch)
             {
                 fundedTimestamps[log.Event.JobId] =
@@ -149,11 +170,10 @@ public class ChainEventScanner
             }
 
             // JobCompleted: topic1 = jobId (indexed only)
-            var completedBatch = await completedHandler.GetAllChangesAsync(
-                completedHandler.CreateFilterInput(
-                    topicJobIds,
-                    fromBP,
-                    toBP));
+            var completedBatch = await RunChunkedAsync(completedHandler,
+                (fromBP, toBP) => completedHandler.CreateFilterInput(
+                    topicJobIds, fromBP, toBP),
+                startBlock, headBlock, ct);
             foreach (var log in completedBatch)
             {
                 completed++;
@@ -162,12 +182,10 @@ public class ChainEventScanner
             }
 
             // JobRejected: topic1 = jobId (indexed), topic2 = rejector (indexed)
-            var rejectedBatch = await rejectedHandler.GetAllChangesAsync(
-                rejectedHandler.CreateFilterInput(
-                    topicJobIds,
-                    (object[]?)null,
-                    fromBP,
-                    toBP));
+            var rejectedBatch = await RunChunkedAsync(rejectedHandler,
+                (fromBP, toBP) => rejectedHandler.CreateFilterInput(
+                    topicJobIds, (object[]?)null, fromBP, toBP),
+                startBlock, headBlock, ct);
             foreach (var log in rejectedBatch)
             {
                 // Exclude self-rejections (agent rejecting buyer's spec).
@@ -177,11 +195,10 @@ public class ChainEventScanner
             }
 
             // JobExpired: topic1 = jobId (indexed only)
-            var expiredBatch = await expiredHandler.GetAllChangesAsync(
-                expiredHandler.CreateFilterInput(
-                    topicJobIds,
-                    fromBP,
-                    toBP));
+            var expiredBatch = await RunChunkedAsync(expiredHandler,
+                (fromBP, toBP) => expiredHandler.CreateFilterInput(
+                    topicJobIds, fromBP, toBP),
+                startBlock, headBlock, ct);
             expired += expiredBatch.Count;
         }
 
@@ -211,6 +228,24 @@ public class ChainEventScanner
             AvgResponseSeconds30d:      avgResponseSeconds,
             ResponseTimeSampleCount30d: sampleCount,
             HighestScannedBlock:        headBlock);
+    }
+
+    private async Task<List<EventLog<TEvt>>> RunChunkedAsync<TEvt>(
+        Event<TEvt> handler,
+        Func<BlockParameter, BlockParameter, NewFilterInput> filterBuilder,
+        long fromBlock, long toBlock, CancellationToken ct) where TEvt : IEventDTO, new()
+    {
+        var all = new List<EventLog<TEvt>>();
+        foreach (var (s, e) in BlockRangeChunker.Chunk(fromBlock, toBlock, _chunkSize))
+        {
+            ct.ThrowIfCancellationRequested();
+            var fromBP = new BlockParameter(new HexBigInteger(s));
+            var toBP   = new BlockParameter(new HexBigInteger(e));
+            var filter = filterBuilder(fromBP, toBP);
+            var logs   = await handler.GetAllChangesAsync(filter);
+            all.AddRange(logs);
+        }
+        return all;
     }
 
     private async Task<DateTime> GetBlockTimeAsync(long blockNumber, CancellationToken ct)
