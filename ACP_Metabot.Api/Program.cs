@@ -220,7 +220,8 @@ async Task<IResult> HandleCompose(ComposeRequest req, StackComposerService svc, 
 }
 
 async Task<IResult> HandleReputation(AgentReputationRequest req,
-    ReputationService reputation, OfferingRepository repo, CancellationToken ct)
+    ReputationService reputation, OfferingRepository repo,
+    ILogger<Program> log, CancellationToken ct)
 {
     if (string.IsNullOrWhiteSpace(req.AgentAddress))
         return Results.BadRequest(new { error = "invalid_address", message = "agentAddress is required" });
@@ -240,6 +241,7 @@ async Task<IResult> HandleReputation(AgentReputationRequest req,
     }
     catch (Exception ex)
     {
+        log.LogError(ex, "[reputation] compute failed for {addr}", addr);
         return Results.Json(
             new { error = "compute_failed", message = ex.Message },
             statusCode: StatusCodes.Status503ServiceUnavailable);
