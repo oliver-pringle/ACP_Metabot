@@ -4,14 +4,20 @@ using ACP_Metabot.Api.Models;
 using ACP_Metabot.Api.Services;
 using ACP_Metabot.Api.Services.MarketplaceSource;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSingleton<Db>();
 builder.Services.AddSingleton<OfferingRepository>();
 builder.Services.AddSingleton<WatchRepository>();
+builder.Services.AddSingleton<AgentReputationCacheRepository>();
+builder.Services.AddSingleton<LifetimeSnapshotRepository>();
 
 builder.Services.AddHttpClient();
+builder.Services.AddSingleton<AcpOffChainClient>();
+builder.Services.AddSingleton<ChainEventScanner>();
+builder.Services.AddSingleton<ScoreCalculator>();
 builder.Services.AddSingleton<VoyageEmbeddingProvider>();
 builder.Services.AddSingleton<IEmbeddingProvider>(sp => sp.GetRequiredService<VoyageEmbeddingProvider>());
 builder.Services.AddSingleton<VoyageRerankProvider>();
@@ -43,6 +49,10 @@ builder.Services.AddSingleton<WatchService>();
 builder.Services.AddSingleton<MarketplaceIndexerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MarketplaceIndexerService>());
 builder.Services.AddHostedService<WatchPollerBackgroundService>();
+builder.Services.AddSingleton<LifetimeSnapshotService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LifetimeSnapshotService>());
+builder.Services.AddSingleton<ReputationWarmerService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ReputationWarmerService>());
 
 builder.Services.AddOpenApi();
 
@@ -210,30 +220,33 @@ async Task<IResult> HandleCompose(ComposeRequest req, StackComposerService svc, 
 }
 
 async Task<IResult> HandleReputation(AgentReputationRequest req,
-    OfferingRepository repo, ReputationService reputation)
+    ReputationService reputation, OfferingRepository repo, CancellationToken ct)
 {
     if (string.IsNullOrWhiteSpace(req.AgentAddress))
-        return Results.BadRequest(new { error = "agentAddress is required" });
-
-    if (!reputation.IsReady)
-        return Results.Json(
-            new { error = "reputation unavailable, indexer warming up" },
-            statusCode: StatusCodes.Status503ServiceUnavailable);
-
-    // Match the indexer's lowercase address normalisation.
+        return Results.BadRequest(new { error = "invalid_address", message = "agentAddress is required" });
     var addr = req.AgentAddress.Trim().ToLowerInvariant();
+    if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+        return Results.BadRequest(new { error = "invalid_address", message = "must be 0x followed by 40 hex chars" });
+
+    // Verify the agent is indexed before kicking off any compute.
     var offerings = await repo.ListByAgentAsync(addr);
     if (offerings.Count == 0)
-        return Results.NotFound(new { error = "agent not found" });
+        return Results.NotFound(new { error = "agent_not_indexed", message = "agent has no offerings on the marketplace" });
 
     try
     {
-        var result = reputation.Build(offerings, req.OfferingName);
+        var result = await reputation.GetOrComputeAsync(addr, req.OfferingName, ct);
         return Results.Ok(result);
     }
     catch (KeyNotFoundException)
     {
-        return Results.NotFound(new { error = "offering not found for this agent" });
+        return Results.NotFound(new { error = "offering_not_found", message = "offering not found for this agent" });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(
+            new { error = "compute_failed", message = ex.Message },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 }
 
@@ -316,7 +329,48 @@ app.MapGet("/categories", (CategoryService svc) => Results.Ok(new { categories =
 // Public gateway — same logic, no X-API-Key, IP rate-limited.
 app.MapPost("/v1/search", HandleSearch).RequireRateLimiting("public-search");
 app.MapPost("/v1/composeStack", HandleCompose).RequireRateLimiting("public-compose");
-app.MapPost("/v1/agentReputation", HandleReputation).RequireRateLimiting("public-reputation");
+app.MapGet("/v1/agentReputation", async ([FromQuery] string agent,
+    AgentReputationCacheRepository cacheRepo) =>
+{
+    if (string.IsNullOrWhiteSpace(agent))
+        return Results.BadRequest(new { error = "invalid_address", message = "agent query param is required" });
+    var addr = agent.Trim().ToLowerInvariant();
+    if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+        return Results.BadRequest(new { error = "invalid_address", message = "must be 0x followed by 40 hex chars" });
+
+    var row = await cacheRepo.GetAsync(addr, DateTime.UtcNow);
+    if (row is null)
+        return Results.NotFound(new
+        {
+            error = "not_cached",
+            hint = "hire the agentReputation offering for live computation"
+        });
+
+    var subScores = System.Text.Json.JsonSerializer.Deserialize<SubScoreSet>(row.SubScoresJson);
+    var rawCounts = System.Text.Json.JsonSerializer.Deserialize<RawCounts>(row.RawCountsJson);
+    var flags     = System.Text.Json.JsonSerializer.Deserialize<ReputationFlags>(row.FlagsJson);
+    var result = new AgentReputationResultV2(
+        AgentAddress: row.AgentAddress,
+        AgentName:    row.AgentName,
+        AgentScore:   row.AgentScore,
+        ComputedAt:   row.ComputedAt.ToString("O"),
+        WindowDays:   90,
+        SubScores:    subScores!,
+        RawCounts:    rawCounts!,
+        Flags:        flags!,
+        Offering:     null);
+
+    var hash = System.Security.Cryptography.SHA1.HashData(
+        System.Text.Encoding.UTF8.GetBytes(row.ComputedAt.ToString("O")));
+    var sb = new System.Text.StringBuilder(40);
+    foreach (var b in hash) sb.Append(b.ToString("x2"));
+    var etag = $"\"{sb.ToString()}\"";
+
+    return new HeaderedJsonResult(result, new[] {
+        ("Cache-Control", "public, max-age=3600"),
+        ("ETag", etag),
+    });
+}).RequireRateLimiting("public-reputation");
 app.MapGet("/v1/digest", (int? days, DigestService svc) => HandleDigest(days, svc)).RequireRateLimiting("public-digest");
 app.MapGet("/v1/agent/{address}", (string address,
     OfferingRepository repo, ReputationService reputation)
@@ -419,3 +473,19 @@ app.Run();
 public record SearchRequest(string Query, int? Limit, double? MinScore, double? PriceMaxUsdc, int? StaleAfterDays, bool? Rerank, string? Category);
 public record ComposeRequest(string UseCase, double? BudgetUsdc, int? MaxOfferings);
 public record AgentReputationRequest(string AgentAddress, string? OfferingName);
+
+class HeaderedJsonResult : IResult
+{
+    private readonly object _body;
+    private readonly (string, string)[] _headers;
+    public HeaderedJsonResult(object body, (string, string)[] headers)
+    {
+        _body = body;
+        _headers = headers;
+    }
+    public async Task ExecuteAsync(HttpContext ctx)
+    {
+        foreach (var (k, v) in _headers) ctx.Response.Headers[k] = v;
+        await Results.Ok(_body).ExecuteAsync(ctx);
+    }
+}
