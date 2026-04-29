@@ -13,6 +13,8 @@ builder.Services.AddSingleton<OfferingRepository>();
 builder.Services.AddSingleton<WatchRepository>();
 builder.Services.AddSingleton<AgentReputationCacheRepository>();
 builder.Services.AddSingleton<LifetimeSnapshotRepository>();
+builder.Services.AddSingleton<RequestMetricsRepository>();
+builder.Services.AddSingleton<MetricsChannel>();
 
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<AcpOffChainClient>();
@@ -53,6 +55,8 @@ builder.Services.AddSingleton<LifetimeSnapshotService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LifetimeSnapshotService>());
 builder.Services.AddSingleton<ReputationWarmerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ReputationWarmerService>());
+builder.Services.AddSingleton<MetricsWriterService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<MetricsWriterService>());
 
 builder.Services.AddOpenApi();
 
@@ -140,6 +144,12 @@ if (app.Environment.IsDevelopment())
 
 app.UseForwardedHeaders();
 app.UseRateLimiter();
+
+// Operator metrics: record every request (including 429s and 401s) into
+// the request_log table. Sits AFTER UseRateLimiter so 429 responses are
+// captured, BEFORE the X-API-Key middleware so unauthorized internal-path
+// attempts (401) are also captured — auth failures matter operationally.
+app.UseMiddleware<RequestMetricsMiddleware>();
 
 // X-API-Key middleware: enforce on every endpoint except /health and /v1/*.
 // /v1/* are the public, rate-limited gateway endpoints used by the acp-find
@@ -424,6 +434,41 @@ app.MapPost("/index/refresh", async (MarketplaceIndexerService idx, Cancellation
     await idx.RunOnceAsync(ct);
     return Results.Ok(new { ok = true });
 });
+
+// Operator-only telemetry. All five sit outside /v1/* so the X-API-Key
+// middleware gates them automatically. Backed by the request_log table
+// + hourly/daily rollups; see docs/runbook-scaling.md for the metric ->
+// scaling-lever mapping.
+app.MapGet("/metrics/summary",
+    async (int? days, RequestMetricsRepository repo, MetricsChannel ch) =>
+    {
+        var window = days ?? 7;
+        var summary = await repo.SummaryAsync(window);
+        return Results.Ok(new { window, summary, metricsDropped = ch.DroppedCount });
+    });
+
+app.MapGet("/metrics/timeseries",
+    async (int? days, string? granularity, RequestMetricsRepository repo) =>
+    {
+        try { return Results.Ok(await repo.TimeseriesAsync(days ?? 7, granularity ?? "hour")); }
+        catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
+    });
+
+app.MapGet("/metrics/endpoints",
+    async (int? days, RequestMetricsRepository repo) =>
+        Results.Ok(await repo.EndpointsAsync(days ?? 7)));
+
+app.MapGet("/metrics/top",
+    async (string dim, int? days, int? limit, RequestMetricsRepository repo) =>
+    {
+        if (dim != "query" && dim != "agent")
+            return Results.BadRequest(new { error = "dim must be 'query' or 'agent'" });
+        return Results.Ok(await repo.TopAsync(dim, days ?? 7, limit ?? 20));
+    });
+
+app.MapGet("/metrics/errors",
+    async (int? days, int? limit, RequestMetricsRepository repo) =>
+        Results.Ok(await repo.RecentErrorsAsync(days ?? 1, limit ?? 100)));
 
 app.MapPost("/watches", async (RegisterWatchRequest req, WatchService svc, CancellationToken ct) =>
 {

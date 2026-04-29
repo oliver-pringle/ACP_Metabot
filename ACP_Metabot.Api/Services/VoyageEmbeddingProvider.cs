@@ -38,16 +38,35 @@ public class VoyageEmbeddingProvider : IEmbeddingProvider
             InputType = "document"
         };
 
-        using var resp = await _http.PostAsJsonAsync("embeddings", req, ct);
-        if (!resp.IsSuccessStatusCode)
+        HttpResponseMessage resp;
+        try
         {
-            var body = await resp.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException(
-                $"Voyage embeddings call failed: {(int)resp.StatusCode} {resp.StatusCode} — {body}");
+            resp = await _http.PostAsJsonAsync("embeddings", req, ct);
         }
-        var parsed = await resp.Content.ReadFromJsonAsync<VoyageResponse>(cancellationToken: ct)
-            ?? throw new InvalidOperationException("Voyage returned empty body");
-        return parsed.Data.Select(d => d.Embedding).ToArray();
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (HttpRequestException ex)
+        {
+            throw new VoyageApiException(0, null,
+                $"Voyage embeddings network failure: {ex.Message}", ex);
+        }
+        catch (Exception ex) when (ex is TaskCanceledException || ex is OperationCanceledException)
+        {
+            throw new VoyageApiException(0, null,
+                $"Voyage embeddings timed out: {ex.Message}", ex);
+        }
+
+        using (resp)
+        {
+            if (!resp.IsSuccessStatusCode)
+            {
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                throw new VoyageApiException((int)resp.StatusCode, body,
+                    $"Voyage embeddings call failed: {(int)resp.StatusCode} {resp.StatusCode} — {body}");
+            }
+            var parsed = await resp.Content.ReadFromJsonAsync<VoyageResponse>(cancellationToken: ct)
+                ?? throw new InvalidOperationException("Voyage returned empty body");
+            return parsed.Data.Select(d => d.Embedding).ToArray();
+        }
     }
 
     /// <summary>
@@ -63,16 +82,35 @@ public class VoyageEmbeddingProvider : IEmbeddingProvider
             Model = ModelId,
             InputType = "query"
         };
-        using var resp = await _http.PostAsJsonAsync("embeddings", req, ct);
-        if (!resp.IsSuccessStatusCode)
+        HttpResponseMessage resp;
+        try
         {
-            var body = await resp.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException(
-                $"Voyage query embedding failed: {(int)resp.StatusCode} — {body}");
+            resp = await _http.PostAsJsonAsync("embeddings", req, ct);
         }
-        var parsed = await resp.Content.ReadFromJsonAsync<VoyageResponse>(cancellationToken: ct)
-            ?? throw new InvalidOperationException("Voyage returned empty body");
-        return parsed.Data[0].Embedding;
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (HttpRequestException ex)
+        {
+            throw new VoyageApiException(0, null,
+                $"Voyage query embedding network failure: {ex.Message}", ex);
+        }
+        catch (Exception ex) when (ex is TaskCanceledException || ex is OperationCanceledException)
+        {
+            throw new VoyageApiException(0, null,
+                $"Voyage query embedding timed out: {ex.Message}", ex);
+        }
+
+        using (resp)
+        {
+            if (!resp.IsSuccessStatusCode)
+            {
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                throw new VoyageApiException((int)resp.StatusCode, body,
+                    $"Voyage query embedding failed: {(int)resp.StatusCode} — {body}");
+            }
+            var parsed = await resp.Content.ReadFromJsonAsync<VoyageResponse>(cancellationToken: ct)
+                ?? throw new InvalidOperationException("Voyage returned empty body");
+            return parsed.Data[0].Embedding;
+        }
     }
 
     private static int DimensionForModel(string model) => model switch

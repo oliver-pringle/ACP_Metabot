@@ -47,20 +47,39 @@ public class VoyageRerankProvider
             Truncation = true
         };
 
-        using var resp = await _http.PostAsJsonAsync("rerank", req, ct);
-        if (!resp.IsSuccessStatusCode)
+        HttpResponseMessage resp;
+        try
         {
-            var body = await resp.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException(
-                $"Voyage rerank call failed: {(int)resp.StatusCode} {resp.StatusCode} — {body}");
+            resp = await _http.PostAsJsonAsync("rerank", req, ct);
         }
-        var parsed = await resp.Content.ReadFromJsonAsync<RerankResponse>(cancellationToken: ct)
-            ?? throw new InvalidOperationException("Voyage rerank returned empty body");
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (HttpRequestException ex)
+        {
+            throw new VoyageApiException(0, null,
+                $"Voyage rerank network failure: {ex.Message}", ex);
+        }
+        catch (Exception ex) when (ex is TaskCanceledException || ex is OperationCanceledException)
+        {
+            throw new VoyageApiException(0, null,
+                $"Voyage rerank timed out: {ex.Message}", ex);
+        }
 
-        return parsed.Data
-            .OrderByDescending(d => d.RelevanceScore)
-            .Select(d => d.Index)
-            .ToArray();
+        using (resp)
+        {
+            if (!resp.IsSuccessStatusCode)
+            {
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                throw new VoyageApiException((int)resp.StatusCode, body,
+                    $"Voyage rerank call failed: {(int)resp.StatusCode} {resp.StatusCode} — {body}");
+            }
+            var parsed = await resp.Content.ReadFromJsonAsync<RerankResponse>(cancellationToken: ct)
+                ?? throw new InvalidOperationException("Voyage rerank returned empty body");
+
+            return parsed.Data
+                .OrderByDescending(d => d.RelevanceScore)
+                .Select(d => d.Index)
+                .ToArray();
+        }
     }
 
     private class RerankRequest

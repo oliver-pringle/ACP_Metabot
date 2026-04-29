@@ -40,17 +40,36 @@ public class ClaudeApiClient : IClaudeClient
             }
         };
 
-        using var resp = await _http.PostAsJsonAsync("messages", req, ct);
-        if (!resp.IsSuccessStatusCode)
+        HttpResponseMessage resp;
+        try
         {
-            var body = await resp.Content.ReadAsStringAsync(ct);
-            throw new InvalidOperationException(
-                $"Anthropic Messages call failed: {(int)resp.StatusCode} — {body}");
+            resp = await _http.PostAsJsonAsync("messages", req, ct);
         }
-        var parsed = await resp.Content.ReadFromJsonAsync<MessagesResponse>(cancellationToken: ct)
-            ?? throw new InvalidOperationException("Anthropic returned empty body");
-        var text = parsed.Content?.FirstOrDefault(c => c.Type == "text")?.Text;
-        return text ?? string.Empty;
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (HttpRequestException ex)
+        {
+            throw new ClaudeApiException(0, null,
+                $"Anthropic Messages network failure: {ex.Message}", ex);
+        }
+        catch (Exception ex) when (ex is TaskCanceledException || ex is OperationCanceledException)
+        {
+            throw new ClaudeApiException(0, null,
+                $"Anthropic Messages timed out: {ex.Message}", ex);
+        }
+
+        using (resp)
+        {
+            if (!resp.IsSuccessStatusCode)
+            {
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                throw new ClaudeApiException((int)resp.StatusCode, body,
+                    $"Anthropic Messages call failed: {(int)resp.StatusCode} — {body}");
+            }
+            var parsed = await resp.Content.ReadFromJsonAsync<MessagesResponse>(cancellationToken: ct)
+                ?? throw new InvalidOperationException("Anthropic returned empty body");
+            var text = parsed.Content?.FirstOrDefault(c => c.Type == "text")?.Text;
+            return text ?? string.Empty;
+        }
     }
 
     private class MessagesRequest

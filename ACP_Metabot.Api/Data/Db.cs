@@ -118,7 +118,54 @@ public class Db
             );
 
             CREATE INDEX IF NOT EXISTS idx_snapshot_date
-                ON agent_lifetime_snapshot(snapshot_date)
+                ON agent_lifetime_snapshot(snapshot_date);
+
+            CREATE TABLE IF NOT EXISTS request_log (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts              TEXT    NOT NULL,
+                endpoint        TEXT    NOT NULL,
+                method          TEXT    NOT NULL,
+                status_code     INTEGER NOT NULL,
+                duration_ms     INTEGER NOT NULL,
+                source          TEXT    NOT NULL,
+                user_agent      TEXT,
+                caller_id       TEXT,
+                remote_ip       TEXT,
+                query_text      TEXT,
+                agent_address   TEXT,
+                provider_error  TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_request_log_ts          ON request_log(ts);
+            CREATE INDEX IF NOT EXISTS ix_request_log_endpoint_ts ON request_log(endpoint, ts);
+            CREATE INDEX IF NOT EXISTS ix_request_log_source_ts   ON request_log(source, ts);
+
+            CREATE TABLE IF NOT EXISTS request_rollup_hourly (
+                bucket_hour     TEXT    NOT NULL,
+                endpoint        TEXT    NOT NULL,
+                source          TEXT    NOT NULL,
+                status_class    TEXT    NOT NULL,
+                count           INTEGER NOT NULL,
+                sum_duration_ms INTEGER NOT NULL,
+                voyage_errors   INTEGER NOT NULL DEFAULT 0,
+                claude_errors   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (bucket_hour, endpoint, source, status_class)
+            );
+
+            CREATE TABLE IF NOT EXISTS request_rollup_daily (
+                bucket_date     TEXT    NOT NULL,
+                endpoint        TEXT    NOT NULL,
+                source          TEXT    NOT NULL,
+                status_class    TEXT    NOT NULL,
+                count           INTEGER NOT NULL,
+                sum_duration_ms INTEGER NOT NULL,
+                voyage_errors   INTEGER NOT NULL DEFAULT 0,
+                claude_errors   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (bucket_date, endpoint, source, status_class)
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_rollup_hourly_endpoint ON request_rollup_hourly(endpoint, bucket_hour);
+            CREATE INDEX IF NOT EXISTS ix_rollup_daily_endpoint  ON request_rollup_daily(endpoint, bucket_date)
             ";
         await cmd.ExecuteNonQueryAsync();
 

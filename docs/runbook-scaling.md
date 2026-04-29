@@ -1,0 +1,82 @@
+# TheMetaBot Scaling Runbook
+
+**Last reviewed:** 2026-04-29
+**Companion spec:** [`superpowers/specs/2026-04-29-metrics-and-scaling-design.md`](superpowers/specs/2026-04-29-metrics-and-scaling-design.md)
+
+Seven scaling levers, ordered by likely trigger order. Each names the metric signal that fires it (queryable from `/metrics/*`), the action, the effort, and the risk. None of these are pre-implemented — pull a lever only when its signal trips.
+
+## Reading the metrics
+
+All signals reference operator-only endpoints gated by `X-API-Key: $INTERNAL_API_KEY`:
+
+```bash
+curl -H "X-API-Key: $INTERNAL_API_KEY" https://api.acp-metabot.dev/metrics/summary?days=7
+curl -H "X-API-Key: $INTERNAL_API_KEY" https://api.acp-metabot.dev/metrics/timeseries?days=7&granularity=hour
+curl -H "X-API-Key: $INTERNAL_API_KEY" https://api.acp-metabot.dev/metrics/endpoints?days=7
+curl -H "X-API-Key: $INTERNAL_API_KEY" "https://api.acp-metabot.dev/metrics/top?dim=query&days=7"
+curl -H "X-API-Key: $INTERNAL_API_KEY" "https://api.acp-metabot.dev/metrics/errors?days=1"
+```
+
+Note: the public gateway (`api.acp-metabot.dev`) does NOT expose `/metrics/*` — those paths are private and only reachable on the internal docker network. Use `docker compose exec acp-metabot-api curl http://localhost:5000/metrics/...` from the droplet, or SSH-tunnel.
+
+## Lever 1 — Cache query embeddings on the search hot path
+
+**Signal:** `/metrics/timeseries` shows p95 latency on `/v1/search` exceeds 2 s sustained over 30 minutes, OR `/metrics/endpoints` shows `voyage_errors` rate exceeds 1% of `/v1/search` volume.
+
+**Action:** Wrap `EmbedQueryAsync` in `VoyageEmbeddingProvider` with a `ConcurrentDictionary<string, Lazy<Task<float[]>>>` keyed by `(model, normalize(query))`. Cap at 1000 entries with a 1 h timestamp-based TTL. Hot queries (visible via `/metrics/top?dim=query`) collapse to one Voyage call per TTL.
+
+**Effort:** ~2 hours. Single-file change. **Risk:** Low — cache miss is correct behaviour.
+
+## Lever 2 — Quantize embeddings to int8
+
+**Signal:** Container memory exceeds 70% of droplet RAM, OR `corpus.count × 1024 × 4 bytes > 200 MB` (corpus count surfaced via `/v1/health`).
+
+**Action:** Voyage supports `output_dtype=int8` natively. 4× memory reduction, < 1% recall drop. Add a column to `offering_embeddings` for dtype, a parallel decode path in `SearchService`, an indexer flag, then trigger a reindex (`POST /index/refresh`).
+
+**Effort:** ~1 day. **Risk:** Medium — touches the hot search loop. Validate recall against a held-out query set before flipping.
+
+## Lever 3 — Split metrics into a separate SQLite file
+
+**Signal:** `MetricsWriterService` logs flushes > 100 ms (instrument it before pulling this lever), OR observable "database is locked" errors in container logs.
+
+**Action:** New `Db` instance with its own connection string for `metrics.db`. `RequestMetricsRepository` takes the metrics `Db` instead of the main one. The two databases never share locks; main DB stays clean.
+
+**Effort:** ~3 hours. Additive; rollback is reverting one config line. **Risk:** Low.
+
+## Lever 4 — Reputation cache TTL + warm set
+
+**Signal:** `/metrics/endpoints` shows `/v1/agentReputation` p95 > 5 s, OR `compute_failed` errors > 1%.
+
+**Action:**
+- (a) Bump `agent_reputation_cache` TTL from 24 h to 48 h. One constant in `AgentReputationCacheRepository`.
+- (b) Increase `ReputationWarmerService` warm set from current size to top-500 agents.
+
+**Effort:** ~30 min for (a); ~1 h for (b). **Risk:** Low. (a) trades freshness for capacity; (b) costs more chain RPC.
+
+## Lever 5 — Tighten Caddy / ASP.NET rate limits
+
+**Signal:** `/metrics/top?dim=agent` shows a single agent address dominating > 30% of `/v1/agentReputation` calls (one buggy or hostile caller); OR `/metrics/endpoints` shows `429` count < 1% of total volume (the limiter is too generous; we're over-provisioning).
+
+**Action:** Tune the per-IP policies in `Program.cs:71-128`. Drop `public-search` from 30/h to 15/h, or add a stricter per-IP limit on the relevant endpoint.
+
+**Effort:** ~5 min per knob. **Risk:** Low. Just numbers in existing code.
+
+## Lever 6 — Read-replica horizontal split
+
+**Signal:** Droplet CPU > 70% sustained, AND levers 1–5 are exhausted.
+
+**Action:** Stand up a second `acp-metabot-api` container behind Caddy with a read-only mounted snapshot of `acp_metabot.db` (refreshed nightly via `sqlite3 .backup`). Route `/v1/*` reads to the replica; writers (indexer, watch poller, snapshot service, metrics writer) stay on the primary. The `agent_reputation_cache` already tolerates 24 h staleness; same for `/v1/digest`, `/v1/agent/{address}`, `/v1/categories`, `/v1/health`. Caddy `upstream` block selects round-robin or sticky-IP.
+
+**Effort:** ~2 days — Caddyfile edits, snapshot cron, container topology, deploy script.
+
+**Risk:** Medium-high. Replication lag becomes operationally visible. Mitigation: only worth pulling once the data tolerance is acceptable.
+
+## Lever 7 — Exit SQLite (last resort)
+
+**Signal:** Lever 6 pulled and write-side bottleneck remains (indexer fetch durations climbing, snapshot service running long, `request_log` flushes slow).
+
+**Action:** Workspace convention bans EF/Dapper/PG/Mongo/Redis. The remaining in-bounds option is to keep ADO.NET and switch the backing engine to a SQLite-compatible drop-in (libSQL/Turso, Cloudflare D1) — or reopen the workspace constraint with the user.
+
+**Effort:** Weeks. Touches every repository.
+
+**Risk:** High. **Do not pull without an explicit user decision.**

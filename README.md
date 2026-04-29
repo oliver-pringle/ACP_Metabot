@@ -148,6 +148,49 @@ deep-eval tier to call `POST /agentReputation` on `acp-metabot-api:5000`
 directly, authenticated with `X-Api-Key: $INTERNAL_API_KEY`. No new
 endpoint was added; only cross-bot reachability was enabled in v1.1.
 
+## Operator telemetry
+
+Every request is recorded into the `request_log` table by an ASP.NET
+middleware that runs after the rate limiter (so 429s are captured) and
+before the X-API-Key check (so 401s on internal paths are captured).
+Provider failures (Voyage / Claude) are tagged as `provider_error =
+"voyage_<status>"` / `"claude_<status>"` via typed exceptions.
+
+Five operator-only `GET /metrics/*` endpoints (X-API-Key gated, same as
+`/index/stats`) expose the data. They are NOT reachable through the
+public Caddy gateway — exec into the api container or SSH-tunnel:
+
+```bash
+# From the droplet:
+docker compose exec acp-metabot-api curl -s \
+  -H "X-API-Key: $INTERNAL_API_KEY" \
+  http://localhost:5000/metrics/summary?days=7 | jq
+
+# Other endpoints:
+.../metrics/timeseries?days=7&granularity=hour
+.../metrics/endpoints?days=7
+.../metrics/top?dim=query&days=7   (or dim=agent)
+.../metrics/errors?days=1&limit=100
+```
+
+The `summary` response includes `metricsDropped` — non-zero means the
+in-process bounded channel (4096) was overflowed, the oldest events
+were dropped, and you should look into bumping capacity or batch size
+in `MetricsWriterService`.
+
+Source classification (`source` column on `request_log`):
+- `mcp_plugin` — `/v1/*` requests with `User-Agent: acp-find-plugin/<ver>`.
+- `public_other` — any other `/v1/*` traffic (curl, browsers, other MCP clients).
+- `internal` — non-`/v1/*` traffic (sidecar, cross-bot). The `X-Caller`
+  header (e.g. `sidecar`, `defieval`) is captured into `caller_id` for
+  per-bot breakdown without a schema change.
+
+Retention: raw rows 14 days, hourly rollup 90 days, daily rollup
+forever. Hourly rollup happens at minute 5 of every hour; daily rollup
++ prune at 03:00 UTC.
+
+For the metric → scaling-lever mapping, see [`docs/runbook-scaling.md`](docs/runbook-scaling.md).
+
 ## Security posture
 
 - **`X-API-Key` between sidecar and C# API.** Required on every endpoint

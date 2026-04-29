@@ -153,6 +153,10 @@ export function createApiClient(
           headers: {
             "Content-Type": "application/json",
             "X-API-Key": apiKey,
+            // Tag internal calls so the C# tier's request_log can split
+            // sidecar traffic from cross-bot traffic. Free-text — peers
+            // (DeFiEval, AgentEval) send their own value here.
+            "X-Caller": "sidecar",
             ...(init?.headers ?? {}),
           },
         });
