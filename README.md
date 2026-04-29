@@ -142,6 +142,12 @@ The API has no published ports — only the sidecar talks to it on the
 internal `acp-metabot` bridge network. SQLite persists to
 `./data/acp_metabot.db` on the host.
 
+`acp-metabot-api` also joins the external bridge `acp-shared` (created
+once with `docker network create acp-shared`). This allows ACP_DeFiEval's
+deep-eval tier to call `POST /agentReputation` on `acp-metabot-api:5000`
+directly, authenticated with `X-Api-Key: $INTERNAL_API_KEY`. No new
+endpoint was added; only cross-bot reachability was enabled in v1.1.
+
 ## Security posture
 
 - **`X-API-Key` between sidecar and C# API.** Required on every endpoint
