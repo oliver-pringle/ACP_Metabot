@@ -28,17 +28,12 @@ public class ReputationService
     // without removing it (legacy is still used by /search inline summaries
     // and /agent/{address} browse).
     private readonly AgentReputationCacheRepository _cacheRepo;
-    private readonly AgentReputationHistoryRepository _historyRepo;
     private readonly LifetimeSnapshotRepository    _snapshotRepo;
     private readonly ChainEventScanner             _scanner;
     private readonly AcpOffChainClient             _offChain;
     private readonly ScoreCalculator               _calculator;
     private readonly OfferingRepository            _offeringRepo;
     private readonly ILogger<ReputationService>    _logger;
-    // Trajectory length attached to agentReputation responses (paid hires +
-    // public cache reads). 30 is the canonical "trend" window; longer
-    // trajectories are available via GET /v1/agentReputationHistory.
-    private const int TrajectoryDays = 30;
 
     // One semaphore per agent, lazily created. Prevents two concurrent paid
     // hires for the same agent triggering two chain scans.
@@ -56,7 +51,6 @@ public class ReputationService
 
     public ReputationService(
         AgentReputationCacheRepository cacheRepo,
-        AgentReputationHistoryRepository historyRepo,
         LifetimeSnapshotRepository snapshotRepo,
         ChainEventScanner scanner,
         AcpOffChainClient offChain,
@@ -65,7 +59,6 @@ public class ReputationService
         ILogger<ReputationService> logger)
     {
         _cacheRepo    = cacheRepo;
-        _historyRepo  = historyRepo;
         _snapshotRepo = snapshotRepo;
         _scanner      = scanner;
         _offChain     = offChain;
@@ -228,7 +221,7 @@ public class ReputationService
         var cached = await _cacheRepo.GetAsync(addr, nowUtc);
         if (cached is not null)
         {
-            return await DeserializeWithTrajectoryAsync(cached, warmHit: cached.Source == "warmer");
+            return Deserialize(cached, warmHit: cached.Source == "warmer");
         }
 
         var sem = _computeLocks.GetOrAdd(addr, _ => new SemaphoreSlim(1, 1));
@@ -237,7 +230,7 @@ public class ReputationService
         {
             // Another thread is computing; re-read after timeout.
             var late = await _cacheRepo.GetAsync(addr, DateTime.UtcNow);
-            if (late is not null) return await DeserializeWithTrajectoryAsync(late, warmHit: false);
+            if (late is not null) return Deserialize(late, warmHit: false);
             throw new InvalidOperationException("concurrent compute timed out");
         }
         try
@@ -245,7 +238,7 @@ public class ReputationService
             // Re-check cache under the lock (another thread may have just written).
             cached = await _cacheRepo.GetAsync(addr, DateTime.UtcNow);
             if (cached is not null)
-                return await DeserializeWithTrajectoryAsync(cached, warmHit: cached.Source == "warmer");
+                return Deserialize(cached, warmHit: cached.Source == "warmer");
 
             return await ComputeAsync(addr, source: "lazy", ct);
         }
@@ -253,28 +246,6 @@ public class ReputationService
         {
             sem.Release();
         }
-    }
-
-    /// <summary>
-    /// Cache-only read used by the public GET /v1/agentReputation. Returns
-    /// null on miss so the handler can issue 404 + hint without triggering
-    /// compute. Attaches trajectory on hit so the public surface gets the
-    /// same shape as the paid SKU.
-    /// </summary>
-    public async Task<AgentReputationResultV2?> GetCachedAsync(string agentAddress)
-    {
-        var addr = agentAddress.ToLowerInvariant();
-        var cached = await _cacheRepo.GetAsync(addr, DateTime.UtcNow);
-        if (cached is null) return null;
-        return await DeserializeWithTrajectoryAsync(cached, warmHit: cached.Source == "warmer");
-    }
-
-    private async Task<AgentReputationResultV2> DeserializeWithTrajectoryAsync(
-        CachedReputationRow row, bool warmHit)
-    {
-        var result = Deserialize(row, warmHit);
-        var trajectory = await _historyRepo.GetTrajectoryAsync(row.AgentAddress, TrajectoryDays);
-        return result with { Trajectory = trajectory.Count > 0 ? trajectory : null };
     }
 
     // Computes a fresh reputation, persists it, and returns the V2 wire object.
@@ -328,16 +299,10 @@ public class ReputationService
             LastScannedBlock: chain.HighestScannedBlock,
             Source:           source));
 
-        // Persist daily history snapshot so trajectory is queryable. Same-day
-        // re-computes overwrite — the day's value is the most recent compute.
-        await _historyRepo.UpsertAsync(addr, DateOnly.FromDateTime(nowUtc),
-            score.Overall, subScoresJson, rawCountsJson);
-
         // Refresh percentile arrays after each compute so the next caller sees
         // the up-to-date corpus.
         await RebuildPercentilesFromCacheAsync(nowUtc);
 
-        var trajectory = await _historyRepo.GetTrajectoryAsync(addr, TrajectoryDays);
         return new AgentReputationResultV2(
             AgentAddress: addr,
             AgentName:    name,
@@ -346,8 +311,7 @@ public class ReputationService
             WindowDays:   90,
             SubScores:    AttachPercentiles(score.SubScores),
             RawCounts:    rawCounts,
-            Flags:        flags,
-            Trajectory:   trajectory.Count > 0 ? trajectory : null);
+            Flags:        flags);
     }
 
     public async Task RebuildPercentilesFromCacheAsync(DateTime nowUtc)

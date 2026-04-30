@@ -11,29 +11,22 @@ public class ReputationWarmerService : BackgroundService
 
     private readonly ReputationService            _reputation;
     private readonly AgentReputationCacheRepository _cacheRepo;
-    private readonly AgentReputationHistoryRepository _historyRepo;
     private readonly MarketplaceIndexerService    _indexer;
     private readonly IConfiguration               _config;
     private readonly ILogger<ReputationWarmerService> _logger;
-    // 90-day rolling retention on agent_reputation_history. Matches the
-    // reputation v2 window so the longest-trajectory query returns at most
-    // one full window of points.
-    private const int HistoryRetentionDays = 90;
 
     public ReputationWarmerService(
         ReputationService reputation,
         AgentReputationCacheRepository cacheRepo,
-        AgentReputationHistoryRepository historyRepo,
         MarketplaceIndexerService indexer,
         IConfiguration config,
         ILogger<ReputationWarmerService> logger)
     {
-        _reputation  = reputation;
-        _cacheRepo   = cacheRepo;
-        _historyRepo = historyRepo;
-        _indexer     = indexer;
-        _config      = config;
-        _logger      = logger;
+        _reputation = reputation;
+        _cacheRepo  = cacheRepo;
+        _indexer    = indexer;
+        _config     = config;
+        _logger     = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -101,14 +94,5 @@ public class ReputationWarmerService : BackgroundService
             done, failed, skipped);
 
         await _reputation.RebuildPercentilesFromCacheAsync(DateTime.UtcNow);
-
-        // Prune history older than the rolling window. Cheap (single indexed
-        // DELETE), runs after the warmer rather than on every compute so we
-        // amortise the cost into the once-per-day pass.
-        var cutoff = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-HistoryRetentionDays);
-        var pruned = await _historyRepo.PruneOlderThanAsync(cutoff);
-        if (pruned > 0)
-            _logger.LogInformation("[warmer] history prune removed {n} rows older than {cutoff:yyyy-MM-dd}",
-                pruned, cutoff);
     }
 }

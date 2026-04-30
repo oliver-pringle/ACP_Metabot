@@ -5,19 +5,16 @@ across all agents, embeds them, and exposes four ACP offerings:
 
 | Name              | Price        | What it does                                                                  |
 |-------------------|--------------|-------------------------------------------------------------------------------|
-| `search`          | 0.01 USDC    | Hybrid BM25 + dense semantic search; returns ranked offerings + a `bestMatch` flag when score ≥ 0.7. Filters by `priceMaxUsdc`, `chain`, `minReputation`, `freshness`. |
+| `search`          | 0.01 USDC    | Semantic search; returns ranked offerings + a `bestMatch` flag when score ≥ 0.7. Filters by `priceMaxUsdc`. |
 | `composeStack`    | 0.50 USDC    | LLM-curated multi-offering stack for a buyer's stated use case.               |
 | `watchOffering`   | 0.50 USDC    | Standing semantic search delivered via buyer-supplied HTTPS webhook over a 1–30 day window. |
-| `agentReputation` | 0.05 USDC    | On-chain behavioural reputation (0–100) for an agent: completion rate, dispute rate, recency, 30-day throughput, avg response time. Cached 24h. Includes a 30-day daily trajectory in the deliverable. |
-
-Public read-only sibling endpoint: `GET /v1/agentReputationHistory?agent=<addr>&days=<1-90>` returns day-by-day trajectory without a paid hire.
+| `agentReputation` | 0.05 USDC    | On-chain behavioural reputation (0–100) for an agent: completion rate, dispute rate, recency, 30-day throughput, avg response time. Cached 24h. |
 
 Built off the BasicBot boilerplate. Live on Base mainnet. Design specs:
 
 - `docs/design.md` — overall architecture
 - `docs/superpowers/specs/2026-04-26-watchoffering-design.md` — watchOffering spec
 - `docs/superpowers/specs/2026-04-28-agent-reputation-v2-design.md` — agentReputation v2 (behavioural) spec
-- `docs/superpowers/specs/2026-04-30-sharper-core-engine-design.md` — hybrid search + fielded filters + reputation trajectory (v1.2)
 
 ## Architecture
 

@@ -165,70 +165,9 @@ public class Db
             );
 
             CREATE INDEX IF NOT EXISTS ix_rollup_hourly_endpoint ON request_rollup_hourly(endpoint, bucket_hour);
-            CREATE INDEX IF NOT EXISTS ix_rollup_daily_endpoint  ON request_rollup_daily(endpoint, bucket_date);
-
-            -- Phase 1: hybrid BM25+dense search. External-content FTS5 mirrors
-            -- offerings(name, agent, description) for the lexical leg of the fusion.
-            -- Triggers keep the inverted index in lockstep with the source table
-            -- so the indexer's hot path stays UpsertManyAsync-only — no manual
-            -- rebuild calls anywhere.
-            CREATE VIRTUAL TABLE IF NOT EXISTS offerings_fts USING fts5(
-                offering_name, agent_name, description,
-                content='offerings', content_rowid='id',
-                tokenize='unicode61 remove_diacritics 2'
-            );
-
-            CREATE TRIGGER IF NOT EXISTS offerings_ai AFTER INSERT ON offerings BEGIN
-                INSERT INTO offerings_fts(rowid, offering_name, agent_name, description)
-                VALUES (new.id, new.offering_name, new.agent_name, new.description);
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS offerings_ad AFTER DELETE ON offerings BEGIN
-                INSERT INTO offerings_fts(offerings_fts, rowid, offering_name, agent_name, description)
-                VALUES ('delete', old.id, old.offering_name, old.agent_name, old.description);
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS offerings_au AFTER UPDATE ON offerings BEGIN
-                INSERT INTO offerings_fts(offerings_fts, rowid, offering_name, agent_name, description)
-                VALUES ('delete', old.id, old.offering_name, old.agent_name, old.description);
-                INSERT INTO offerings_fts(rowid, offering_name, agent_name, description)
-                VALUES (new.id, new.offering_name, new.agent_name, new.description);
-            END;
-
-            -- Phase 3: reputation time-series. One row per (agent, UTC date);
-            -- 90-day retention pruned by the warmer post-pass.
-            CREATE TABLE IF NOT EXISTS agent_reputation_history (
-                agent_address      TEXT    NOT NULL,
-                snapshot_date      TEXT    NOT NULL,
-                agent_score        INTEGER NOT NULL,
-                sub_scores_json    TEXT    NOT NULL,
-                raw_counts_json    TEXT    NOT NULL,
-                PRIMARY KEY (agent_address, snapshot_date)
-            );
-
-            CREATE INDEX IF NOT EXISTS ix_rep_history_agent_date
-                ON agent_reputation_history(agent_address, snapshot_date DESC);
+            CREATE INDEX IF NOT EXISTS ix_rollup_daily_endpoint  ON request_rollup_daily(endpoint, bucket_date)
             ";
         await cmd.ExecuteNonQueryAsync();
-
-        // FTS5 idempotent backfill — only inserts ids missing from offerings_fts.
-        // Handles the existing prod DB on first deploy; no-op on subsequent boots.
-        await using (var bf = conn.CreateCommand())
-        {
-            bf.CommandText = @"
-                INSERT INTO offerings_fts(rowid, offering_name, agent_name, description)
-                SELECT o.id, o.offering_name, o.agent_name, o.description
-                FROM offerings o
-                WHERE NOT EXISTS (SELECT 1 FROM offerings_fts f WHERE f.rowid = o.id);";
-            try
-            {
-                await bf.ExecuteNonQueryAsync();
-            }
-            catch (SqliteException ex)
-            {
-                Console.Error.WriteLine($"[db] WARNING: FTS5 backfill failed ({ex.Message}); hybrid search will fall back to dense-only.");
-            }
-        }
 
         // Idempotent column additions for databases created before reputation
         // columns existed. SQLite has no `ADD COLUMN IF NOT EXISTS`, so each
@@ -249,19 +188,6 @@ public class Db
             catch (SqliteException ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
             {
                 // Already added on a prior boot. No action.
-            }
-        }
-
-        // FTS5 availability probe — Phase 1 hybrid search needs it. Microsoft.Data.Sqlite 9.0.*
-        // bundles SQLite with FTS5 enabled; this probe surfaces the failure early on the rare
-        // build where it isn't, before the offerings_fts CREATE blows up.
-        await using (var probe = conn.CreateCommand())
-        {
-            probe.CommandText = "SELECT 1 FROM pragma_compile_options() WHERE compile_options = 'ENABLE_FTS5' LIMIT 1";
-            var hasFts5 = await probe.ExecuteScalarAsync();
-            if (hasFts5 is null)
-            {
-                Console.Error.WriteLine("[db] WARNING: SQLite ENABLE_FTS5 not detected — hybrid search will fall back to dense-only.");
             }
         }
     }

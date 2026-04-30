@@ -8,7 +8,7 @@ import {
 export const search: Offering = {
   name: "search",
   description:
-    "Semantic search across the ACP marketplace. Given a natural-language query (e.g. \"close a position on GMX for under 0.20 USDC\"), returns ranked offerings with agent name, agent address, offering name, price, and a similarity score 0-1. Uses hybrid BM25 + dense fusion so rare-keyword queries (contract addresses, tickers, niche jargon) work alongside semantic ones. Optional filters: priceMaxUsdc, chain, minReputation, freshness. Response includes a bestMatch field when the top result scores above 0.8.",
+    "Semantic search across the ACP marketplace. Given a natural-language query (e.g. \"close a position on GMX for under 0.20 USDC\"), returns ranked offerings with agent name, agent address, offering name, price, and a similarity score 0-1. Filter by max price; the response includes a bestMatch field when the top result scores above 0.8.",
   requirementSchema: {
     type: "object",
     properties: {
@@ -32,25 +32,8 @@ export const search: Offering = {
       },
       staleAfterDays: {
         type: "integer",
-        description: "Optional. Excludes offerings whose hire count hasn't grown within this lookback window. Pass 0 or omit to disable. Superseded by `freshness` when both are supplied.",
+        description: "Optional. Excludes offerings whose hire count hasn't grown within this lookback window. Pass 0 or omit to disable.",
         minimum: 0,
-        maximum: 365
-      },
-      chain: {
-        type: "array",
-        items: { type: "string" },
-        description: "Optional. Restrict to one or more chain ids (e.g. [\"base\",\"base-sepolia\"]). Case-insensitive; up to 8 entries."
-      },
-      minReputation: {
-        type: "integer",
-        description: "Optional. Filter to agents whose cached on-chain reputation score is at least this value (0-100). Agents not yet evaluated pass through (unindexed != bad).",
-        minimum: 0,
-        maximum: 100
-      },
-      freshness: {
-        type: "integer",
-        description: "Optional. Replacement for staleAfterDays — keep only offerings whose hire count has grown within the last N days.",
-        minimum: 1,
         maximum: 365
       }
     },
@@ -74,31 +57,6 @@ export const search: Offering = {
         return { valid: false, reason: "staleAfterDays must be an integer between 0 and 365" };
       }
     }
-    if (req.chain !== undefined && req.chain !== null) {
-      if (!Array.isArray(req.chain)) {
-        return { valid: false, reason: "chain must be an array of strings" };
-      }
-      if (req.chain.length > 8) {
-        return { valid: false, reason: "chain accepts at most 8 entries" };
-      }
-      for (const c of req.chain) {
-        if (typeof c !== "string" || c.length === 0 || c.length > 64) {
-          return { valid: false, reason: "chain entries must be non-empty strings <= 64 chars" };
-        }
-      }
-    }
-    if (req.minReputation !== undefined && req.minReputation !== null) {
-      if (typeof req.minReputation !== "number" || !Number.isInteger(req.minReputation)
-          || req.minReputation < 0 || req.minReputation > 100) {
-        return { valid: false, reason: "minReputation must be an integer between 0 and 100" };
-      }
-    }
-    if (req.freshness !== undefined && req.freshness !== null) {
-      if (typeof req.freshness !== "number" || !Number.isInteger(req.freshness)
-          || req.freshness < 1 || req.freshness > 365) {
-        return { valid: false, reason: "freshness must be an integer between 1 and 365" };
-      }
-    }
     return { valid: true };
   },
   async execute(req, { client }) {
@@ -110,11 +68,6 @@ export const search: Offering = {
         typeof req.priceMaxUsdc === "number" ? req.priceMaxUsdc : undefined,
       staleAfterDays:
         typeof req.staleAfterDays === "number" ? req.staleAfterDays : undefined,
-      chain: Array.isArray(req.chain) ? (req.chain as string[]) : undefined,
-      minReputation:
-        typeof req.minReputation === "number" ? req.minReputation : undefined,
-      freshness:
-        typeof req.freshness === "number" ? req.freshness : undefined,
     });
   },
 };

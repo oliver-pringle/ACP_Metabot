@@ -11,17 +11,7 @@ public record AgentReputationResultV2(
     [property: JsonPropertyName("windowDays")]   int WindowDays,
     [property: JsonPropertyName("subScores")]    SubScoreSet SubScores,
     [property: JsonPropertyName("rawCounts")]    RawCounts RawCounts,
-    [property: JsonPropertyName("flags")]        ReputationFlags Flags,
-    [property: JsonPropertyName("trajectory"),
-               JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        IReadOnlyList<HistoryPoint>? Trajectory = null);
-
-// One day's reputation snapshot. Returned inline on agentReputation responses
-// (last 30 days) and as the array body on GET /v1/agentReputationHistory.
-public record HistoryPoint(
-    [property: JsonPropertyName("date")]       string Date,           // YYYY-MM-DD UTC
-    [property: JsonPropertyName("agentScore")] int AgentScore,
-    [property: JsonPropertyName("subScores")]  SubScoreSet? SubScores);
+    [property: JsonPropertyName("flags")]        ReputationFlags Flags);
 
 public record SubScoreSet(
     [property: JsonPropertyName("completion")]   SubScore Completion,
