@@ -19,4 +19,8 @@
     <None Include="Data/seed/**/*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="ACP_Metabot.Api.Tests" />
+  </ItemGroup>
+
 </Project>

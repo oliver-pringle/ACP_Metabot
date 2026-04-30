@@ -106,6 +106,29 @@ public class AgentReputationCacheRepository
         return list;
     }
 
+    // Snapshot of (lower-cased agent_address -> agent_score) across every fresh
+    // cache row. Used by SearchService to apply the minReputation filter
+    // without per-request DB round-trips. Stale rows (>24h old) are skipped —
+    // an unreliable snapshot is worse than no signal.
+    public async Task<IReadOnlyDictionary<string, int>> ListAllAgentScoresAsync(DateTime nowUtc)
+    {
+        var cutoff = nowUtc.Subtract(Ttl).ToString("O", CultureInfo.InvariantCulture);
+        var dict = new Dictionary<string, int>(StringComparer.Ordinal);
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT agent_address, agent_score
+            FROM agent_reputation_cache
+            WHERE computed_at >= $cutoff;";
+        cmd.Parameters.AddWithValue("$cutoff", cutoff);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            dict[reader.GetString(0).ToLowerInvariant()] = reader.GetInt32(1);
+        }
+        return dict;
+    }
+
     // Loads every fresh (≤ 24h old) cache row for the percentile rebuild pass.
     public async Task<IReadOnlyList<CachedReputationRow>> ListAllForPercentilesAsync(DateTime nowUtc)
     {

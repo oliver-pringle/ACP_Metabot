@@ -4,7 +4,7 @@ import { requireString } from "../validators.js";
 export const agentReputation: Offering = {
   name: "agentReputation",
   description:
-    "On-chain behavioural reputation for an ACP agent. Returns a 0-100 agentScore plus five sub-scores (completion, dispute, recency, volume30d, responseTime), each with raw evidence and corpus percentile, derived from on-chain JobCreated/JobFunded/JobSubmitted/JobCompleted/JobRejected/JobExpired events on Base. Includes raw counts and reliability flags. Cached 24h per agent; warm cache hits are flagged. Pass agentAddress only — the score is agent-level.",
+    "On-chain behavioural reputation for an ACP agent. Returns a 0-100 agentScore plus five sub-scores (completion, dispute, recency, volume30d, responseTime), each with raw evidence and corpus percentile, derived from on-chain JobCreated/JobFunded/JobSubmitted/JobCompleted/JobRejected/JobExpired events on Base. Includes raw counts, reliability flags, AND a 30-day daily trajectory so buyers can see whether the agent is improving or declining. Cached 24h per agent; warm cache hits are flagged. Pass agentAddress only — the score is agent-level.",
   requirementSchema: {
     type: "object",
     properties: {
@@ -64,6 +64,19 @@ export const agentReputation: Offering = {
           isColdStart:      { type: "boolean", description: "True when the agent has fewer events than the score requires for full confidence." },
           insufficientData: { type: "boolean", description: "True when any sub-score lacks enough data to compute meaningfully." },
           warmCacheHit:     { type: "boolean", description: "True when the response came from the daily warmer cache rather than a live compute." },
+        },
+      },
+      trajectory: {
+        type: "array",
+        description: "Daily agentScore history for up to the last 30 days (oldest → newest). Empty when the agent has no warmer or paid-hire history yet. Use to spot improving or declining agents.",
+        items: {
+          type: "object",
+          required: ["date", "agentScore"],
+          properties: {
+            date:       { type: "string", description: "YYYY-MM-DD UTC." },
+            agentScore: { type: "integer", minimum: 0, maximum: 100 },
+            subScores:  { description: "Per-day sub-score breakdown when available." },
+          },
         },
       },
     },
