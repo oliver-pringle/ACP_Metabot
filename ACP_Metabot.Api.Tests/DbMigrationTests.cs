@@ -245,6 +245,97 @@ public class DbMigrationTests : IDisposable
             names);
     }
 
+    [Fact]
+    public async Task LegacyMigration_PreservesEmbeddingFkTarget()
+    {
+        // Reproduces the prod v1.3 bug: legacy DB has offering_embeddings with
+        // FOREIGN KEY (offering_id) REFERENCES offerings(id). The v1.3 migration
+        // RENAMEs offerings -> offerings_old_for_mv_migration, creates new
+        // offerings, copies rows, drops the old. In modern SQLite (default
+        // legacy_alter_table=OFF), the RENAME rewrites the FK reference in
+        // offering_embeddings to point at the renamed table. After the DROP,
+        // the FK target no longer exists, and any INSERT into offering_embeddings
+        // throws "no such table: offerings_old_for_mv_migration" with FK ON.
+        // That is exactly what's blocking V2 (and any new V1) rows from being
+        // embedded on the production droplet.
+        await CreateLegacySchemaAsync();
+        await CreateLegacyEmbeddingTableAsync();
+        await SeedOfferingsLegacy(rowCount: 3);
+
+        // Seed an embedding for offering id=1 in the legacy schema, simulating
+        // the prod state before the v1.3 deploy.
+        await using (var conn = _db.OpenConnection())
+        {
+            await using var ins = conn.CreateCommand();
+            ins.CommandText = @"
+                INSERT INTO offering_embeddings
+                  (offering_id, model, dimension, embedding_blob, embedded_at)
+                VALUES (1, 'voyage-finance-2', 4, $blob, $now);";
+            ins.Parameters.AddWithValue("$blob", new byte[16]);
+            ins.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+            await ins.ExecuteNonQueryAsync();
+        }
+
+        // Run the v1.3 migration.
+        await _db.InitializeSchemaAsync();
+
+        // The legacy embedding row should still be there (PreservedDuringRebuild).
+        Assert.Equal(1, await Count("offering_embeddings"));
+
+        // Insert a NEW offering (simulating a V2 row arriving after migration).
+        // The trigger path will create offerings row id=4.
+        await InsertOffering("0xdead", "agent-v2", "search", "v2");
+        var newId = await ScalarLong("SELECT MAX(id) FROM offerings;");
+
+        // CRITICAL: insert a NEW embedding for that new offering. This is the
+        // path that fails on prod. With FK pointing to a dropped legacy table,
+        // SQLite raises "no such table" before the insert even reaches the
+        // offering_embeddings storage.
+        await using (var conn = _db.OpenConnection())
+        {
+            await using var ins = conn.CreateCommand();
+            ins.CommandText = @"
+                INSERT INTO offering_embeddings
+                  (offering_id, model, dimension, embedding_blob, embedded_at)
+                VALUES ($id, 'voyage-finance-2', 4, $blob, $now);";
+            ins.Parameters.AddWithValue("$id", newId);
+            ins.Parameters.AddWithValue("$blob", new byte[16]);
+            ins.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+            await ins.ExecuteNonQueryAsync();
+        }
+
+        Assert.Equal(2, await Count("offering_embeddings"));
+        Assert.Equal("ok", await IntegrityCheck());
+    }
+
+    /// <summary>
+    /// Builds the legacy offering_embeddings table with the FK that bites
+    /// the v1.3 migration.
+    /// </summary>
+    private async Task CreateLegacyEmbeddingTableAsync()
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            CREATE TABLE offering_embeddings (
+                offering_id     INTEGER PRIMARY KEY,
+                model           TEXT    NOT NULL,
+                dimension       INTEGER NOT NULL,
+                embedding_blob  BLOB    NOT NULL,
+                embedded_at     TEXT    NOT NULL,
+                FOREIGN KEY (offering_id) REFERENCES offerings(id) ON DELETE CASCADE
+            );";
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task<long> ScalarLong(string sql)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        return (long)(await cmd.ExecuteScalarAsync() ?? 0L);
+    }
+
     // ---- v1.3 helpers ----
 
     /// <summary>

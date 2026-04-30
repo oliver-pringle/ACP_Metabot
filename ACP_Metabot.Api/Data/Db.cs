@@ -317,6 +317,29 @@ public class Db
             }
         }
 
+        // v1.3.1: repair the dangling offering_embeddings FK left behind by
+        // the v1.3 offerings rebuild. SQLite (legacy_alter_table=OFF, default
+        // since 3.25) rewrites FK references when a parent table is renamed,
+        // so RENAME offerings -> offerings_old_for_mv_migration also rewrote
+        // offering_embeddings's FK to point at the renamed table. The
+        // subsequent DROP of offerings_old_for_mv_migration left the FK
+        // pointing at a table that no longer exists. With foreign_keys=ON,
+        // every INSERT into offering_embeddings then fails with
+        // "no such table: main.offerings_old_for_mv_migration", which on prod
+        // silently broke embedding for both new V2 and new V1 rows since the
+        // v1.3 deploy. Detect by scanning offering_embeddings.sql for the
+        // obsolete table name, and rebuild to refresh the FK target.
+        await using (var fkProbe = conn.CreateCommand())
+        {
+            fkProbe.CommandText =
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='offering_embeddings';";
+            var ddl = (string?)(await fkProbe.ExecuteScalarAsync()) ?? "";
+            if (ddl.Contains("offerings_old_for_mv_migration", StringComparison.OrdinalIgnoreCase))
+            {
+                await RebuildOfferingEmbeddingsToRefreshFkAsync(conn);
+            }
+        }
+
         // FTS5 sync. Use SQLite's native 'rebuild' command (the documented way
         // to populate an external-content FTS5 from existing data) rather than
         // a manual INSERT...SELECT. 'rebuild' is atomic and guarantees the
@@ -469,6 +492,54 @@ public class Db
         }
 
         Console.Error.WriteLine("[db] v1.3 migration: offerings rebuild complete.");
+    }
+
+    /// <summary>
+    /// Rebuilds offering_embeddings to refresh its FOREIGN KEY target. The
+    /// v1.3 offerings rebuild renames offerings out of the way and drops the
+    /// renamed copy. Modern SQLite rewrites FK references during the parent
+    /// rename, so offering_embeddings ends up referencing the now-dropped
+    /// offerings_old_for_mv_migration. Without this repair, every INSERT
+    /// into offering_embeddings raises "no such table" with foreign_keys=ON.
+    /// </summary>
+    private static async Task RebuildOfferingEmbeddingsToRefreshFkAsync(SqliteConnection conn)
+    {
+        Console.Error.WriteLine("[db] v1.3.1 repair: rebuilding offering_embeddings to refresh dangling FK.");
+
+        await ExecAsync(conn, "PRAGMA foreign_keys = OFF;");
+        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync();
+        try
+        {
+            await ExecAsync(conn, tx,
+                "ALTER TABLE offering_embeddings RENAME TO offering_embeddings_fkfix_old;");
+            await ExecAsync(conn, tx, @"
+                CREATE TABLE offering_embeddings (
+                    offering_id     INTEGER PRIMARY KEY,
+                    model           TEXT    NOT NULL,
+                    dimension       INTEGER NOT NULL,
+                    embedding_blob  BLOB    NOT NULL,
+                    embedded_at     TEXT    NOT NULL,
+                    FOREIGN KEY (offering_id) REFERENCES offerings(id) ON DELETE CASCADE
+                );");
+            await ExecAsync(conn, tx, @"
+                INSERT INTO offering_embeddings
+                  (offering_id, model, dimension, embedding_blob, embedded_at)
+                SELECT offering_id, model, dimension, embedding_blob, embedded_at
+                FROM offering_embeddings_fkfix_old;");
+            await ExecAsync(conn, tx, "DROP TABLE offering_embeddings_fkfix_old;");
+            await tx.CommitAsync();
+        }
+        catch
+        {
+            await tx.RollbackAsync();
+            throw;
+        }
+        finally
+        {
+            await ExecAsync(conn, "PRAGMA foreign_keys = ON;");
+        }
+
+        Console.Error.WriteLine("[db] v1.3.1 repair: offering_embeddings rebuild complete.");
     }
 
     private static async Task ExecAsync(SqliteConnection conn, string sql)
