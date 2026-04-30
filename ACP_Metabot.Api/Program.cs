@@ -12,6 +12,7 @@ builder.Services.AddSingleton<Db>();
 builder.Services.AddSingleton<OfferingRepository>();
 builder.Services.AddSingleton<WatchRepository>();
 builder.Services.AddSingleton<AgentReputationCacheRepository>();
+builder.Services.AddSingleton<AgentReputationHistoryRepository>();
 builder.Services.AddSingleton<LifetimeSnapshotRepository>();
 builder.Services.AddSingleton<RequestMetricsRepository>();
 builder.Services.AddSingleton<MetricsChannel>();
@@ -198,12 +199,29 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, Cancellat
     var limit = req.Limit is null ? 10 : Math.Clamp(req.Limit.Value, 1, 50);
     var minScore = req.MinScore ?? 0.0;
     var priceMax = req.PriceMaxUsdc ?? double.PositiveInfinity;
-    var staleAfterDays = req.StaleAfterDays;
+    // freshness is the cleaner numeric alias for staleAfterDays; both are
+    // accepted, freshness wins when both arrive.
+    var staleAfterDays = req.Freshness ?? req.StaleAfterDays;
+    if (req.Freshness is int fr && (fr < 1 || fr > 365))
+        return Results.BadRequest(new { error = "freshness must be an integer between 1 and 365" });
+    if (req.MinReputation is int mr && (mr < 0 || mr > 100))
+        return Results.BadRequest(new { error = "minReputation must be an integer between 0 and 100" });
+    HashSet<string>? chainFilter = null;
+    if (req.Chains is { Length: > 0 } cs)
+    {
+        if (cs.Length > 8)
+            return Results.BadRequest(new { error = "chain accepts at most 8 entries" });
+        chainFilter = new HashSet<string>(cs.Select(c => (c ?? "").Trim().ToLowerInvariant()),
+            StringComparer.Ordinal);
+        chainFilter.Remove(""); // discard empty strings rather than 400-ing
+        if (chainFilter.Count == 0) chainFilter = null;
+    }
     // Default rerank ON — pure cosine bumps relevance ~5-15% for ambiguous
     // queries and the cost is negligible. Callers can disable explicitly.
     var rerank = req.Rerank ?? true;
     var category = string.IsNullOrWhiteSpace(req.Category) ? null : req.Category.Trim();
-    var results = await svc.SearchAsync(req.Query, limit, minScore, priceMax, staleAfterDays, rerank, category, ct);
+    var results = await svc.SearchAsync(req.Query, limit, minScore, priceMax, staleAfterDays,
+        rerank, category, chainFilter, req.MinReputation, ct);
 
     object? bestMatch = null;
     if (results.Count > 0 && results[0].Score >= 0.7)
@@ -338,7 +356,7 @@ app.MapGet("/categories", (CategoryService svc) => Results.Ok(new { categories =
 app.MapPost("/v1/search", HandleSearch).RequireRateLimiting("public-search");
 app.MapPost("/v1/composeStack", HandleCompose).RequireRateLimiting("public-compose");
 app.MapGet("/v1/agentReputation", async ([FromQuery] string agent,
-    AgentReputationCacheRepository cacheRepo) =>
+    ReputationService reputation) =>
 {
     if (string.IsNullOrWhiteSpace(agent))
         return Results.BadRequest(new { error = "invalid_address", message = "agent query param is required" });
@@ -346,29 +364,19 @@ app.MapGet("/v1/agentReputation", async ([FromQuery] string agent,
     if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
         return Results.BadRequest(new { error = "invalid_address", message = "must be 0x followed by 40 hex chars" });
 
-    var row = await cacheRepo.GetAsync(addr, DateTime.UtcNow);
-    if (row is null)
+    // Cache-only — never triggers compute. GetCachedAsync also attaches the
+    // 30d trajectory and re-computes sub-score percentiles against the current
+    // corpus.
+    var result = await reputation.GetCachedAsync(addr);
+    if (result is null)
         return Results.NotFound(new
         {
             error = "not_cached",
             hint = "hire the agentReputation offering for live computation"
         });
 
-    var subScores = System.Text.Json.JsonSerializer.Deserialize<SubScoreSet>(row.SubScoresJson);
-    var rawCounts = System.Text.Json.JsonSerializer.Deserialize<RawCounts>(row.RawCountsJson);
-    var flags     = System.Text.Json.JsonSerializer.Deserialize<ReputationFlags>(row.FlagsJson);
-    var result = new AgentReputationResultV2(
-        AgentAddress: row.AgentAddress,
-        AgentName:    row.AgentName,
-        AgentScore:   row.AgentScore,
-        ComputedAt:   row.ComputedAt.ToString("O"),
-        WindowDays:   90,
-        SubScores:    subScores!,
-        RawCounts:    rawCounts!,
-        Flags:        flags!);
-
     var hash = System.Security.Cryptography.SHA1.HashData(
-        System.Text.Encoding.UTF8.GetBytes(row.ComputedAt.ToString("O")));
+        System.Text.Encoding.UTF8.GetBytes(result.ComputedAt));
     var sb = new System.Text.StringBuilder(40);
     foreach (var b in hash) sb.Append(b.ToString("x2"));
     var etag = $"\"{sb.ToString()}\"";
@@ -378,6 +386,33 @@ app.MapGet("/v1/agentReputation", async ([FromQuery] string agent,
         ("ETag", etag),
     });
 }).RequireRateLimiting("public-reputation");
+
+// Public + internal — day-by-day reputation trajectory. Cache-only-ish in the
+// sense that it reads from agent_reputation_history without triggering a chain
+// scan; rows are written by every paid hire and warmer pass via ReputationService.
+async Task<IResult> HandleReputationHistory(string agent, int? days,
+    AgentReputationHistoryRepository histRepo)
+{
+    if (string.IsNullOrWhiteSpace(agent))
+        return Results.BadRequest(new { error = "invalid_address", message = "agent query param is required" });
+    var addr = agent.Trim().ToLowerInvariant();
+    if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+        return Results.BadRequest(new { error = "invalid_address", message = "must be 0x followed by 40 hex chars" });
+    var window = days is null ? 30 : Math.Clamp(days.Value, 1, 90);
+    var points = await histRepo.GetTrajectoryAsync(addr, window);
+    return Results.Ok(new { agentAddress = addr, days = window, history = points });
+}
+
+app.MapGet("/agentReputationHistory",
+    ([FromQuery] string agent, [FromQuery] int? days,
+        AgentReputationHistoryRepository histRepo)
+    => HandleReputationHistory(agent, days, histRepo));
+
+app.MapGet("/v1/agentReputationHistory",
+    ([FromQuery] string agent, [FromQuery] int? days,
+        AgentReputationHistoryRepository histRepo)
+    => HandleReputationHistory(agent, days, histRepo))
+    .RequireRateLimiting("public-reputation");
 app.MapGet("/v1/digest", (int? days, DigestService svc) => HandleDigest(days, svc)).RequireRateLimiting("public-digest");
 app.MapGet("/v1/agent/{address}", (string address,
     OfferingRepository repo, ReputationService reputation)
@@ -512,7 +547,17 @@ app.MapPost("/watches/{id}/test-fire", async (string id, WatchService svc, Cance
 
 app.Run();
 
-public record SearchRequest(string Query, int? Limit, double? MinScore, double? PriceMaxUsdc, int? StaleAfterDays, bool? Rerank, string? Category);
+public record SearchRequest(
+    string Query,
+    int? Limit,
+    double? MinScore,
+    double? PriceMaxUsdc,
+    int? StaleAfterDays,
+    bool? Rerank,
+    string? Category,
+    [property: System.Text.Json.Serialization.JsonPropertyName("chain")] string[]? Chains,
+    int? MinReputation,
+    int? Freshness);
 public record ComposeRequest(string UseCase, double? BudgetUsdc, int? MaxOfferings);
 public record AgentReputationRequest(string AgentAddress);
 

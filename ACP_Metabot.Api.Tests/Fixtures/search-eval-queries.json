@@ -1,0 +1,45 @@
+{
+  "_schema": {
+    "comment": "Held-out evaluation set for SearchFusionEvaluationTests. Each row asserts that running the search engine with the given query should rank the (expectedAgentAddress, expectedOfferingName) pair within the top-K results. Bias toward queries pure cosine handles poorly: hex contract addresses, tickers, niche jargon, multi-word brand names. Hand-author 30 rows total (current count: 5 placeholders + 25 TBD). Replace `expectedAgentAddress` and `expectedOfferingName` with real lowercased values from a prod data/acp_metabot.db snapshot before relying on this fixture.",
+    "shape": {
+      "query": "Natural-language search input as a buyer would type it.",
+      "expectedAgentAddress": "Lower-cased 0x-prefixed wallet of the agent we expect to be in the top-K.",
+      "expectedOfferingName": "Exact offering_name string for the row we expect to win.",
+      "topK": "Optional. Default 10. Test asserts the (agent, offering) pair appears within the first topK results.",
+      "notes": "Optional. Why this query is interesting (rare keyword, multi-token, etc.)."
+    }
+  },
+  "queries": [
+    {
+      "query": "0xfc9f1ff5ec524759c1dc8e0a6eba6c22805b9d8b",
+      "expectedAgentAddress": "TBD",
+      "expectedOfferingName": "TBD",
+      "topK": 5,
+      "notes": "Rare-keyword: hex contract address. Pure cosine struggles because there's no semantic content. BM25 should win."
+    },
+    {
+      "query": "cbBTC redemption flow",
+      "expectedAgentAddress": "TBD",
+      "expectedOfferingName": "TBD",
+      "notes": "Niche ticker. Cosine over voyage-3-large knows BTC; cbBTC is too new for the embedding to discriminate."
+    },
+    {
+      "query": "Aave V3 health factor monitor",
+      "expectedAgentAddress": "TBD",
+      "expectedOfferingName": "TBD",
+      "notes": "Multi-token brand+capability — mixes lexical (Aave V3) and semantic (monitor)."
+    },
+    {
+      "query": "close a perp position on GMX",
+      "expectedAgentAddress": "TBD",
+      "expectedOfferingName": "TBD",
+      "notes": "Common task language; baseline check that hybrid doesn't regress on cosine's strong cases."
+    },
+    {
+      "query": "agent reputation behavioural score",
+      "expectedAgentAddress": "TBD",
+      "expectedOfferingName": "agentReputation",
+      "notes": "Self-reference: TheMetaBot's own offering. Useful as a smoke test (we know the answer)."
+    }
+  ]
+}

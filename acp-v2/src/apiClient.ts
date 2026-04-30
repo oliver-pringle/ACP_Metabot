@@ -97,6 +97,12 @@ export interface ReputationFlags {
   warmCacheHit: boolean;
 }
 
+export interface ReputationHistoryPoint {
+  date: string;            // YYYY-MM-DD UTC
+  agentScore: number;
+  subScores?: SubScoreSet;
+}
+
 export interface AgentReputationResponse {
   agentAddress: string;
   agentName: string;
@@ -106,6 +112,7 @@ export interface AgentReputationResponse {
   subScores: SubScoreSet;
   rawCounts: ReputationRawCounts;
   flags: ReputationFlags;
+  trajectory?: ReputationHistoryPoint[];
 }
 
 export interface ApiClient {
@@ -116,6 +123,9 @@ export interface ApiClient {
     minScore?: number;
     priceMaxUsdc?: number;
     staleAfterDays?: number;
+    chain?: string[];
+    minReputation?: number;
+    freshness?: number;
   }): Promise<SearchResponse>;
   composeStack(req: { useCase: string; budgetUsdc?: number; maxOfferings?: number }): Promise<ComposedStack>;
   registerWatch(req: RegisterWatchRequest): Promise<RegisterWatchResponse>;
