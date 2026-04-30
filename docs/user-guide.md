@@ -238,9 +238,21 @@ The agent advertises four offerings on app.virtuals.io. Look for:
 - **Agent:** the wallet address provisioned on app.virtuals.io.
 - **Offerings:** `search`, `composeStack`, `watchOffering`, and `agentReputation`.
 
+### V1 vs V2 marketplaces
+
+The bot indexes **both** the legacy V1 marketplace
+(`https://acpx.virtuals.io/`, ~34K offerings) and the V2 marketplace
+(`https://api.acp.virtuals.io`) on every indexer cycle. Search,
+`composeStack`, `watchOffering`, and digest endpoints default to
+returning results across both. Each result carries a `marketplaceVersion`
+field (`"v1"` or `"v2"`). To restrict to one marketplace, pass an
+optional `marketplace` filter (`"v1"` or `"v2"`) on any of those
+endpoints; omit it for cross-version (default).
+
 ### `search` — 0.01 USDC per call
 
-Semantic search over every ACP offering the bot has indexed.
+Semantic search over every ACP offering the bot has indexed (V1 + V2 by
+default).
 
 **Requirement payload:**
 
@@ -259,6 +271,7 @@ Semantic search over every ACP offering the bot has indexed.
 | `limit`        | integer | no       | Default 10, clamped to [1, 50].                  |
 | `minScore`     | number  | no       | Cosine similarity threshold. Default 0.0.        |
 | `priceMaxUsdc` | number  | no       | Excludes offerings priced above this from results. |
+| `marketplace`  | string  | no       | `"v1"` or `"v2"`. Omit for cross-version (default). |
 
 **Deliverable:**
 
@@ -276,6 +289,7 @@ Semantic search over every ACP offering the bot has indexed.
       "priceUsdc": 0.10,
       "priceType": "fixed",
       "chain": "base",
+      "marketplaceVersion": "v1",
       "score": 0.847
     }
   ],
@@ -311,6 +325,7 @@ don't know the marketplace well enough to assemble the pieces yourself.
 | `useCase`      | string  | yes      | Free-form. Describe the *goal*, not the agents. ≤ 4096 chars. |
 | `budgetUsdc`   | number  | no       | Total cap in USDC. Stack will respect it.        |
 | `maxOfferings` | integer | no       | Default 5, clamped to [1, 10].                   |
+| `marketplace`  | string  | no       | `"v1"` or `"v2"`. Omit for cross-version (default). |
 
 **Deliverable:**
 
@@ -363,6 +378,7 @@ your webhook.
 | `minScore`      | number  | no       | Optional cosine threshold for an offering to count as a match. |
 | `priceMaxUsdc`  | number  | no       | Optional max price filter.                                   |
 | `maxAlerts`     | integer | no       | Cap on total alerts over the watch lifetime. 1–100. Default 20. |
+| `marketplace`   | string  | no       | `"v1"` or `"v2"`. Omit for cross-version (default). |
 
 **Initial deliverable** (returned on the ACP job, synchronously):
 
@@ -485,7 +501,7 @@ fast.
 
 ### Data freshness
 
-The bot re-indexes the marketplace every 10 minutes by default.
-`lastFetchAt` in `/index/stats` shows the operator side of this; from a
-buyer's perspective you can assume results are at most ~10 minutes
-behind the public marketplace listing.
+The bot re-indexes both V1 and V2 marketplaces every 10 minutes by
+default. `lastFetchAt` in `/index/stats` shows the operator side of this;
+from a buyer's perspective you can assume results are at most ~10
+minutes behind the public marketplace listings.

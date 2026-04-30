@@ -105,9 +105,42 @@ curl -H "X-API-Key: $INTERNAL_API_KEY" -X POST http://localhost:5000/search \
 
 ## Marketplace data source
 
-Default is `Indexer:Source=acp-api`, which paginates the upstream
-`https://acpx.virtuals.io/` endpoint. A `json-file` source is also
-supported for offline dev — see `docs/technical-specifications.md`.
+Two upstream marketplaces are indexed side-by-side every cycle:
+
+- **V1** (`AcpApiMarketplaceSource`) — paginates
+  `https://acpx.virtuals.io/api/metrics/skills` (~34K offerings).
+- **V2** (`AcpV2MarketplaceSource`) — reads `https://api.acp.virtuals.io`
+  (the base URL hardcoded in `@virtuals-protocol/acp-node-v2 ^0.0.6`).
+
+V2 has no public list-all endpoint, so enumeration combines: a hardcoded
+known-wallets list (`Indexer:V2:KnownAgents`), a keyword sweep against
+`/agents/search?query=X&topK=49&chainIds=8453` (default 80-keyword set
+in `AcpV2MarketplaceSource.DefaultKeywords`), and — pending wiring — a
+`v2_known_sellers` cache populated from on-chain `JobCreated` events on
+the V2 contract `0x238E541BfefD82238730D00a2208E5497F1832E0`. Per-wallet
+fan-out then hits `/agents/wallet/{addr}` for full offering payloads.
+Both endpoints are unauthenticated.
+
+Each indexed row carries a `marketplace_version` (`v1` or `v2`) and the
+same `(agent_address, offering_name)` can exist on both marketplaces
+independently. Search defaults to cross-version; pass an optional
+`marketplace` filter (`"v1"` or `"v2"`) to narrow.
+
+A `json-file` source is also supported for offline dev — see
+`docs/technical-specifications.md`. V2 enumeration knobs:
+
+```yaml
+# docker-compose.yml or env
+- Indexer__V2__Enabled=true
+- Indexer__V2__ApiBaseUrl=https://api.acp.virtuals.io
+- Indexer__V2__ChainId=8453
+- Indexer__V2__KeywordSweepEnabled=true
+- Indexer__V2__KeywordSweepTopK=49
+- Indexer__V2__ApiRequestDelayMs=50
+- Indexer__V2__MaxConcurrentFetches=4
+# Indexer__V2__KnownAgents and Indexer__V2__KeywordSweepKeywords
+# default to the seeded values; override via array config if needed.
+```
 
 ## Provisioning the agent
 

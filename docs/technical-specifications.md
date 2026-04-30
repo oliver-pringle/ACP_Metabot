@@ -57,16 +57,25 @@ env-vars locally. The API reads them through `IConfiguration`.
 |-----------------------------------|---------------------------------------------|-------|
 | `ASPNETCORE_URLS`                 | `http://+:5000`                             | Bind address. |
 | `ConnectionStrings__Sqlite`       | `Data Source=/data/acp_metabot.db;Cache=Shared` | SQLite file path. |
-| `Indexer__Source`                 | `acp-api`                                   | Or `json-file`. |
+| `Indexer__Source`                 | `acp-api`                                   | V1 source. Or `json-file`. V2 source runs in parallel and is gated separately. |
 | `Indexer__SourcePath`             | `/data/seed/offerings.json`                 | Used when `Source=json-file`. |
-| `Indexer__ApiBaseUrl`             | `https://acpx.virtuals.io/`                 | Strapi endpoint root. |
+| `Indexer__ApiBaseUrl`             | `https://acpx.virtuals.io/`                 | V1 Strapi endpoint root. |
 | `Indexer__ApiPageSize`            | `100`                                       | Clamped to [1, 100] by upstream. |
 | `Indexer__ApiMaxPages`            | `0` (unbounded)                             | Cap for testing. |
-| `Indexer__ApiRequestDelayMs`      | `50`                                        | Pause between page requests. |
-| `Indexer__ApiSortBy`              | `usageCount`                                | Upstream sort. |
-| `Indexer__ApiSortOrder`           | `desc`                                      | Upstream order. |
-| `Indexer__IntervalSeconds`        | `600`                                       | Min 30s, enforced in code. |
+| `Indexer__ApiRequestDelayMs`      | `50`                                        | V1 pause between page requests. |
+| `Indexer__ApiSortBy`              | `usageCount`                                | V1 upstream sort. |
+| `Indexer__ApiSortOrder`           | `desc`                                      | V1 upstream order. |
+| `Indexer__IntervalSeconds`        | `600`                                       | Min 30s, enforced in code. Applies to both V1 + V2 cycles. |
 | `Indexer__EmbeddingConcurrency`   | `4`                                         | Voyage parallelism. |
+| `Indexer__V2__Enabled`            | `true`                                      | Gate the V2 source. |
+| `Indexer__V2__ApiBaseUrl`         | `https://api.acp.virtuals.io`               | V2 marketplace base URL (matches `@virtuals-protocol/acp-node-v2 ^0.0.6` constant). |
+| `Indexer__V2__ChainId`            | `8453`                                      | Base mainnet. |
+| `Indexer__V2__KnownAgents`        | *(seeded list)*                             | Hardcoded V2 wallets to fetch directly. Defaults seeded with TheMetaBot, DeFiEval, AgentEval, LiquidGuard. |
+| `Indexer__V2__KeywordSweepEnabled`| `true`                                      | Run the 80-keyword sweep against `/agents/search`. |
+| `Indexer__V2__KeywordSweepTopK`   | `49`                                        | Server caps result count at 49. |
+| `Indexer__V2__KeywordSweepKeywords`| *(80-keyword default)*                     | Override via array config. Defaults in `AcpV2MarketplaceSource.DefaultKeywords`. |
+| `Indexer__V2__ApiRequestDelayMs`  | `50`                                        | Pause between V2 calls. |
+| `Indexer__V2__MaxConcurrentFetches`| `4`                                        | V2 per-wallet fan-out concurrency. |
 | `Embeddings__Provider`            | `voyage`                                    | Only `voyage` supported. |
 | `Embeddings__Model`               | `voyage-3-large`                            | 1024-dim. |
 | `Claude__Model`                   | `claude-sonnet-4-6`                         | Used by `composeStack`. |
@@ -111,6 +120,7 @@ Defined in `ACP_Metabot.Api/Data/Db.cs`. Created idempotently on startup
 ```sql
 CREATE TABLE IF NOT EXISTS offerings (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    marketplace_version      TEXT    NOT NULL DEFAULT 'v1',
     agent_address            TEXT    NOT NULL,
     agent_name               TEXT    NOT NULL,
     offering_name            TEXT    NOT NULL,
@@ -123,10 +133,11 @@ CREATE TABLE IF NOT EXISTS offerings (
     content_hash             TEXT    NOT NULL,
     first_seen_at            TEXT    NOT NULL,
     last_seen_at             TEXT    NOT NULL,
-    UNIQUE(agent_address, offering_name)
+    UNIQUE(marketplace_version, agent_address, offering_name)
 );
 CREATE INDEX IF NOT EXISTS ix_offerings_content_hash ON offerings(content_hash);
 CREATE INDEX IF NOT EXISTS ix_offerings_last_seen   ON offerings(last_seen_at);
+CREATE INDEX IF NOT EXISTS ix_offerings_marketplace ON offerings(marketplace_version);
 
 CREATE TABLE IF NOT EXISTS offering_embeddings (
     offering_id     INTEGER PRIMARY KEY,
@@ -175,6 +186,22 @@ chain + schema JSON, used for cheap change detection during upserts.
 hit), `webhook_failing` (still polled, but webhook unreliable),
 `cancelled` (5+ consecutive POST failures).
 
+### v1.3 schema migration (V1 + V2 dual-source)
+
+`InitializeSchemaAsync` runs the migration idempotently on every startup:
+
+- Adds `marketplace_version TEXT NOT NULL DEFAULT 'v1'` to `offerings`
+  if absent. Existing rows keep `version='v1'`.
+- Drops the legacy `UNIQUE(agent_address, offering_name)` and rebuilds
+  it as `UNIQUE(marketplace_version, agent_address, offering_name)`, so
+  the same `(addr, name)` can exist on both V1 and V2 marketplaces
+  independently.
+- Adds the `v2_known_sellers` cache table populated by the (pending)
+  on-chain `JobCreated` enumeration.
+
+Migration is automatic on the v1.2 production droplet — no manual step
+required.
+
 ## Trust-boundary input caps
 
 Untrusted data — buyer requirements and third-party agent fields ingested
@@ -196,7 +223,7 @@ indexer-side caps before persistence and embedding.
 
 ## Marketplace fetch protocol
 
-`AcpApiMarketplaceSource` calls:
+### V1 — `AcpApiMarketplaceSource`
 
 ```
 GET https://acpx.virtuals.io/api/metrics/skills
@@ -244,6 +271,37 @@ last page (count < pageSize). Rows missing `skill.name` or
 `agent.walletAddress` are dropped on the way through `MapToDto`
 (defensive — observed loss historically ~0.01%).
 
+### V2 — `AcpV2MarketplaceSource`
+
+V2 has no public list-all endpoint. Enumeration combines three sources
+of seller wallets, then per-wallet fans out for full payloads. Both
+endpoints below are unauthenticated.
+
+```
+GET https://api.acp.virtuals.io/agents/search?query={kw}&topK=49&chainIds=8453
+GET https://api.acp.virtuals.io/agents/wallet/{addr}
+```
+
+| Endpoint              | Auth | Use                                                               |
+|-----------------------|------|-------------------------------------------------------------------|
+| `/agents/search`      | none | Keyword sweep for seller-wallet discovery. `topK` server-capped at 49. |
+| `/agents/wallet/{a}`  | none | Per-wallet fan-out for the full agent profile + offering payloads.|
+
+Wallet sources, unioned per cycle:
+
+- **A (pending)** — distinct sellers from on-chain `JobCreated` events
+  on V2 contract `0x238E541BfefD82238730D00a2208E5497F1832E0` on Base,
+  cached in `v2_known_sellers`.
+- **B** — keyword sweep over `Indexer:V2:KeywordSweepKeywords` (default
+  80 keywords in `AcpV2MarketplaceSource.DefaultKeywords`). Disabled via
+  `Indexer:V2:KeywordSweepEnabled=false`.
+- **C** — hardcoded list `Indexer:V2:KnownAgents` (defaults seeded with
+  TheMetaBot, DeFiEval, AgentEval, LiquidGuard).
+
+Per-wallet fan-out concurrency is capped by
+`Indexer:V2:MaxConcurrentFetches` (default 4) with
+`Indexer:V2:ApiRequestDelayMs` (default 50) between calls.
+
 ## C# HTTP API
 
 Routes are defined in `Program.cs`. All endpoints except `/health`
@@ -276,12 +334,13 @@ finishes — long requests; set client `--max-time` accordingly.
 Request:
 ```json
 { "query": "verify a token contract for honeypot risk",
-  "limit": 5, "minScore": 0.0, "priceMaxUsdc": 1.00 }
+  "limit": 5, "minScore": 0.0, "priceMaxUsdc": 1.00, "marketplace": null }
 ```
 - `query` — required, non-blank, ≤ 2048 chars.
 - `limit` — optional, default 10, clamped to [1, 50].
 - `minScore` — optional, default 0.0, cosine similarity threshold.
 - `priceMaxUsdc` — optional, excludes offerings priced above this from results.
+- `marketplace` — optional, `"v1"` or `"v2"`. Omit for cross-version (default).
 
 Response:
 ```json
@@ -298,6 +357,7 @@ Response:
       "priceUsdc": 1.0,
       "priceType": "fixed",
       "chain": "base",
+      "marketplaceVersion": "v1",
       "score": 0.8721
     }
   ],
@@ -309,6 +369,11 @@ Response:
 }
 ```
 
+Each result carries `marketplaceVersion` (`"v1"` or `"v2"`). Same shape
+applies to `/v1/search` (public gateway), `/digest`, `/v1/digest`,
+`/composeStack`, `/v1/composeStack`, and the `RegisterWatchRequest`
+payload to `/watches`.
+
 `bestMatch` is the top result echoed at the top level when `score >= 0.7`,
 else `null`. Lets downstream LLM agents branch on "is the top hit good
 enough to use directly?".
@@ -316,11 +381,12 @@ enough to use directly?".
 ### `POST /composeStack`
 Request:
 ```json
-{ "useCase": "build a safe token-buy bot", "budgetUsdc": 5.00, "maxOfferings": 4 }
+{ "useCase": "build a safe token-buy bot", "budgetUsdc": 5.00, "maxOfferings": 4, "marketplace": null }
 ```
 - `useCase` — required, non-blank, ≤ 4096 chars.
 - `budgetUsdc` — optional cap, in USDC.
 - `maxOfferings` — optional, default 5, clamped to [1, 10].
+- `marketplace` — optional, `"v1"` or `"v2"`. Omit for cross-version (default).
 
 Response (`ComposedStack`):
 ```json
@@ -368,6 +434,7 @@ Validation:
 - `durationDays` clamped to [1, 30] (default 7).
 - `intervalHours` clamped to [1, 24] (default 6).
 - `maxAlerts` clamped to [1, 100] (default 20).
+- `marketplace` (optional) — `"v1"` or `"v2"`. Omit for cross-version (default).
 
 Response:
 ```json

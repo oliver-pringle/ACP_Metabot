@@ -16,4 +16,5 @@ public record Watch(
     string Status,
     DateTime CreatedAt,
     DateTime ExpiresAt,
-    DateTime? LastPolledAt);
+    DateTime? LastPolledAt,
+    string? Marketplace = null);

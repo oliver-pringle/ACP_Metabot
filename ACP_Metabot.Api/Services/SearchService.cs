@@ -86,6 +86,7 @@ public class SearchService
         string query, int limit, double minScore, double priceMaxUsdc,
         int? staleAfterDays, bool rerank, string? categoryFilter,
         HashSet<string>? chainFilter, int? minReputation,
+        string? marketplaceFilter,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query))
@@ -135,6 +136,9 @@ public class SearchService
                 continue;
             if (chainFilter is not null
                 && !chainFilter.Contains(offering.Chain.ToLowerInvariant()))
+                continue;
+            if (marketplaceFilter is not null
+                && !string.Equals(offering.MarketplaceVersion, marketplaceFilter, StringComparison.OrdinalIgnoreCase))
                 continue;
             if (minReputation is int repFloor && repFloor > 0)
             {
@@ -231,7 +235,8 @@ public class SearchService
                 Chain: s.O.Chain,
                 Score: Math.Round(s.Cosine, 4),
                 Reputation: s.Rep,
-                Category: s.Category))
+                Category: s.Category,
+                MarketplaceVersion: s.O.MarketplaceVersion))
             .ToArray();
     }
 

@@ -15,6 +15,7 @@ builder.Services.AddSingleton<AgentReputationCacheRepository>();
 builder.Services.AddSingleton<AgentReputationHistoryRepository>();
 builder.Services.AddSingleton<LifetimeSnapshotRepository>();
 builder.Services.AddSingleton<RequestMetricsRepository>();
+builder.Services.AddSingleton<V2KnownSellersRepository>();
 builder.Services.AddSingleton<MetricsChannel>();
 
 builder.Services.AddHttpClient();
@@ -25,13 +26,23 @@ builder.Services.AddSingleton<VoyageEmbeddingProvider>();
 builder.Services.AddSingleton<IEmbeddingProvider>(sp => sp.GetRequiredService<VoyageEmbeddingProvider>());
 builder.Services.AddSingleton<VoyageRerankProvider>();
 builder.Services.AddSingleton<IClaudeClient, ClaudeApiClient>();
-// Marketplace source is pluggable via Indexer:Source ("acp-api" or "json-file").
-// Default = acp-api (live upstream); set to json-file in dev/offline mode.
+// Marketplace sources are pluggable via Indexer:Source.
+//   "acp-api"   — live upstream V1 + V2 (V2 toggleable via Indexer:V2:Enabled, default true)
+//   "json-file" — single offline source from disk (dev / tests)
+//
+// v1.3 (2026-04-30) registered V2 alongside V1 — the C# indexer pulls
+// IEnumerable<IMarketplaceSource> and unions their outputs, with each
+// source tagging its rows via the MarketplaceVersion property.
 var indexerSource = builder.Configuration["Indexer:Source"]?.ToLowerInvariant() ?? "acp-api";
 switch (indexerSource)
 {
     case "acp-api":
         builder.Services.AddSingleton<IMarketplaceSource, AcpApiMarketplaceSource>();
+        var v2Enabled = builder.Configuration.GetValue<bool?>("Indexer:V2:Enabled") ?? true;
+        if (v2Enabled)
+        {
+            builder.Services.AddSingleton<IMarketplaceSource, AcpV2MarketplaceSource>();
+        }
         break;
     case "json-file":
         builder.Services.AddSingleton<IMarketplaceSource, JsonFileMarketplaceSource>();
@@ -220,8 +231,12 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, Cancellat
     // queries and the cost is negligible. Callers can disable explicitly.
     var rerank = req.Rerank ?? true;
     var category = string.IsNullOrWhiteSpace(req.Category) ? null : req.Category.Trim();
+    // Optional marketplace filter; null = both v1 and v2.
+    var marketplace = NormalizeMarketplace(req.Marketplace);
+    if (req.Marketplace is not null && marketplace is null)
+        return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
     var results = await svc.SearchAsync(req.Query, limit, minScore, priceMax, staleAfterDays,
-        rerank, category, chainFilter, req.MinReputation, ct);
+        rerank, category, chainFilter, req.MinReputation, marketplace, ct);
 
     object? bestMatch = null;
     if (results.Count > 0 && results[0].Score >= 0.7)
@@ -243,8 +258,21 @@ async Task<IResult> HandleCompose(ComposeRequest req, StackComposerService svc, 
     if (string.IsNullOrWhiteSpace(req.UseCase))
         return Results.BadRequest(new { error = "useCase is required" });
     var max = req.MaxOfferings is null ? 5 : Math.Clamp(req.MaxOfferings.Value, 1, 10);
-    var stack = await svc.ComposeAsync(req.UseCase, req.BudgetUsdc, max, ct);
+    var marketplace = NormalizeMarketplace(req.Marketplace);
+    if (req.Marketplace is not null && marketplace is null)
+        return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
+    var stack = await svc.ComposeAsync(req.UseCase, req.BudgetUsdc, max, marketplace, ct);
     return Results.Ok(stack);
+}
+
+// Local helper: map a raw marketplace string into the canonical "v1"/"v2"
+// or null. Returns null for both "missing" and "invalid" — callers do their
+// own 400-on-invalid by inspecting whether req.Marketplace was non-null.
+static string? NormalizeMarketplace(string? raw)
+{
+    if (string.IsNullOrWhiteSpace(raw)) return null;
+    var trimmed = raw.Trim().ToLowerInvariant();
+    return trimmed is "v1" or "v2" ? trimmed : null;
 }
 
 async Task<IResult> HandleReputation(AgentReputationRequest req,
@@ -276,10 +304,13 @@ async Task<IResult> HandleReputation(AgentReputationRequest req,
     }
 }
 
-async Task<IResult> HandleDigest(int? days, DigestService svc)
+async Task<IResult> HandleDigest(int? days, string? marketplace, DigestService svc)
 {
     var window = days is null ? 1 : Math.Clamp(days.Value, 1, 30);
-    var result = await svc.BuildAsync(window);
+    var marketplaceFilter = NormalizeMarketplace(marketplace);
+    if (marketplace is not null && marketplaceFilter is null)
+        return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
+    var result = await svc.BuildAsync(window, marketplaceFilter);
     return Results.Ok(result);
 }
 
@@ -330,7 +361,8 @@ async Task<IResult> HandleBrowseAgent(string address,
                 RequirementSchema: schema,
                 FirstSeenAt: o.FirstSeenAt.ToString("O"),
                 LastSeenAt: o.LastSeenAt.ToString("O"),
-                Reputation: reputation.BuildSearchSummary(o));
+                Reputation: reputation.BuildSearchSummary(o),
+                MarketplaceVersion: o.MarketplaceVersion);
         })
         .ToArray();
 
@@ -346,7 +378,7 @@ async Task<IResult> HandleBrowseAgent(string address,
 app.MapPost("/search", HandleSearch);
 app.MapPost("/composeStack", HandleCompose);
 app.MapPost("/agentReputation", HandleReputation);
-app.MapGet("/digest", (int? days, DigestService svc) => HandleDigest(days, svc));
+app.MapGet("/digest", (int? days, string? marketplace, DigestService svc) => HandleDigest(days, marketplace, svc));
 app.MapGet("/agent/{address}", (string address,
     OfferingRepository repo, ReputationService reputation)
     => HandleBrowseAgent(address, repo, reputation));
@@ -413,7 +445,7 @@ app.MapGet("/v1/agentReputationHistory",
         AgentReputationHistoryRepository histRepo)
     => HandleReputationHistory(agent, days, histRepo))
     .RequireRateLimiting("public-reputation");
-app.MapGet("/v1/digest", (int? days, DigestService svc) => HandleDigest(days, svc)).RequireRateLimiting("public-digest");
+app.MapGet("/v1/digest", (int? days, string? marketplace, DigestService svc) => HandleDigest(days, marketplace, svc)).RequireRateLimiting("public-digest");
 app.MapGet("/v1/agent/{address}", (string address,
     OfferingRepository repo, ReputationService reputation)
     => HandleBrowseAgent(address, repo, reputation)).RequireRateLimiting("public-browse-agent");
@@ -557,8 +589,13 @@ public record SearchRequest(
     string? Category,
     [property: System.Text.Json.Serialization.JsonPropertyName("chain")] string[]? Chains,
     int? MinReputation,
-    int? Freshness);
-public record ComposeRequest(string UseCase, double? BudgetUsdc, int? MaxOfferings);
+    int? Freshness,
+    [property: System.Text.Json.Serialization.JsonPropertyName("marketplace")] string? Marketplace);
+public record ComposeRequest(
+    string UseCase,
+    double? BudgetUsdc,
+    int? MaxOfferings,
+    [property: System.Text.Json.Serialization.JsonPropertyName("marketplace")] string? Marketplace);
 public record AgentReputationRequest(string AgentAddress);
 
 class HeaderedJsonResult : IResult

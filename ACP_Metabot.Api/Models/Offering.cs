@@ -15,4 +15,5 @@ public record Offering(
     DateTime FirstSeenAt,
     DateTime LastSeenAt,
     long UsageCount,
-    long AgentJobCount);
+    long AgentJobCount,
+    string MarketplaceVersion = "v1");

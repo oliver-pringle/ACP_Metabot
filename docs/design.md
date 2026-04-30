@@ -141,9 +141,11 @@ at registration and a private IP at delivery.
 
 Tables (see `Db.cs`):
 
-- `offerings` — one row per `(agent_address, offering_name)` pair, with
+- `offerings` — one row per
+  `(marketplace_version, agent_address, offering_name)` triple, with
   the requirement JSON-Schema, price, chain, and a content hash for
-  cheap change detection.
+  cheap change detection. The composite UNIQUE lets the same
+  `(addr, name)` exist on both V1 and V2 marketplaces independently.
 - `offering_embeddings` — keyed by offering id, storing the model name,
   dimension, and a binary blob of `float[]`.
 - `watches` — one row per registered `watchOffering` job, with the
@@ -152,24 +154,53 @@ Tables (see `Db.cs`):
   `last_polled_at`).
 - `watch_seen` — dedup table; every offering id surfaced for a watch
   is recorded so subsequent polls only "alert" on new entries.
+- `v2_known_sellers` — cache of V2 seller wallets discovered via
+  on-chain `JobCreated` events, used by the V2 enumeration pipeline.
 
 ADO.NET (not EF Core, not Dapper) per workspace convention. SQLite (not
 PostgreSQL) for operational simplicity — this is one container plus a
 file. No separate database server, no schema migrations, no connection
 pooling concerns.
 
-### Marketplace data source
+### Marketplace data sources
 
-`IMarketplaceSource` is the abstraction. Two implementations ship:
+`IMarketplaceSource` is the abstraction. Three implementations ship,
+with V1 and V2 both running on every indexer cycle:
 
-- **`AcpApiMarketplaceSource`** *(default)* — paginates
+- **`AcpApiMarketplaceSource`** *(V1, default on)* — paginates
   `https://acpx.virtuals.io/api/metrics/skills` (Strapi-backed) at
   100/page, dedupes by `(agentAddress, offeringName)`. No bearer token —
   the endpoint is gated by Origin/Referer matching `app.virtuals.io`.
+- **`AcpV2MarketplaceSource`** *(V2, default on)* — reads
+  `https://api.acp.virtuals.io` (the base URL hardcoded in
+  `@virtuals-protocol/acp-node-v2 ^0.0.6`). V2 has no public list-all
+  endpoint, so enumeration combines three sources of seller wallets:
+  - **Source A** — distinct sellers from on-chain `JobCreated` events on
+    the V2 contract `0x238E541BfefD82238730D00a2208E5497F1832E0` on Base,
+    cached in `v2_known_sellers`. *(Pending — not wired in v1.3.)*
+  - **Source B** — keyword sweep against
+    `/agents/search?query=X&topK=49&chainIds=8453` (server caps at 49).
+    Default 80-keyword set in `AcpV2MarketplaceSource.DefaultKeywords`,
+    overridable via `Indexer:V2:KeywordSweepKeywords`.
+  - **Source C** — hardcoded known wallets via `Indexer:V2:KnownAgents`
+    (defaults seeded with TheMetaBot, DeFiEval, AgentEval, LiquidGuard).
+
+  Per-wallet fan-out then hits `/agents/wallet/{addr}` for full offering
+  payloads. Both `/agents/search` and `/agents/wallet/{addr}` are
+  unauthenticated.
 - **`JsonFileMarketplaceSource`** — reads `data/seed/offerings.json`.
   Used for offline development and integration tests.
 
-Switched via `Indexer:Source` (`acp-api` or `json-file`).
+V1 is selected via `Indexer:Source=acp-api` (or `json-file` for offline);
+V2 is gated independently by `Indexer:V2:Enabled` (default `true`).
+
+Each indexed row carries a `marketplace_version` (`v1` or `v2`) and the
+schema's UNIQUE constraint is composite —
+`UNIQUE(marketplace_version, agent_address, offering_name)` — so the
+same `(addr, name)` may exist on both marketplaces independently.
+Search, `composeStack`, `watchOffering`, and digest endpoints accept an
+optional `marketplace` filter (`v1` | `v2`); results default to
+cross-version and each result carries `marketplaceVersion`.
 
 Third-party fields ingested from the marketplace (agent name, offering
 name, description, requirement schema JSON) are truncated at the trust

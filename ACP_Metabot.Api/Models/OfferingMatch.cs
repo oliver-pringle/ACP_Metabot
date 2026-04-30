@@ -15,4 +15,6 @@ public record OfferingMatch(
     [property: JsonPropertyName("reputation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         ReputationSummary? Reputation = null,
     [property: JsonPropertyName("category"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        string? Category = null);
+        string? Category = null,
+    [property: JsonPropertyName("marketplaceVersion")]
+        string MarketplaceVersion = "v1");

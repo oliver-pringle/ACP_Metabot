@@ -13,7 +13,9 @@ public record NewOffering(
     [property: JsonPropertyName("chain")]         string Chain,
     [property: JsonPropertyName("firstSeenAt")]   string FirstSeenAt,
     [property: JsonPropertyName("reputation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        ReputationSummary? Reputation);
+        ReputationSummary? Reputation,
+    [property: JsonPropertyName("marketplaceVersion")]
+        string MarketplaceVersion = "v1");
 
 public record OfferingGainer(
     [property: JsonPropertyName("offeringId")]   long OfferingId,
@@ -22,7 +24,9 @@ public record OfferingGainer(
     [property: JsonPropertyName("offeringName")] string OfferingName,
     [property: JsonPropertyName("hiresThen")]    long HiresThen,
     [property: JsonPropertyName("hiresNow")]     long HiresNow,
-    [property: JsonPropertyName("delta")]        long Delta);
+    [property: JsonPropertyName("delta")]        long Delta,
+    [property: JsonPropertyName("marketplaceVersion")]
+        string MarketplaceVersion = "v1");
 
 public record DigestResult(
     [property: JsonPropertyName("windowDays")]         int WindowDays,

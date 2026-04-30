@@ -18,12 +18,12 @@ public class WatchRepository
                 id, job_id, buyer_address, query, webhook_url,
                 duration_days, interval_hours, min_score, price_max_usdc,
                 max_alerts, alerts_delivered, webhook_consecutive_failures,
-                status, created_at, expires_at, last_polled_at)
+                status, created_at, expires_at, last_polled_at, marketplace)
             VALUES (
                 $id, $jobId, $buyer, $query, $url,
                 $dDays, $iHours, $minScore, $priceMax,
                 $maxAlerts, $delivered, $failures,
-                $status, $created, $expires, $polled);";
+                $status, $created, $expires, $polled, $marketplace);";
         cmd.Parameters.AddWithValue("$id", w.Id);
         cmd.Parameters.AddWithValue("$jobId", w.JobId);
         cmd.Parameters.AddWithValue("$buyer", w.BuyerAddress);
@@ -43,6 +43,7 @@ public class WatchRepository
             w.LastPolledAt.HasValue
                 ? w.LastPolledAt.Value.ToString("O", CultureInfo.InvariantCulture)
                 : (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("$marketplace", (object?)w.Marketplace ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync();
     }
 
@@ -193,7 +194,7 @@ public class WatchRepository
         SELECT id, job_id, buyer_address, query, webhook_url,
                duration_days, interval_hours, min_score, price_max_usdc,
                max_alerts, alerts_delivered, webhook_consecutive_failures,
-               status, created_at, expires_at, last_polled_at";
+               status, created_at, expires_at, last_polled_at, marketplace";
 
     private static Watch Map(System.Data.Common.DbDataReader r)
     {
@@ -215,6 +216,7 @@ public class WatchRepository
             ExpiresAt: DateTime.Parse(r.GetString(14), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
             LastPolledAt: r.IsDBNull(15)
                 ? null
-                : DateTime.Parse(r.GetString(15), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
+                : DateTime.Parse(r.GetString(15), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            Marketplace: r.IsDBNull(16) ? null : r.GetString(16));
     }
 }

@@ -12,7 +12,8 @@ public record RegisterWatchRequest(
     int? IntervalHours,
     double? MinScore,
     double? PriceMaxUsdc,
-    int? MaxAlerts);
+    int? MaxAlerts,
+    string? Marketplace);
 
 public record RegisterWatchResult(
     string WatchId,
@@ -53,7 +54,10 @@ public class WatchService
         var minScore = req.MinScore ?? 0.0;
         var priceMax = req.PriceMaxUsdc ?? double.PositiveInfinity;
 
-        var initial = await _search.SearchAsync(req.Query, InitialMatchLimit, minScore, priceMax, staleAfterDays: null, rerank: false, categoryFilter: null, chainFilter: null, minReputation: null, ct);
+        var marketplace = NormalizeMarketplace(req.Marketplace);
+        var initial = await _search.SearchAsync(req.Query, InitialMatchLimit, minScore, priceMax,
+            staleAfterDays: null, rerank: false, categoryFilter: null,
+            chainFilter: null, minReputation: null, marketplaceFilter: marketplace, ct);
 
         var now = DateTime.UtcNow;
         var watch = new Watch(
@@ -72,7 +76,8 @@ public class WatchService
             Status: "active",
             CreatedAt: now,
             ExpiresAt: now.AddDays(durationDays),
-            LastPolledAt: null);
+            LastPolledAt: null,
+            Marketplace: marketplace);
 
         await _repo.CreateAsync(watch);
 
@@ -104,6 +109,13 @@ public class WatchService
         await _repo.ClearSeenAsync(watchId);
         _logger.LogInformation("[watch] test-fire triggered for id={Id}", watchId);
         return await PollOneAsync(w, ct);
+    }
+
+    private static string? NormalizeMarketplace(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        var trimmed = raw.Trim().ToLowerInvariant();
+        return trimmed is "v1" or "v2" ? trimmed : null;
     }
 
     public async Task<int> PollDueWatchesAsync(CancellationToken ct)
@@ -141,7 +153,10 @@ public class WatchService
     {
         var minScore = w.MinScore ?? 0.0;
         var priceMax = w.PriceMaxUsdc ?? double.PositiveInfinity;
-        var results = await _search.SearchAsync(w.Query, InitialMatchLimit, minScore, priceMax, staleAfterDays: null, rerank: false, categoryFilter: null, chainFilter: null, minReputation: null, ct);
+        var results = await _search.SearchAsync(w.Query, InitialMatchLimit, minScore, priceMax,
+            staleAfterDays: null, rerank: false, categoryFilter: null,
+            chainFilter: null, minReputation: null,
+            marketplaceFilter: w.Marketplace, ct);
 
         var seen = await _repo.GetSeenIdsAsync(w.Id);
         var newMatches = results.Where(r => !seen.Contains(r.OfferingId)).ToList();
