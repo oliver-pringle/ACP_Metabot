@@ -49,7 +49,8 @@ Rules:
     }
 
     public async Task<ComposedStack> ComposeAsync(
-        string useCase, double? budgetUsdc, int maxOfferings, CancellationToken ct)
+        string useCase, double? budgetUsdc, int maxOfferings,
+        string? marketplaceFilter, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(useCase))
         {
@@ -63,7 +64,8 @@ Rules:
         // better-ordered candidate pool gives the LLM a head start.
         var candidates = await _search.SearchAsync(useCase, CandidatePoolSize, 0.0, double.PositiveInfinity,
             staleAfterDays: null, rerank: true, categoryFilter: null,
-            chainFilter: null, minReputation: null, ct);
+            chainFilter: null, minReputation: null,
+            marketplaceFilter: marketplaceFilter, ct);
         if (candidates.Count == 0)
         {
             return new ComposedStack(

@@ -16,7 +16,9 @@ public record AgentBrowseOffering(
     [property: JsonPropertyName("firstSeenAt")]  string FirstSeenAt,
     [property: JsonPropertyName("lastSeenAt")]   string LastSeenAt,
     [property: JsonPropertyName("reputation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        ReputationSummary? Reputation);
+        ReputationSummary? Reputation,
+    [property: JsonPropertyName("marketplaceVersion")]
+        string MarketplaceVersion = "v1");
 
 public record AgentBrowseResult(
     [property: JsonPropertyName("agentAddress")] string AgentAddress,

@@ -5,6 +5,8 @@ namespace ACP_Metabot.Api.Services.MarketplaceSource;
 
 public class AcpApiMarketplaceSource : IMarketplaceSource
 {
+    public string MarketplaceVersion => "v1";
+
     private readonly HttpClient _http;
     private readonly ILogger<AcpApiMarketplaceSource> _logger;
     private readonly int _pageSize;

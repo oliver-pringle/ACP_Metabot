@@ -10,7 +10,8 @@ public record UpsertItem(
     string AgentAddress, string AgentName, string OfferingName,
     string Description, string? RequirementSchemaJson, double PriceUsdc,
     string PriceType, bool IsPrivate, string Chain, string ContentHash,
-    long UsageCount, long AgentJobCount);
+    long UsageCount, long AgentJobCount,
+    string MarketplaceVersion = "v1");
 
 public record UpsertSummary(int Added, int Updated, int Unchanged);
 
@@ -24,15 +25,17 @@ public class OfferingRepository
         string agentAddress, string agentName, string offeringName,
         string description, string? requirementSchemaJson, double priceUsdc,
         string priceType, bool isPrivate, string chain, string contentHash,
-        long usageCount, long agentJobCount, DateTime nowUtc)
+        long usageCount, long agentJobCount, DateTime nowUtc,
+        string marketplaceVersion = "v1")
     {
         await using var conn = _db.OpenConnection();
         var nowIso = nowUtc.ToString("O", CultureInfo.InvariantCulture);
 
-        // Check existing
+        // Check existing — keyed on the v1.3 composite (mv, addr, name).
         await using (var get = conn.CreateCommand())
         {
-            get.CommandText = "SELECT id, content_hash FROM offerings WHERE agent_address = $a AND offering_name = $n;";
+            get.CommandText = "SELECT id, content_hash FROM offerings WHERE marketplace_version = $mv AND agent_address = $a AND offering_name = $n;";
+            get.Parameters.AddWithValue("$mv", marketplaceVersion);
             get.Parameters.AddWithValue("$a", agentAddress);
             get.Parameters.AddWithValue("$n", offeringName);
             await using var reader = await get.ExecuteReaderAsync();
@@ -102,12 +105,12 @@ public class OfferingRepository
                 agent_address, agent_name, offering_name, description,
                 requirement_schema_json, price_usdc, price_type, is_private,
                 chain, content_hash, first_seen_at, last_seen_at,
-                usage_count, agent_job_count)
+                usage_count, agent_job_count, marketplace_version)
             VALUES (
                 $a, $agentName, $n, $desc,
                 $schema, $price, $pType, $priv,
                 $chain, $hash, $now, $now,
-                $usage, $agentJobs);
+                $usage, $agentJobs, $mv);
             SELECT last_insert_rowid();";
         ins.Parameters.AddWithValue("$a", agentAddress);
         ins.Parameters.AddWithValue("$agentName", agentName);
@@ -122,6 +125,7 @@ public class OfferingRepository
         ins.Parameters.AddWithValue("$now", nowIso);
         ins.Parameters.AddWithValue("$usage", usageCount);
         ins.Parameters.AddWithValue("$agentJobs", agentJobCount);
+        ins.Parameters.AddWithValue("$mv", marketplaceVersion);
         var newId = (long)(await ins.ExecuteScalarAsync() ?? 0L);
         return new UpsertResult(newId, IsNew: true, ContentChanged: true);
     }
@@ -137,18 +141,19 @@ public class OfferingRepository
 
         await using var conn = _db.OpenConnection();
 
-        // Pre-fetch existing rows: (agent_address, offering_name) -> (id, content_hash).
-        // For 34K rows this is ~10MB of memory and one indexed read.
+        // Pre-fetch existing rows: (mv, agent_address, offering_name) ->
+        // (id, content_hash). Composite key matches the v1.3 UNIQUE constraint
+        // so v1 and v2 rows for the same (addr, name) don't collide here.
         var existing = new Dictionary<string, (long Id, string Hash)>(
             capacity: items.Count, StringComparer.Ordinal);
         await using (var pre = conn.CreateCommand())
         {
-            pre.CommandText = "SELECT agent_address, offering_name, id, content_hash FROM offerings;";
+            pre.CommandText = "SELECT marketplace_version, agent_address, offering_name, id, content_hash FROM offerings;";
             await using var reader = await pre.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {
-                var key = reader.GetString(0) + "|" + reader.GetString(1);
-                existing[key] = (reader.GetInt64(2), reader.GetString(3));
+                var key = reader.GetString(0) + "|" + reader.GetString(1) + "|" + reader.GetString(2);
+                existing[key] = (reader.GetInt64(3), reader.GetString(4));
             }
         }
 
@@ -205,12 +210,12 @@ public class OfferingRepository
                 agent_address, agent_name, offering_name, description,
                 requirement_schema_json, price_usdc, price_type, is_private,
                 chain, content_hash, first_seen_at, last_seen_at,
-                usage_count, agent_job_count)
+                usage_count, agent_job_count, marketplace_version)
             VALUES (
                 $a, $agentName, $n, $desc,
                 $schema, $price, $pType, $priv,
                 $chain, $hash, $now, $now,
-                $usage, $agentJobs);";
+                $usage, $agentJobs, $mv);";
         var iA = ins.Parameters.Add("$a", SqliteType.Text);
         var iAgentName = ins.Parameters.Add("$agentName", SqliteType.Text);
         var iN = ins.Parameters.Add("$n", SqliteType.Text);
@@ -225,10 +230,11 @@ public class OfferingRepository
         iNow.Value = nowIso;
         var iUsage = ins.Parameters.Add("$usage", SqliteType.Integer);
         var iAgentJobs = ins.Parameters.Add("$agentJobs", SqliteType.Integer);
+        var iMv = ins.Parameters.Add("$mv", SqliteType.Text);
 
         foreach (var item in items)
         {
-            var key = item.AgentAddress + "|" + item.OfferingName;
+            var key = item.MarketplaceVersion + "|" + item.AgentAddress + "|" + item.OfferingName;
             if (existing.TryGetValue(key, out var ex))
             {
                 if (ex.Hash == item.ContentHash)
@@ -270,6 +276,7 @@ public class OfferingRepository
                 iHash.Value = item.ContentHash;
                 iUsage.Value = item.UsageCount;
                 iAgentJobs.Value = item.AgentJobCount;
+                iMv.Value = item.MarketplaceVersion;
                 await ins.ExecuteNonQueryAsync();
                 added++;
             }
@@ -307,7 +314,7 @@ public class OfferingRepository
             SELECT id, agent_address, agent_name, offering_name, description,
                    requirement_schema_json, price_usdc, price_type, is_private,
                    chain, content_hash, first_seen_at, last_seen_at,
-                   usage_count, agent_job_count
+                   usage_count, agent_job_count, marketplace_version
             FROM offerings WHERE id = $id;";
         cmd.Parameters.AddWithValue("$id", id);
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -323,7 +330,7 @@ public class OfferingRepository
             SELECT o.id, o.agent_address, o.agent_name, o.offering_name, o.description,
                    o.requirement_schema_json, o.price_usdc, o.price_type, o.is_private,
                    o.chain, o.content_hash, o.first_seen_at, o.last_seen_at,
-                   o.usage_count, o.agent_job_count
+                   o.usage_count, o.agent_job_count, o.marketplace_version
             FROM offerings o
             LEFT JOIN offering_embeddings e ON e.offering_id = o.id
             WHERE e.offering_id IS NULL
@@ -352,7 +359,7 @@ public class OfferingRepository
             SELECT o.id, o.agent_address, o.agent_name, o.offering_name, o.description,
                    o.requirement_schema_json, o.price_usdc, o.price_type, o.is_private,
                    o.chain, o.content_hash, o.first_seen_at, o.last_seen_at,
-                   o.usage_count, o.agent_job_count,
+                   o.usage_count, o.agent_job_count, o.marketplace_version,
                    e.dimension, e.embedding_blob
             FROM offerings o
             INNER JOIN offering_embeddings e ON e.offering_id = o.id
@@ -363,8 +370,8 @@ public class OfferingRepository
         while (await reader.ReadAsync())
         {
             var o = MapOffering(reader);
-            var dim = reader.GetInt32(15);
-            var blob = (byte[])reader[16];
+            var dim = reader.GetInt32(16);
+            var blob = (byte[])reader[17];
             var emb = new float[dim];
             Buffer.BlockCopy(blob, 0, emb, 0, dim * sizeof(float));
             result.Add((o, emb));
@@ -447,7 +454,7 @@ public class OfferingRepository
             SELECT id, agent_address, agent_name, offering_name, description,
                    requirement_schema_json, price_usdc, price_type, is_private,
                    chain, content_hash, first_seen_at, last_seen_at,
-                   usage_count, agent_job_count
+                   usage_count, agent_job_count, marketplace_version
             FROM offerings;";
         await using var reader = await cmd.ExecuteReaderAsync();
         var result = new List<Offering>();
@@ -463,7 +470,7 @@ public class OfferingRepository
             SELECT id, agent_address, agent_name, offering_name, description,
                    requirement_schema_json, price_usdc, price_type, is_private,
                    chain, content_hash, first_seen_at, last_seen_at,
-                   usage_count, agent_job_count
+                   usage_count, agent_job_count, marketplace_version
             FROM offerings
             WHERE agent_address = $a;";
         cmd.Parameters.AddWithValue("$a", agentAddress);
@@ -508,7 +515,7 @@ public class OfferingRepository
             SELECT id, agent_address, agent_name, offering_name, description,
                    requirement_schema_json, price_usdc, price_type, is_private,
                    chain, content_hash, first_seen_at, last_seen_at,
-                   usage_count, agent_job_count
+                   usage_count, agent_job_count, marketplace_version
             FROM offerings
             WHERE first_seen_at >= $since
             ORDER BY usage_count DESC, first_seen_at DESC
@@ -530,7 +537,8 @@ public class OfferingRepository
         cmd.CommandText = @"
             SELECT o.id, o.agent_name, o.agent_address, o.offering_name,
                    s.usage_count AS hires_then,
-                   o.usage_count AS hires_now
+                   o.usage_count AS hires_now,
+                   o.marketplace_version
             FROM offerings o
             INNER JOIN agent_reputation_snapshots s
               ON s.offering_id = o.id AND s.snapshot_date = $d
@@ -552,7 +560,8 @@ public class OfferingRepository
                 OfferingName: reader.GetString(3),
                 HiresThen: hiresThen,
                 HiresNow: hiresNow,
-                Delta: hiresNow - hiresThen));
+                Delta: hiresNow - hiresThen,
+                MarketplaceVersion: reader.GetString(6)));
         }
         return result;
     }
@@ -655,6 +664,7 @@ public class OfferingRepository
             FirstSeenAt: DateTime.Parse(reader.GetString(11), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
             LastSeenAt: DateTime.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
             UsageCount: reader.GetInt64(13),
-            AgentJobCount: reader.GetInt64(14));
+            AgentJobCount: reader.GetInt64(14),
+            MarketplaceVersion: reader.GetString(15));
     }
 }

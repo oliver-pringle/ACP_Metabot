@@ -60,56 +60,89 @@ public class MarketplaceIndexerService : BackgroundService
     public async Task RunOnceAsync(CancellationToken ct)
     {
         using var scope = _services.CreateScope();
-        var source = scope.ServiceProvider.GetRequiredService<IMarketplaceSource>();
+        var sources = scope.ServiceProvider.GetServices<IMarketplaceSource>().ToList();
         var repo = scope.ServiceProvider.GetRequiredService<OfferingRepository>();
         var embedder = scope.ServiceProvider.GetRequiredService<VoyageEmbeddingProvider>();
         var reputation = scope.ServiceProvider.GetRequiredService<ReputationService>();
         var search = scope.ServiceProvider.GetRequiredService<SearchService>();
         var categories = scope.ServiceProvider.GetRequiredService<CategoryService>();
 
-        var fetched = await source.FetchAsync(ct);
         var nowUtc = DateTime.UtcNow;
+        var items = new List<UpsertItem>();
+        var perVersionCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var totalFetched = 0;
 
-        // Build the bulk upsert input list. All field truncation, schema
-        // serialisation, and hashing happens here so the repo layer just sees
-        // a clean list of canonical UpsertItems.
-        var items = new List<UpsertItem>(fetched.Count);
-        foreach (var dto in fetched)
+        // Fan out across every registered source. Each source's failure is
+        // contained — the indexer keeps any partial results and continues.
+        // V1 and V2 are independent: a V2 outage shouldn't blank V1 in the DB,
+        // and vice versa.
+        foreach (var source in sources)
         {
-            // Third-party agents can put anything in these fields. Truncate at
-            // the trust boundary so DB rows, embedding inputs, and LLM prompts
-            // are all bounded regardless of upstream behavior.
-            var agentName = Truncate(dto.AgentName, MaxFieldLen);
-            var offeringName = Truncate(dto.OfferingName, MaxFieldLen);
-            var description = Truncate(dto.Description, MaxDescriptionLen);
-
-            string? schemaJson = null;
-            if (dto.RequirementSchema is not null)
+            IReadOnlyList<MarketplaceOfferingDto> fetched;
+            try
             {
-                schemaJson = JsonSerializer.Serialize(dto.RequirementSchema);
-                if (schemaJson.Length > MaxSchemaJsonLen)
-                    schemaJson = schemaJson.Substring(0, MaxSchemaJsonLen);
+                fetched = await source.FetchAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[indexer] source '{Source}' (mv={Mv}) fetch failed; continuing with other sources",
+                    source.GetType().Name, source.MarketplaceVersion);
+                continue;
             }
 
-            var hash = ContentHash(dto.AgentAddress, offeringName, description,
-                dto.PriceUsdc, dto.PriceType, dto.Chain, schemaJson);
-            items.Add(new UpsertItem(
-                dto.AgentAddress, agentName, offeringName, description,
-                schemaJson, dto.PriceUsdc, dto.PriceType, dto.IsPrivate, dto.Chain,
-                hash, dto.UsageCount, dto.AgentJobCount));
+            totalFetched += fetched.Count;
+            perVersionCounts[source.MarketplaceVersion] =
+                perVersionCounts.GetValueOrDefault(source.MarketplaceVersion) + fetched.Count;
+
+            // Build the bulk upsert input list. All field truncation, schema
+            // serialisation, and hashing happens here so the repo layer just sees
+            // a clean list of canonical UpsertItems.
+            foreach (var dto in fetched)
+            {
+                // Third-party agents can put anything in these fields. Truncate at
+                // the trust boundary so DB rows, embedding inputs, and LLM prompts
+                // are all bounded regardless of upstream behavior.
+                var agentName = Truncate(dto.AgentName, MaxFieldLen);
+                var offeringName = Truncate(dto.OfferingName, MaxFieldLen);
+                var description = Truncate(dto.Description, MaxDescriptionLen);
+
+                string? schemaJson = null;
+                if (dto.RequirementSchema is not null)
+                {
+                    schemaJson = JsonSerializer.Serialize(dto.RequirementSchema);
+                    if (schemaJson.Length > MaxSchemaJsonLen)
+                        schemaJson = schemaJson.Substring(0, MaxSchemaJsonLen);
+                }
+
+                // marketplace_version included in the hash so v1 and v2
+                // rows of "the same" offering are tracked independently —
+                // belt-and-braces alongside the composite UNIQUE.
+                var hash = ContentHash(dto.AgentAddress, offeringName, description,
+                    dto.PriceUsdc, dto.PriceType, dto.Chain, schemaJson,
+                    source.MarketplaceVersion);
+                items.Add(new UpsertItem(
+                    dto.AgentAddress, agentName, offeringName, description,
+                    schemaJson, dto.PriceUsdc, dto.PriceType, dto.IsPrivate, dto.Chain,
+                    hash, dto.UsageCount, dto.AgentJobCount,
+                    MarketplaceVersion: source.MarketplaceVersion));
+            }
         }
 
         var summary = await repo.UpsertManyAsync(items, nowUtc);
 
         LastFetchAt = nowUtc;
-        LastFetchCount = fetched.Count;
-        _logger.LogInformation("[indexer] fetch complete: total={Total} added={Added} updated={Updated} unchanged={Unchanged}",
-            fetched.Count, summary.Added, summary.Updated, summary.Unchanged);
+        LastFetchCount = totalFetched;
+        var perVersionStr = string.Join(", ",
+            perVersionCounts.OrderBy(kv => kv.Key)
+                            .Select(kv => $"{kv.Key}={kv.Value}"));
+        _logger.LogInformation(
+            "[indexer] fetch complete: total={Total} ({PerVersion}) added={Added} updated={Updated} unchanged={Unchanged}",
+            totalFetched, perVersionStr, summary.Added, summary.Updated, summary.Unchanged);
 
         // Refresh reputation caches with the freshly-persisted corpus.
         // Pull from DB (not the DTO list) so we have the assigned offering ids
         // and any pre-existing rows we didn't see this fetch.
-        if (fetched.Count > 0)
+        if (totalFetched > 0)
         {
             var corpus = await repo.ListAllAsync();
             reputation.RebuildFromCorpus(corpus);
@@ -181,12 +214,13 @@ public class MarketplaceIndexerService : BackgroundService
     }
 
     private static string ContentHash(string agentAddress, string offeringName,
-        string description, double priceUsdc, string priceType, string chain, string? schemaJson)
+        string description, double priceUsdc, string priceType, string chain, string? schemaJson,
+        string marketplaceVersion)
     {
         var canonical = string.Join("",
             agentAddress, offeringName, description,
             priceUsdc.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-            priceType, chain, schemaJson ?? "");
+            priceType, chain, schemaJson ?? "", marketplaceVersion);
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }

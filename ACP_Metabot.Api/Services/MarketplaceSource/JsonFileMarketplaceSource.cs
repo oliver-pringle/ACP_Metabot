@@ -5,6 +5,8 @@ namespace ACP_Metabot.Api.Services.MarketplaceSource;
 
 public class JsonFileMarketplaceSource : IMarketplaceSource
 {
+    public string MarketplaceVersion => "v1";
+
     private readonly string _path;
     private readonly ILogger<JsonFileMarketplaceSource> _logger;
 
