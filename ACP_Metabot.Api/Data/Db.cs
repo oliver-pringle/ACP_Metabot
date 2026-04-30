@@ -188,7 +188,17 @@ public class Db
                 VALUES ('delete', old.id, old.offering_name, old.agent_name, old.description);
             END;
 
-            CREATE TRIGGER IF NOT EXISTS offerings_au AFTER UPDATE ON offerings BEGIN
+            -- Scoped to the FTS-mirrored columns. The indexer hot path is the
+            -- touch UPDATE in OfferingRepository.UpsertManyAsync which only
+            -- changes last_seen_at + usage_count + agent_job_count, none of
+            -- which are mirrored, so this trigger MUST NOT fire for them. An
+            -- AFTER UPDATE without OF fires on every UPDATE regardless of
+            -- which columns appear in the SET, and that caused v1.2 prod
+            -- corruption (each touch fired delete-then-insert on the FTS
+            -- index across 34K rows for 12 indexer cycles, eventually
+            -- corrupting the FTS5 shadow pages).
+            CREATE TRIGGER IF NOT EXISTS offerings_au
+            AFTER UPDATE OF offering_name, agent_name, description ON offerings BEGIN
                 INSERT INTO offerings_fts(offerings_fts, rowid, offering_name, agent_name, description)
                 VALUES ('delete', old.id, old.offering_name, old.agent_name, old.description);
                 INSERT INTO offerings_fts(rowid, offering_name, agent_name, description)
@@ -211,22 +221,40 @@ public class Db
             ";
         await cmd.ExecuteNonQueryAsync();
 
-        // FTS5 idempotent backfill — only inserts ids missing from offerings_fts.
-        // Handles the existing prod DB on first deploy; no-op on subsequent boots.
-        await using (var bf = conn.CreateCommand())
+        // FTS5 sync. Use SQLite's native 'rebuild' command (the documented way
+        // to populate an external-content FTS5 from existing data) rather than
+        // a manual INSERT...SELECT. 'rebuild' is atomic and guarantees the
+        // index matches the parent table — manual inserts can leave the index
+        // and content out of sync, which then causes corruption when the
+        // AFTER UPDATE trigger's 'delete' command can't find a matching row.
+        // Only triggered when the row counts disagree, so steady-state boots
+        // are a no-op.
+        await using (var rebuild = conn.CreateCommand())
         {
-            bf.CommandText = @"
-                INSERT INTO offerings_fts(rowid, offering_name, agent_name, description)
-                SELECT o.id, o.offering_name, o.agent_name, o.description
-                FROM offerings o
-                WHERE NOT EXISTS (SELECT 1 FROM offerings_fts f WHERE f.rowid = o.id);";
-            try
-            {
-                await bf.ExecuteNonQueryAsync();
-            }
+            rebuild.CommandText = @"
+                SELECT
+                    (SELECT COUNT(*) FROM offerings) -
+                    (SELECT COUNT(*) FROM offerings_fts);";
+            long diff = 0;
+            try { diff = (long)(await rebuild.ExecuteScalarAsync() ?? 0L); }
             catch (SqliteException ex)
             {
-                Console.Error.WriteLine($"[db] WARNING: FTS5 backfill failed ({ex.Message}); hybrid search will fall back to dense-only.");
+                Console.Error.WriteLine($"[db] WARNING: FTS5 row-count probe failed ({ex.Message}); skipping rebuild.");
+            }
+
+            if (diff != 0)
+            {
+                Console.Error.WriteLine($"[db] FTS5 out of sync (diff={diff}); rebuilding offerings_fts.");
+                await using var rb = conn.CreateCommand();
+                rb.CommandText = "INSERT INTO offerings_fts(offerings_fts) VALUES('rebuild');";
+                try
+                {
+                    await rb.ExecuteNonQueryAsync();
+                }
+                catch (SqliteException ex)
+                {
+                    Console.Error.WriteLine($"[db] WARNING: FTS5 rebuild failed ({ex.Message}); hybrid search will fall back to dense-only.");
+                }
             }
         }
 
