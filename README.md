@@ -112,14 +112,24 @@ Two upstream marketplaces are indexed side-by-side every cycle:
 - **V2** (`AcpV2MarketplaceSource`) — reads `https://api.acp.virtuals.io`
   (the base URL hardcoded in `@virtuals-protocol/acp-node-v2 ^0.0.6`).
 
-V2 has no public list-all endpoint, so enumeration combines: a hardcoded
-known-wallets list (`Indexer:V2:KnownAgents`), a keyword sweep against
-`/agents/search?query=X&topK=49&chainIds=8453` (default 80-keyword set
-in `AcpV2MarketplaceSource.DefaultKeywords`), and — pending wiring — a
-`v2_known_sellers` cache populated from on-chain `JobCreated` events on
-the V2 contract `0x238E541BfefD82238730D00a2208E5497F1832E0`. Per-wallet
-fan-out then hits `/agents/wallet/{addr}` for full offering payloads.
-Both endpoints are unauthenticated.
+V2 has no public list-all endpoint, so enumeration combines three sources
+into one deduped wallet set, then fans out to `/agents/wallet/{addr}` per
+wallet (the per-wallet endpoint and `/agents/search` are both unauthenticated):
+
+- **Source A — chain-event scan** (v1.4, default on). `V2SellerScannerService`
+  scans `JobCreated` events on the V2 contract
+  `0x238E541BfefD82238730D00a2208E5497F1832E0` with no provider filter and
+  upserts every distinct provider into the `v2_known_sellers` SQLite cache.
+  This is the comprehensive set: every V2 agent that has ever been hired.
+  Cold-start runs from `Reputation:ContractDeployBlock` (or
+  `Indexer:V2:SellerScanFromBlock` if overridden); subsequent runs scan only
+  the delta since the persisted checkpoint.
+- **Source B — keyword sweep** against
+  `/agents/search?query=X&topK=49&chainIds=8453` (default 80-keyword set in
+  `AcpV2MarketplaceSource.DefaultKeywords`). Catches new agents who haven't
+  yet been hired (so chain events haven't surfaced them).
+- **Source C — hardcoded known wallets** (`Indexer:V2:KnownAgents`) so a
+  fresh deploy is always findable in its own index.
 
 Each indexed row carries a `marketplace_version` (`v1` or `v2`) and the
 same `(agent_address, offering_name)` can exist on both marketplaces
@@ -140,6 +150,8 @@ A `json-file` source is also supported for offline dev — see
 - Indexer__V2__MaxConcurrentFetches=4
 # Indexer__V2__KnownAgents and Indexer__V2__KeywordSweepKeywords
 # default to the seeded values; override via array config if needed.
+- Indexer__V2__SellerScanIntervalMinutes=60
+# Indexer__V2__SellerScanFromBlock= (defaults to Reputation:ContractDeployBlock)
 ```
 
 ## Provisioning the agent
@@ -230,18 +242,42 @@ For the metric → scaling-lever mapping, see [`docs/runbook-scaling.md`](docs/r
 ## Security posture
 
 - **`X-API-Key` between sidecar and C# API.** Required on every endpoint
-  except `/health`. Fail-closed if missing or wrong.
+  except `/health` and `/v1/*`. Fail-closed if missing or wrong. Compared
+  with `CryptographicOperations.FixedTimeEquals` over UTF-8 bytes to defang
+  timing oracles.
 - **SSRF guard on `webhookUrl`.** Resolves and rejects RFC1918, loopback,
   link-local (incl. cloud metadata `169.254.169.254`), CGNAT, multicast,
   reserved, and IPv6 site-/link-local/unique-local/multicast. Re-validated
-  before every webhook delivery to defend against DNS rebinding.
+  before every webhook delivery to defend against DNS rebinding. **Auto-
+  redirect is disabled on the webhook HttpClient**; every `Location`
+  header on a 3xx response is re-validated through the same guard before
+  the next hop, capped at 5 hops. A buyer cannot register a public webhook
+  that 302s to internal/cloud-metadata addresses.
+- **Forwarded-header trust list.** `TRUSTED_PROXY_NETWORKS` (comma-separated
+  CIDRs) gates which peers are allowed to set `X-Forwarded-*`. The compose
+  default trusts only the pinned `acp-metabot` bridge subnet (172.28.0.0/16,
+  where Caddy lives); sibling bots on `acp-shared` can't forge client IPs to
+  bypass per-IP rate limits.
 - **Evaluator-zero enforcement.** Seller refuses jobs with
   `evaluatorAddress != 0x0` to prevent take-and-reject griefing.
-- **Input length caps.** `query` 2 KB, `useCase` 4 KB, `webhookUrl` 2 KB.
-  Indexer truncates third-party `description` to 4 KB.
-- **Prompt-injection defense.** `composeStack` wraps untrusted content in
-  delimiter tags and sanitizes closing-tag breakouts and code fences.
-  System prompt instructs Claude to treat tagged content as data.
+- **Input length caps (request boundary).** Public endpoints reject
+  `query` > 1000 chars and `useCase` > 2000 chars before any AI provider
+  call. The indexer separately truncates third-party `description` to 4 KB
+  before persistence/embedding.
+- **Persistence caps (request_log).** `RequestMetricsMiddleware` truncates
+  stored `query_text` to 200 chars and `user_agent` to 200 chars before
+  writing to SQLite, so backups and `/metrics/top` can't surface unbounded
+  user-supplied text.
+- **No internal exception messages in HTTP responses.** Reputation-compute
+  failures return a generic message; the full exception is logged
+  server-side only.
+- **Prompt-injection defense (`composeStack`).** Wraps untrusted content
+  (use-case + every candidate's name/agent/description) in delimiter tags
+  and sanitizes closing-tag breakouts and code fences. System prompt
+  contains an explicit SECURITY block instructing Claude to treat tagged
+  content as data, not instructions. Claude's output is parsed as JSON and
+  every entry must match a known `(offeringName, agentAddress)` pair from
+  the candidate list — agent-fabricated stack entries are dropped.
 
 ## Design decisions worth knowing
 

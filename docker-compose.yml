@@ -28,6 +28,12 @@ services:
       # service pulls in ChainEventScanner, which throws at construction).
       - BASE_RPC_URL=${BASE_RPC_URL}
       - ACP_CONTRACT_ADDRESS_BASE=${ACP_CONTRACT_ADDRESS_BASE:-0x238E541BfefD82238730D00a2208E5497F1832E0}
+      # X-Forwarded-* trust list. ForwardedHeaders middleware only honours these
+      # headers from peers inside one of these CIDRs; everyone else's headers are
+      # ignored (RemoteIpAddress falls back to the direct connection). Default to
+      # the pinned acp-metabot bridge subnet so per-IP rate limits partition on
+      # the real client IP forwarded by Caddy. Set to "" to disable entirely.
+      - TRUSTED_PROXY_NETWORKS=${TRUSTED_PROXY_NETWORKS:-172.28.0.0/16}
     volumes:
       - ./data:/data
     networks: [acp-metabot, acp-shared]
@@ -96,6 +102,13 @@ services:
 networks:
   acp-metabot:
     driver: bridge
+    # Pinned subnet so the C# API can be configured to trust X-Forwarded-* only
+    # from this range (Caddy lives here). Match TRUSTED_PROXY_NETWORKS above.
+    # Recreating an existing bridge will trigger one `docker compose down/up`
+    # cycle on first deploy of this version.
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
   acp-shared:
     external: true
 

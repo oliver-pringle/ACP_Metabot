@@ -63,6 +63,18 @@ builder.Services.AddSingleton<WatchService>();
 builder.Services.AddSingleton<MarketplaceIndexerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MarketplaceIndexerService>());
 builder.Services.AddHostedService<WatchPollerBackgroundService>();
+// V2 seller chain-scan: enumerates every JobCreated provider on the V2 contract
+// so AcpV2MarketplaceSource's Source A surfaces all V2 sellers, not just
+// keyword-sweep matches + the hardcoded portfolio. Only registered when V2 is
+// enabled — V1-only deployments don't need it.
+{
+    var v2Enabled = builder.Configuration.GetValue<bool?>("Indexer:V2:Enabled") ?? true;
+    if (indexerSource == "acp-api" && v2Enabled)
+    {
+        builder.Services.AddSingleton<V2SellerScannerService>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<V2SellerScannerService>());
+    }
+}
 builder.Services.AddSingleton<LifetimeSnapshotService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LifetimeSnapshotService>());
 builder.Services.AddSingleton<ReputationWarmerService>();
@@ -72,13 +84,37 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<MetricsWriterServi
 
 builder.Services.AddOpenApi();
 
-// Trust X-Forwarded-* from the local Caddy reverse proxy so per-IP rate
-// limiting partitions on the real client IP, not the proxy container's IP.
+// Trust X-Forwarded-* ONLY from the configured reverse-proxy network. Without
+// a restriction, any direct caller (sibling bots on acp-shared, anyone who
+// reaches the docker bridge) could forge X-Forwarded-For and bypass the
+// per-IP rate limits.
+//
+// Configure the trusted ingress range via the TRUSTED_PROXY_NETWORKS env var
+// (comma-separated CIDRs). When unset, no X-Forwarded-* header is honoured —
+// rate limits partition on the direct connection IP, which is correct for
+// every deployment except the public Caddy gateway. The droplet sets
+// TRUSTED_PROXY_NETWORKS to the acp-metabot bridge subnet (where Caddy lives).
 builder.Services.Configure<ForwardedHeadersOptions>(opts =>
 {
     opts.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
     opts.KnownIPNetworks.Clear();
     opts.KnownProxies.Clear();
+    var trusted = builder.Configuration["TRUSTED_PROXY_NETWORKS"];
+    if (!string.IsNullOrWhiteSpace(trusted))
+    {
+        foreach (var cidr in trusted.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            try
+            {
+                opts.KnownIPNetworks.Add(System.Net.IPNetwork.Parse(cidr));
+            }
+            catch
+            {
+                // Bad CIDR in env — skip silently rather than failing startup
+                // for a misconfigured trust list.
+            }
+        }
+    }
 });
 
 // Per-IP rate limiting for public /v1/* endpoints. Two policies because the
@@ -169,6 +205,9 @@ app.UseMiddleware<RequestMetricsMiddleware>();
 // auth'd requests. Set INTERNAL_API_KEY in the environment for both this
 // container and the sidecar.
 var apiKey = builder.Configuration["INTERNAL_API_KEY"];
+var apiKeyBytes = string.IsNullOrEmpty(apiKey)
+    ? Array.Empty<byte>()
+    : System.Text.Encoding.UTF8.GetBytes(apiKey);
 app.Use(async (ctx, next) =>
 {
     var path = ctx.Request.Path;
@@ -178,14 +217,20 @@ app.Use(async (ctx, next) =>
         await next();
         return;
     }
-    if (string.IsNullOrEmpty(apiKey))
+    if (apiKeyBytes.Length == 0)
     {
         ctx.Response.StatusCode = StatusCodes.Status500InternalServerError;
         await ctx.Response.WriteAsync("INTERNAL_API_KEY is not configured");
         return;
     }
-    if (!ctx.Request.Headers.TryGetValue("X-API-Key", out var provided)
-        || !string.Equals(provided.ToString(), apiKey, StringComparison.Ordinal))
+    // Constant-time compare to defang timing oracles. UTF-8 byte arrays must
+    // match in length first; FixedTimeEquals throws on mismatch otherwise.
+    var providedHeader = ctx.Request.Headers.TryGetValue("X-API-Key", out var raw)
+        ? raw.ToString() : "";
+    var providedBytes = System.Text.Encoding.UTF8.GetBytes(providedHeader);
+    var ok = providedBytes.Length == apiKeyBytes.Length
+        && System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(providedBytes, apiKeyBytes);
+    if (!ok)
     {
         ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
         await ctx.Response.WriteAsync("Unauthorized");
@@ -203,10 +248,18 @@ app.MapGet("/health", () => Results.Ok(new
 // Shared handlers — mounted twice: once on the internal X-API-Key path used
 // by the sidecar, and once on the public /v1/* path used by the acp-find
 // plugin (rate-limited per IP).
+// Trust-boundary caps for buyer-supplied free-form inputs. Both bound the
+// cost we'll spend in Voyage / Claude per request and shrink the prompt-
+// injection surface (a 50KB query has more room to escape than a 1KB one).
+const int MaxQueryLen = 1000;
+const int MaxUseCaseLen = 2000;
+
 async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, CancellationToken ct)
 {
     if (string.IsNullOrWhiteSpace(req.Query))
         return Results.BadRequest(new { error = "query is required" });
+    if (req.Query.Length > MaxQueryLen)
+        return Results.BadRequest(new { error = $"query must be {MaxQueryLen} characters or fewer" });
     var limit = req.Limit is null ? 10 : Math.Clamp(req.Limit.Value, 1, 50);
     var minScore = req.MinScore ?? 0.0;
     var priceMax = req.PriceMaxUsdc ?? double.PositiveInfinity;
@@ -257,6 +310,8 @@ async Task<IResult> HandleCompose(ComposeRequest req, StackComposerService svc, 
 {
     if (string.IsNullOrWhiteSpace(req.UseCase))
         return Results.BadRequest(new { error = "useCase is required" });
+    if (req.UseCase.Length > MaxUseCaseLen)
+        return Results.BadRequest(new { error = $"useCase must be {MaxUseCaseLen} characters or fewer" });
     var max = req.MaxOfferings is null ? 5 : Math.Clamp(req.MaxOfferings.Value, 1, 10);
     var marketplace = NormalizeMarketplace(req.Marketplace);
     if (req.Marketplace is not null && marketplace is null)
@@ -297,9 +352,11 @@ async Task<IResult> HandleReputation(AgentReputationRequest req,
     }
     catch (Exception ex)
     {
+        // Keep full diagnostics in the server log; never echo internal details
+        // (RPC URLs, DB messages, chain-scan internals) back to the client.
         log.LogError(ex, "[reputation] compute failed for {addr}", addr);
         return Results.Json(
-            new { error = "compute_failed", message = ex.Message },
+            new { error = "compute_failed", message = "reputation compute failed; please retry" },
             statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 }

@@ -1,4 +1,4 @@
-using System.Net.Http.Headers;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 
@@ -7,6 +7,7 @@ namespace ACP_Metabot.Api.Services;
 public class WebhookDeliveryService
 {
     private const string UserAgent = "TheMetaBot/1.0 (acp-watch)";
+    private const int MaxRedirectHops = 5;
 
     private readonly HttpClient _http;
     private readonly ILogger<WebhookDeliveryService> _logger;
@@ -20,10 +21,25 @@ public class WebhookDeliveryService
 
     private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
 
-    public WebhookDeliveryService(IHttpClientFactory factory, ILogger<WebhookDeliveryService> logger)
+    public WebhookDeliveryService(ILogger<WebhookDeliveryService> logger)
     {
-        _http = factory.CreateClient(nameof(WebhookDeliveryService));
-        _http.Timeout = TimeSpan.FromSeconds(5);
+        // Build our own HttpClient with auto-redirects DISABLED. The default
+        // SocketsHttpHandler blindly follows 3xx Location headers, which means
+        // a buyer can register a public webhookUrl that 302s to
+        // http://169.254.169.254/latest/meta-data/ (cloud metadata) or
+        // http://10.0.0.1/internal-api — bypassing WebhookUrlValidator
+        // entirely. With auto-redirect off, every hop's Location is validated
+        // through the same SSRF guard used at registration.
+        var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            ConnectTimeout = TimeSpan.FromSeconds(5),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+        };
+        _http = new HttpClient(handler, disposeHandler: true)
+        {
+            Timeout = TimeSpan.FromSeconds(5),
+        };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
         _logger = logger;
     }
@@ -31,7 +47,8 @@ public class WebhookDeliveryService
     /// <summary>
     /// POSTs the payload as JSON to the URL. Returns true on first 2xx response.
     /// On failure, retries up to 3 times with backoff (1s, 4s, 16s).
-    /// Re-validates the URL before each attempt to defend against DNS rebinding.
+    /// Re-validates the URL before each attempt to defend against DNS rebinding,
+    /// and re-validates every redirect hop's Location target the same way.
     /// </summary>
     public async Task<bool> DeliverAsync(
         string url,
@@ -48,34 +65,15 @@ public class WebhookDeliveryService
                 catch (OperationCanceledException) { return false; }
             }
 
-            // Re-resolve and re-validate every attempt — guards against a DNS server
-            // flipping between public and private IPs after registration.
-            var urlCheck = await WebhookUrlValidator.ValidateAsync(url, ct);
-            if (!urlCheck.Ok)
-            {
-                _logger.LogWarning("[webhook] url validation failed pre-POST: {Reason} ({Url})",
-                    urlCheck.Reason, url);
-                return false;
-            }
-
             try
             {
-                using var req = new HttpRequestMessage(HttpMethod.Post, url)
-                {
-                    Content = JsonContent.Create(payload, options: JsonOpts),
-                };
-                req.Headers.TryAddWithoutValidation("X-Watch-Id", watchId);
-                req.Headers.TryAddWithoutValidation("X-Alert-Number", alertNumber.ToString());
-
-                using var res = await _http.SendAsync(req, ct);
-                if (res.IsSuccessStatusCode)
+                if (await SendOnceWithSafeRedirectsAsync(url, watchId, alertNumber, payload, ct))
                 {
                     if (attempt > 0)
                         _logger.LogInformation("[webhook] success on retry {Attempt} for {Url}", attempt, url);
                     return true;
                 }
-                _logger.LogWarning("[webhook] non-2xx ({Status}) on attempt {Attempt} for {Url}",
-                    (int)res.StatusCode, attempt + 1, url);
+                _logger.LogWarning("[webhook] failed on attempt {Attempt} for {Url}", attempt + 1, url);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -84,4 +82,67 @@ public class WebhookDeliveryService
         }
         return false;
     }
+
+    // Returns true on a 2xx anywhere in the redirect chain. Validates the
+    // initial URL and every Location target through WebhookUrlValidator so a
+    // 302 → 169.254.169.254 (or any other private/internal address) is
+    // refused before the next request goes out.
+    private async Task<bool> SendOnceWithSafeRedirectsAsync(
+        string url, string watchId, int alertNumber, object payload, CancellationToken ct)
+    {
+        var current = url;
+        for (int hop = 0; hop <= MaxRedirectHops; hop++)
+        {
+            var check = await WebhookUrlValidator.ValidateAsync(current, ct);
+            if (!check.Ok)
+            {
+                _logger.LogWarning(
+                    "[webhook] url validation failed at hop {Hop}: {Reason} ({Url})",
+                    hop, check.Reason, current);
+                return false;
+            }
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, current)
+            {
+                Content = JsonContent.Create(payload, options: JsonOpts),
+            };
+            req.Headers.TryAddWithoutValidation("X-Watch-Id", watchId);
+            req.Headers.TryAddWithoutValidation("X-Alert-Number", alertNumber.ToString());
+
+            using var res = await _http.SendAsync(req, ct);
+            if (res.IsSuccessStatusCode) return true;
+
+            // 3xx with Location → validate target and continue. Any other
+            // non-2xx (4xx/5xx, or 3xx without Location) is a definitive
+            // delivery failure for this attempt.
+            if (IsRedirect(res.StatusCode))
+            {
+                var location = res.Headers.Location;
+                if (location is null)
+                {
+                    _logger.LogWarning(
+                        "[webhook] {Status} without Location header from {Url}", (int)res.StatusCode, current);
+                    return false;
+                }
+                var nextUri = location.IsAbsoluteUri
+                    ? location
+                    : new Uri(new Uri(current), location);
+                current = nextUri.ToString();
+                continue;
+            }
+
+            _logger.LogWarning("[webhook] non-2xx ({Status}) from {Url}",
+                (int)res.StatusCode, current);
+            return false;
+        }
+        _logger.LogWarning("[webhook] exceeded {Max} redirects starting from {Url}", MaxRedirectHops, url);
+        return false;
+    }
+
+    private static bool IsRedirect(HttpStatusCode s)
+        => s == HttpStatusCode.MovedPermanently     // 301
+        || s == HttpStatusCode.Found                 // 302
+        || s == HttpStatusCode.SeeOther              // 303
+        || s == HttpStatusCode.TemporaryRedirect     // 307
+        || s == HttpStatusCode.PermanentRedirect;    // 308
 }
