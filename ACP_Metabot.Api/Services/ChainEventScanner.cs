@@ -83,13 +83,17 @@ public class ChainEventScanner
         // app-wide via the static ClientBase.ConnectionTimeout. The free
         // publicnode Base RPC blew through that on the V2 seller enumeration
         // (unfiltered eth_getLogs across 10K blocks). Bump the static default
-        // here on construction so every RpcClient instance — incl. the Web3
-        // built from the URL string below — gets the longer timeout. Per-agent
-        // reputation scans are fine on either window.
+        // here, BEFORE constructing the RpcClient, so the per-request
+        // CancellationTokenSource Nethereum spins up reads the longer timeout.
         var rpcTimeout = TimeSpan.FromSeconds(
             Math.Max(5, config.GetValue<int?>("Reputation:RpcTimeoutSeconds") ?? 60));
         Nethereum.JsonRpc.Client.ClientBase.ConnectionTimeout = rpcTimeout;
-        _web3 = new Web3(rpcUrl);
+        var rpcClient = new Nethereum.JsonRpc.Client.RpcClient(new Uri(rpcUrl));
+        _web3 = new Web3(rpcClient);
+        _logger.LogInformation(
+            "[chain-scan] RPC client ready; ConnectionTimeout={Sec}s contract={Addr} chunkSize={Chunk}",
+            Nethereum.JsonRpc.Client.ClientBase.ConnectionTimeout.TotalSeconds,
+            _contractAddress, _chunkSize);
     }
 
     /// <summary>
@@ -143,10 +147,42 @@ public class ChainEventScanner
             var toBP   = new BlockParameter(new HexBigInteger(e));
             // No topic filter on provider — this is the enumerative pass.
             var filter = handler.CreateFilterInput(fromBP, toBP);
-            var logs   = await handler.GetAllChangesAsync(filter);
+
+            // Per-chunk retry with backoff. Free public RPCs (publicnode Base)
+            // routinely throw transient timeouts / 429s on unfiltered
+            // eth_getLogs even on a small range — burning a whole chunk of
+            // work to a single flake makes cold-start glacial. Three attempts,
+            // 5s/15s backoff, then propagate to the streamer's caller (which
+            // leaves the checkpoint at the previous chunk).
+            List<Nethereum.Contracts.EventLog<JobCreatedEvent>>? logs = null;
+            Exception? lastEx = null;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                if (attempt > 0)
+                {
+                    try { await Task.Delay(TimeSpan.FromSeconds(attempt * 10), ct); }
+                    catch (OperationCanceledException) { yield break; }
+                }
+                try
+                {
+                    logs = (List<Nethereum.Contracts.EventLog<JobCreatedEvent>>?)
+                        await handler.GetAllChangesAsync(filter);
+                    lastEx = null;
+                    break;
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { yield break; }
+                catch (Exception ex)
+                {
+                    lastEx = ex;
+                    _logger.LogWarning(
+                        "[chain-scan] chunk [{From}..{To}] attempt {N} failed: {Type} {Msg}",
+                        s, e, attempt + 1, ex.GetType().Name, ex.Message);
+                }
+            }
+            if (lastEx is not null) throw lastEx;
 
             var firstSeen = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-            foreach (var log in logs)
+            foreach (var log in logs!)
             {
                 var addr = (log.Event.Provider ?? "").Trim().ToLowerInvariant();
                 if (addr.Length != 42 || !addr.StartsWith("0x")) continue;
