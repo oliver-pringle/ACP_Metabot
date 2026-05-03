@@ -78,6 +78,17 @@ public class ChainEventScanner
         _deployBlock      = config.GetValue<long?>("Reputation:ContractDeployBlock") ?? 0L;
         _chunkSize        = config.GetValue<long?>("Reputation:ChunkSize")           ?? 10_000L;
         _maxFirstScanDays = config.GetValue<int?>("Reputation:MaxFirstScanDays")     ?? 90;
+
+        // Nethereum's RpcClient defaults to a 20s ConnectionTimeout — applied
+        // app-wide via the static ClientBase.ConnectionTimeout. The free
+        // publicnode Base RPC blew through that on the V2 seller enumeration
+        // (unfiltered eth_getLogs across 10K blocks). Bump the static default
+        // here on construction so every RpcClient instance — incl. the Web3
+        // built from the URL string below — gets the longer timeout. Per-agent
+        // reputation scans are fine on either window.
+        var rpcTimeout = TimeSpan.FromSeconds(
+            Math.Max(5, config.GetValue<int?>("Reputation:RpcTimeoutSeconds") ?? 60));
+        Nethereum.JsonRpc.Client.ClientBase.ConnectionTimeout = rpcTimeout;
         _web3 = new Web3(rpcUrl);
     }
 
@@ -114,13 +125,18 @@ public class ChainEventScanner
     /// </summary>
     public async IAsyncEnumerable<ProviderChunk> ScanProvidersStreamingAsync(
         long fromBlock, long toBlock,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct,
+        long? chunkSize = null)
     {
         var startBlock = Math.Max(fromBlock, _deployBlock);
         if (startBlock > toBlock) yield break;
 
+        var effectiveChunk = chunkSize.HasValue
+            ? Math.Max(100L, chunkSize.Value)
+            : _chunkSize;
+
         var handler = _web3.Eth.GetEvent<JobCreatedEvent>(_contractAddress);
-        foreach (var (s, e) in BlockRangeChunker.Chunk(startBlock, toBlock, _chunkSize))
+        foreach (var (s, e) in BlockRangeChunker.Chunk(startBlock, toBlock, effectiveChunk))
         {
             ct.ThrowIfCancellationRequested();
             var fromBP = new BlockParameter(new HexBigInteger(s));

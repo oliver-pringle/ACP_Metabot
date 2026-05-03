@@ -28,6 +28,11 @@ public class V2SellerScannerService : BackgroundService
     private readonly TimeSpan _catchUpInterval;
     private readonly long? _coldStartFromBlock;
     private readonly long _maxBlocksPerTick;
+    // Smaller than the per-agent 10K chunk because the seller enumeration drops
+    // the topic-3 (provider) filter, so each chunk pulls every JobCreated in
+    // the range. Free public RPCs (publicnode Base) have routinely exceeded
+    // the 20s default RPC timeout on 10K-block unfiltered queries.
+    private readonly long _chunkSize;
 
     public DateTime? LastScanAt { get; private set; }
     public int LastScanNewSellers { get; private set; }
@@ -43,15 +48,17 @@ public class V2SellerScannerService : BackgroundService
         var catchUp = config.GetValue<int?>("Indexer:V2:SellerScanCatchUpIntervalMinutes") ?? 5;
         _catchUpInterval = TimeSpan.FromMinutes(Math.Max(1, catchUp));
         _coldStartFromBlock = config.GetValue<long?>("Indexer:V2:SellerScanFromBlock");
-        _maxBlocksPerTick = Math.Max(10_000L,
+        _maxBlocksPerTick = Math.Max(2_000L,
             config.GetValue<long?>("Indexer:V2:MaxBlocksPerTick") ?? 100_000L);
+        _chunkSize = Math.Max(100L,
+            config.GetValue<long?>("Indexer:V2:SellerScanChunkSize") ?? 2_000L);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation(
-            "[v2-seller-scan] starting, steady={Steady}min catchUp={CatchUp}min maxBlocksPerTick={Max}",
-            _steadyInterval.TotalMinutes, _catchUpInterval.TotalMinutes, _maxBlocksPerTick);
+            "[v2-seller-scan] starting, steady={Steady}min catchUp={CatchUp}min maxBlocksPerTick={Max} chunkSize={Chunk}",
+            _steadyInterval.TotalMinutes, _catchUpInterval.TotalMinutes, _maxBlocksPerTick, _chunkSize);
 
         // Brief startup delay so the indexer's first cycle (which already runs
         // Source C immediately) doesn't compete with the chain RPC.
@@ -124,7 +131,8 @@ public class V2SellerScannerService : BackgroundService
         Exception? streamingFailure = null;
         try
         {
-            await foreach (var chunk in scanner.ScanProvidersStreamingAsync(fromBlock, endBlock, ct))
+            await foreach (var chunk in scanner.ScanProvidersStreamingAsync(
+                fromBlock, endBlock, ct, _chunkSize))
             {
                 if (chunk.Observations.Count > 0)
                 {
