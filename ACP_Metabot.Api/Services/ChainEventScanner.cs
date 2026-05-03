@@ -58,6 +58,15 @@ public class JobExpiredEvent : IEventDTO
 public class ChainEventScanner
 {
     private readonly Web3 _web3;
+    // Optional second Web3 dedicated to unfiltered enumerative scans (V2
+    // seller enumeration). Falls back to <c>_web3</c> when no separate URL
+    // is configured. publicnode rejects unfiltered eth_getLogs queries with
+    // "request timed out", but happily serves the per-agent topic-filtered
+    // queries that the reputation path uses — so a deployment can keep the
+    // free publicnode for reputation and point this knob at e.g. the official
+    // Coinbase RPC (mainnet.base.org) or a paid Alchemy/QuickNode for the
+    // enumerative path only.
+    private readonly Web3 _enumWeb3;
     private readonly string _contractAddress;
     private readonly long _deployBlock;
     private readonly long _chunkSize;
@@ -80,18 +89,36 @@ public class ChainEventScanner
         _maxFirstScanDays = config.GetValue<int?>("Reputation:MaxFirstScanDays")     ?? 90;
 
         // Nethereum's RpcClient defaults to a 20s ConnectionTimeout — applied
-        // app-wide via the static ClientBase.ConnectionTimeout. The free
-        // publicnode Base RPC blew through that on the V2 seller enumeration
-        // (unfiltered eth_getLogs across 10K blocks). Bump the static default
-        // here, BEFORE constructing the RpcClient, so the per-request
-        // CancellationTokenSource Nethereum spins up reads the longer timeout.
+        // app-wide via the static ClientBase.ConnectionTimeout. Bump it BEFORE
+        // constructing any RpcClient so the per-request CancellationTokenSource
+        // Nethereum spins up reads the longer timeout. Note: most public RPCs
+        // also enforce their own server-side timeout (publicnode returns "request
+        // timed out" on unfiltered eth_getLogs regardless of client timeout),
+        // so the fix for that path is a different RPC, not a longer client wait.
         var rpcTimeout = TimeSpan.FromSeconds(
             Math.Max(5, config.GetValue<int?>("Reputation:RpcTimeoutSeconds") ?? 60));
         Nethereum.JsonRpc.Client.ClientBase.ConnectionTimeout = rpcTimeout;
         var rpcClient = new Nethereum.JsonRpc.Client.RpcClient(new Uri(rpcUrl));
         _web3 = new Web3(rpcClient);
+
+        var enumRpcUrl = config["BASE_RPC_URL_ENUM"]
+            ?? config["Indexer:V2:SellerScanRpcUrl"];
+        if (!string.IsNullOrWhiteSpace(enumRpcUrl)
+            && !string.Equals(enumRpcUrl, rpcUrl, StringComparison.OrdinalIgnoreCase))
+        {
+            var enumClient = new Nethereum.JsonRpc.Client.RpcClient(new Uri(enumRpcUrl));
+            _enumWeb3 = new Web3(enumClient);
+            _logger.LogInformation(
+                "[chain-scan] enumerative RPC client ready (separate from per-agent); url={Url}",
+                enumRpcUrl);
+        }
+        else
+        {
+            _enumWeb3 = _web3;
+        }
+
         _logger.LogInformation(
-            "[chain-scan] RPC client ready; ConnectionTimeout={Sec}s contract={Addr} chunkSize={Chunk}",
+            "[chain-scan] per-agent RPC client ready; ConnectionTimeout={Sec}s contract={Addr} chunkSize={Chunk}",
             Nethereum.JsonRpc.Client.ClientBase.ConnectionTimeout.TotalSeconds,
             _contractAddress, _chunkSize);
     }
@@ -139,7 +166,9 @@ public class ChainEventScanner
             ? Math.Max(100L, chunkSize.Value)
             : _chunkSize;
 
-        var handler = _web3.Eth.GetEvent<JobCreatedEvent>(_contractAddress);
+        // Use the dedicated enumerative-path Web3 if configured; otherwise
+        // falls back to the same per-agent client.
+        var handler = _enumWeb3.Eth.GetEvent<JobCreatedEvent>(_contractAddress);
         foreach (var (s, e) in BlockRangeChunker.Chunk(startBlock, toBlock, effectiveChunk))
         {
             ct.ThrowIfCancellationRequested();

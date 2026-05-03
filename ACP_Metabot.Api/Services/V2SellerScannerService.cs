@@ -48,10 +48,14 @@ public class V2SellerScannerService : BackgroundService
         var catchUp = config.GetValue<int?>("Indexer:V2:SellerScanCatchUpIntervalMinutes") ?? 5;
         _catchUpInterval = TimeSpan.FromMinutes(Math.Max(1, catchUp));
         _coldStartFromBlock = config.GetValue<long?>("Indexer:V2:SellerScanFromBlock");
-        _maxBlocksPerTick = Math.Max(2_000L,
-            config.GetValue<long?>("Indexer:V2:MaxBlocksPerTick") ?? 100_000L);
+        _maxBlocksPerTick = Math.Max(500L,
+            config.GetValue<long?>("Indexer:V2:MaxBlocksPerTick") ?? 50_000L);
+        // 500-block default. publicnode rejects unfiltered eth_getLogs even
+        // on 2K-block ranges; smaller queries give the next deploy a fighting
+        // chance without requiring an RPC switch. Operators with a paid
+        // RPC (Alchemy/QuickNode) can bump this back up via the config knob.
         _chunkSize = Math.Max(100L,
-            config.GetValue<long?>("Indexer:V2:SellerScanChunkSize") ?? 2_000L);
+            config.GetValue<long?>("Indexer:V2:SellerScanChunkSize") ?? 500L);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
