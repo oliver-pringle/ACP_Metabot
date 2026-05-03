@@ -95,38 +95,73 @@ public class ChainEventScanner
     /// cold-start floor for V2 seller enumeration.</summary>
     public long DeployBlock => _deployBlock;
 
+    /// <summary>One chunk of a global provider scan.</summary>
+    public record ProviderChunk(long FromBlock, long ToBlock,
+        IReadOnlyList<(string Provider, long BlockNumber)> Observations);
+
     /// <summary>
-    /// Globally scans <see cref="JobCreatedEvent"/> across the configured
-    /// block range with no <c>provider</c> filter, yielding distinct
-    /// (provider, blockNumber) tuples — i.e. every V2 agent that has ever
-    /// been hired in the range. Used by <c>V2SellerScannerService</c> to
-    /// populate the <c>v2_known_sellers</c> table that drives Source A of
+    /// Streaming variant of the V2 seller enumeration. Iterates the configured
+    /// block range one chunk at a time, yielding the distinct providers found
+    /// in each chunk along with the chunk's [from..to] bounds. The caller is
+    /// expected to persist each chunk's observations and advance its checkpoint
+    /// to <c>ToBlock</c> before consuming the next iteration — a transient RPC
+    /// failure mid-range then strands at most one chunk's worth of work, not
+    /// the whole scan.
+    ///
+    /// Used by <c>V2SellerScannerService</c> to populate the
+    /// <c>v2_known_sellers</c> table that drives Source A of
     /// <see cref="MarketplaceSource.AcpV2MarketplaceSource"/>'s wallet set.
     /// </summary>
-    /// <param name="fromBlock">Inclusive lower bound; clamped to deploy block.</param>
-    /// <param name="toBlock">Inclusive upper bound; usually current head.</param>
+    public async IAsyncEnumerable<ProviderChunk> ScanProvidersStreamingAsync(
+        long fromBlock, long toBlock,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        var startBlock = Math.Max(fromBlock, _deployBlock);
+        if (startBlock > toBlock) yield break;
+
+        var handler = _web3.Eth.GetEvent<JobCreatedEvent>(_contractAddress);
+        foreach (var (s, e) in BlockRangeChunker.Chunk(startBlock, toBlock, _chunkSize))
+        {
+            ct.ThrowIfCancellationRequested();
+            var fromBP = new BlockParameter(new HexBigInteger(s));
+            var toBP   = new BlockParameter(new HexBigInteger(e));
+            // No topic filter on provider — this is the enumerative pass.
+            var filter = handler.CreateFilterInput(fromBP, toBP);
+            var logs   = await handler.GetAllChangesAsync(filter);
+
+            var firstSeen = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            foreach (var log in logs)
+            {
+                var addr = (log.Event.Provider ?? "").Trim().ToLowerInvariant();
+                if (addr.Length != 42 || !addr.StartsWith("0x")) continue;
+                var blk = (long)log.Log.BlockNumber.Value;
+                if (!firstSeen.TryGetValue(addr, out var existing) || blk < existing)
+                    firstSeen[addr] = blk;
+            }
+
+            var observations = new List<(string, long)>(firstSeen.Count);
+            foreach (var (addr, blk) in firstSeen) observations.Add((addr, blk));
+            yield return new ProviderChunk(s, e, observations);
+        }
+    }
+
+    /// <summary>
+    /// Eager variant of <see cref="ScanProvidersStreamingAsync"/> — accumulates
+    /// every chunk's distinct providers into a single deduped list. Useful for
+    /// tests and ad-hoc backfills; production scanners should prefer the
+    /// streaming variant so a partial failure still saves prior progress.
+    /// </summary>
     public async Task<IReadOnlyList<(string Provider, long BlockNumber)>> ScanProvidersAsync(
         long fromBlock, long toBlock, CancellationToken ct)
     {
-        var startBlock = Math.Max(fromBlock, _deployBlock);
-        if (startBlock > toBlock) return Array.Empty<(string, long)>();
-
-        var handler = _web3.Eth.GetEvent<JobCreatedEvent>(_contractAddress);
-        // No topic filter on provider — this is the enumerative pass.
-        var logs = await RunChunkedAsync(handler,
-            (fromBP, toBP) => handler.CreateFilterInput(fromBP, toBP),
-            startBlock, toBlock, ct);
-
-        // Keep the FIRST block at which each provider appears, so checkpoint
-        // semantics stay consistent (last_seen advances on subsequent observations).
         var firstSeen = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-        foreach (var log in logs)
+        await foreach (var chunk in ScanProvidersStreamingAsync(fromBlock, toBlock, ct))
         {
-            var addr = (log.Event.Provider ?? "").Trim().ToLowerInvariant();
-            if (addr.Length != 42 || !addr.StartsWith("0x")) continue;
-            var blk = (long)log.Log.BlockNumber.Value;
-            if (!firstSeen.TryGetValue(addr, out var existing) || blk < existing)
-                firstSeen[addr] = blk;
+            foreach (var (addr, blk) in chunk.Observations)
+            {
+                if (!firstSeen.TryGetValue(addr, out var existing) || blk < existing)
+                    firstSeen[addr] = blk;
+            }
         }
 
         var result = new List<(string, long)>(firstSeen.Count);

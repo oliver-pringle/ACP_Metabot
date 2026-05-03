@@ -10,17 +10,24 @@ namespace ACP_Metabot.Api.Services;
 /// <see cref="MarketplaceSource.AcpV2MarketplaceSource"/>'s wallet set on the
 /// next indexer cycle.
 ///
-/// Cold-start: scans from <c>Indexer:V2:SellerScanFromBlock</c> if set,
-/// otherwise from <c>Reputation:ContractDeployBlock</c>. After each successful
-/// pass the head block is persisted as the checkpoint, so subsequent runs
-/// only scan the delta since the previous tick.
+/// Cold-start safety: scans at most <c>Indexer:V2:MaxBlocksPerTick</c>
+/// (default 100K) per pass and persists observations + advances the
+/// checkpoint AFTER EACH CHUNK via the streaming scanner. A transient RPC
+/// failure mid-scan therefore strands at most one chunk's worth of work, not
+/// the whole cold-start range. Cadence adapts: when the checkpoint is more
+/// than one tick-worth of blocks behind head, the loop sleeps the
+/// <c>CatchUpIntervalMinutes</c> (default 5min); once caught up to within
+/// one window of head, it falls back to <c>SteadyStateIntervalMinutes</c>
+/// (default 60min).
 /// </summary>
 public class V2SellerScannerService : BackgroundService
 {
     private readonly IServiceProvider _services;
     private readonly ILogger<V2SellerScannerService> _logger;
-    private readonly TimeSpan _interval;
+    private readonly TimeSpan _steadyInterval;
+    private readonly TimeSpan _catchUpInterval;
     private readonly long? _coldStartFromBlock;
+    private readonly long _maxBlocksPerTick;
 
     public DateTime? LastScanAt { get; private set; }
     public int LastScanNewSellers { get; private set; }
@@ -31,26 +38,32 @@ public class V2SellerScannerService : BackgroundService
     {
         _services = services;
         _logger = logger;
-        var minutes = config.GetValue<int?>("Indexer:V2:SellerScanIntervalMinutes") ?? 60;
-        _interval = TimeSpan.FromMinutes(Math.Max(5, minutes));
+        var steady = config.GetValue<int?>("Indexer:V2:SellerScanIntervalMinutes") ?? 60;
+        _steadyInterval = TimeSpan.FromMinutes(Math.Max(5, steady));
+        var catchUp = config.GetValue<int?>("Indexer:V2:SellerScanCatchUpIntervalMinutes") ?? 5;
+        _catchUpInterval = TimeSpan.FromMinutes(Math.Max(1, catchUp));
         _coldStartFromBlock = config.GetValue<long?>("Indexer:V2:SellerScanFromBlock");
+        _maxBlocksPerTick = Math.Max(10_000L,
+            config.GetValue<long?>("Indexer:V2:MaxBlocksPerTick") ?? 100_000L);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("[v2-seller-scan] starting, interval={Interval}min", _interval.TotalMinutes);
+        _logger.LogInformation(
+            "[v2-seller-scan] starting, steady={Steady}min catchUp={CatchUp}min maxBlocksPerTick={Max}",
+            _steadyInterval.TotalMinutes, _catchUpInterval.TotalMinutes, _maxBlocksPerTick);
 
-        // First tick on a 30s delay so the indexer's first cycle (which
-        // already runs Source C immediately) doesn't compete with the chain
-        // RPC for startup window.
+        // Brief startup delay so the indexer's first cycle (which already runs
+        // Source C immediately) doesn't compete with the chain RPC.
         try { await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken); }
         catch (OperationCanceledException) { return; }
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            bool behind = false;
             try
             {
-                await RunOnceAsync(stoppingToken);
+                behind = await RunOnceAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -61,13 +74,19 @@ public class V2SellerScannerService : BackgroundService
                 _logger.LogError(ex, "[v2-seller-scan] tick failed — retrying after interval");
             }
 
-            try { await Task.Delay(_interval, stoppingToken); }
+            var sleep = behind ? _catchUpInterval : _steadyInterval;
+            try { await Task.Delay(sleep, stoppingToken); }
             catch (OperationCanceledException) { break; }
         }
         _logger.LogInformation("[v2-seller-scan] stopped");
     }
 
-    public async Task RunOnceAsync(CancellationToken ct)
+    /// <summary>
+    /// Runs one scan window. Returns true if the checkpoint is still behind
+    /// head after this pass (so the loop should retry on the catch-up cadence
+    /// rather than the steady-state cadence).
+    /// </summary>
+    public async Task<bool> RunOnceAsync(CancellationToken ct)
     {
         using var scope = _services.CreateScope();
         var scanner = scope.ServiceProvider.GetRequiredService<ChainEventScanner>();
@@ -76,43 +95,70 @@ public class V2SellerScannerService : BackgroundService
         var checkpoint = await sellers.GetLastScannedBlockAsync();
         var headBlock = await scanner.GetHeadBlockAsync();
 
-        long fromBlock;
-        if (checkpoint > 0)
-        {
-            fromBlock = checkpoint + 1;
-        }
-        else
-        {
-            fromBlock = _coldStartFromBlock ?? scanner.DeployBlock;
-        }
+        long fromBlock = checkpoint > 0
+            ? checkpoint + 1
+            : (_coldStartFromBlock ?? scanner.DeployBlock);
 
         if (fromBlock > headBlock)
         {
-            _logger.LogDebug("[v2-seller-scan] checkpoint up-to-date (from={From}, head={Head})",
+            _logger.LogDebug(
+                "[v2-seller-scan] checkpoint up-to-date (from={From}, head={Head})",
                 fromBlock, headBlock);
             LastScanAt = DateTime.UtcNow;
             LastScannedBlock = headBlock;
-            return;
+            return false;
         }
 
-        _logger.LogInformation(
-            "[v2-seller-scan] scanning [{From}..{To}] ({Count} blocks)",
-            fromBlock, headBlock, headBlock - fromBlock + 1);
+        // Bound the scan window per tick so a fresh deploy doesn't try to
+        // process millions of blocks in a single chunked call (which on the
+        // first cold-start was crashing inside RunChunkedAsync — likely a
+        // transient publicnode RPC error — and orphaning the full window).
+        long endBlock = Math.Min(fromBlock + _maxBlocksPerTick - 1, headBlock);
 
-        var observations = await scanner.ScanProvidersAsync(fromBlock, headBlock, ct);
-        var nowUtc = DateTime.UtcNow;
-        if (observations.Count > 0)
+        _logger.LogInformation(
+            "[v2-seller-scan] scanning [{From}..{To}] ({Window} blocks; head={Head})",
+            fromBlock, endBlock, endBlock - fromBlock + 1, headBlock);
+
+        int totalNewSellers = 0;
+        long lastSavedBlock = checkpoint;
+        Exception? streamingFailure = null;
+        try
         {
-            await sellers.UpsertManyAsync(observations, nowUtc);
+            await foreach (var chunk in scanner.ScanProvidersStreamingAsync(fromBlock, endBlock, ct))
+            {
+                if (chunk.Observations.Count > 0)
+                {
+                    await sellers.UpsertManyAsync(chunk.Observations, DateTime.UtcNow);
+                    totalNewSellers += chunk.Observations.Count;
+                }
+                // Advance the checkpoint to this chunk's upper bound only AFTER
+                // the upsert succeeds. Cold-start partial progress survives a
+                // mid-window RPC failure: the next tick resumes from the last
+                // saved chunk, not the start of the original window.
+                await sellers.SetLastScannedBlockAsync(chunk.ToBlock, DateTime.UtcNow);
+                lastSavedBlock = chunk.ToBlock;
+            }
         }
-        await sellers.SetLastScannedBlockAsync(headBlock, nowUtc);
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            streamingFailure = ex;
+            _logger.LogWarning(ex,
+                "[v2-seller-scan] partial failure mid-window; checkpoint left at {LastSaved} (head={Head})",
+                lastSavedBlock, headBlock);
+        }
 
-        LastScanAt = nowUtc;
-        LastScanNewSellers = observations.Count;
-        LastScannedBlock = headBlock;
+        LastScanAt = DateTime.UtcNow;
+        LastScanNewSellers = totalNewSellers;
+        LastScannedBlock = lastSavedBlock;
 
-        _logger.LogInformation(
-            "[v2-seller-scan] complete: {Distinct} distinct providers in window; checkpoint={Head}",
-            observations.Count, headBlock);
+        if (streamingFailure is null)
+        {
+            _logger.LogInformation(
+                "[v2-seller-scan] window complete: {Distinct} provider obs; checkpoint={End} head={Head} behind={Behind}",
+                totalNewSellers, lastSavedBlock, headBlock, headBlock - lastSavedBlock);
+        }
+
+        // Behind by more than one full tick window → use the catch-up cadence.
+        return (headBlock - lastSavedBlock) > _maxBlocksPerTick;
     }
 }
