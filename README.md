@@ -124,6 +124,14 @@ wallet (the per-wallet endpoint and `/agents/search` are both unauthenticated):
   Cold-start runs from `Reputation:ContractDeployBlock` (or
   `Indexer:V2:SellerScanFromBlock` if overridden); subsequent runs scan only
   the delta since the persisted checkpoint.
+  Resilience: scans at most `Indexer:V2:MaxBlocksPerTick` (default 100K)
+  per pass, persisting observations + advancing the checkpoint **after each
+  10K-block chunk**, so a transient RPC error mid-window strands at most one
+  chunk's worth of work rather than the full cold-start range. Cadence
+  adapts: when the checkpoint is more than one window behind head, the loop
+  sleeps `Indexer:V2:SellerScanCatchUpIntervalMinutes` (default 5min); once
+  caught up, it falls back to `Indexer:V2:SellerScanIntervalMinutes`
+  (default 60min).
 - **Source B — keyword sweep** against
   `/agents/search?query=X&topK=49&chainIds=8453` (default 80-keyword set in
   `AcpV2MarketplaceSource.DefaultKeywords`). Catches new agents who haven't
