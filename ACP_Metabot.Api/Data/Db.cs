@@ -73,6 +73,8 @@ public class Db
                 usage_count              INTEGER NOT NULL DEFAULT 0,
                 agent_job_count          INTEGER NOT NULL DEFAULT 0,
                 marketplace_version      TEXT    NOT NULL DEFAULT 'v1',
+                is_removed               INTEGER NOT NULL DEFAULT 0,
+                removed_at               TEXT,
                 UNIQUE(marketplace_version, agent_address, offering_name)
             );
 
@@ -274,6 +276,12 @@ public class Db
             "ALTER TABLE offerings ADD COLUMN marketplace_version TEXT NOT NULL DEFAULT 'v1'",
             // v1.3: per-watch marketplace filter. Null means cross-version.
             "ALTER TABLE watches ADD COLUMN marketplace TEXT",
+            // v1.5: tombstone columns for offerings that disappear from the
+            // upstream marketplace fetch. is_removed=1 hides the row from
+            // search/digest/browse without deleting it; reactivates on
+            // reappearance via the upsert touch/update path.
+            "ALTER TABLE offerings ADD COLUMN is_removed INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE offerings ADD COLUMN removed_at TEXT",
         })
         {
             try
@@ -294,6 +302,15 @@ public class Db
         {
             idxCmd.CommandText =
                 "CREATE INDEX IF NOT EXISTS ix_offerings_mv ON offerings(marketplace_version);";
+            await idxCmd.ExecuteNonQueryAsync();
+        }
+
+        // v1.5: composite index for the tombstone sweep (per-mv stale lookup).
+        // Predicate-only filter on is_removed keeps the index narrow.
+        await using (var idxCmd = conn.CreateCommand())
+        {
+            idxCmd.CommandText =
+                "CREATE INDEX IF NOT EXISTS ix_offerings_mv_seen ON offerings(marketplace_version, last_seen_at);";
             await idxCmd.ExecuteNonQueryAsync();
         }
 
@@ -420,7 +437,11 @@ public class Db
             await ExecAsync(conn, tx,
                 "ALTER TABLE offerings RENAME TO offerings_old_for_mv_migration;");
 
-            // 3. Create the new table with the composite UNIQUE.
+            // 3. Create the new table with the composite UNIQUE. Includes
+            //    the v1.5 tombstone columns since this rebuild also runs
+            //    against legacy DBs that already have them after the ALTER
+            //    block above (and against fresh DBs that have them in the
+            //    base CREATE TABLE IF NOT EXISTS).
             await ExecAsync(conn, tx, @"
                 CREATE TABLE offerings (
                     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -439,6 +460,8 @@ public class Db
                     usage_count              INTEGER NOT NULL DEFAULT 0,
                     agent_job_count          INTEGER NOT NULL DEFAULT 0,
                     marketplace_version      TEXT    NOT NULL DEFAULT 'v1',
+                    is_removed               INTEGER NOT NULL DEFAULT 0,
+                    removed_at               TEXT,
                     UNIQUE(marketplace_version, agent_address, offering_name)
                 );");
 
@@ -446,20 +469,25 @@ public class Db
             //    foreign-key references (offering_embeddings,
             //    agent_reputation_snapshots, watch_seen) stay valid. Default
             //    marketplace_version to 'v1' for any pre-migration row that
-            //    somehow has NULL.
+            //    somehow has NULL. Tombstone columns COALESCE to defaults so
+            //    the SELECT works whether or not the source table had them
+            //    (older legacy DBs predate v1.5).
             await ExecAsync(conn, tx, @"
                 INSERT INTO offerings (
                     id, agent_address, agent_name, offering_name, description,
                     requirement_schema_json, price_usdc, price_type, is_private,
                     chain, content_hash, first_seen_at, last_seen_at,
-                    usage_count, agent_job_count, marketplace_version
+                    usage_count, agent_job_count, marketplace_version,
+                    is_removed, removed_at
                 )
                 SELECT
                     id, agent_address, agent_name, offering_name, description,
                     requirement_schema_json, price_usdc, price_type, is_private,
                     chain, content_hash, first_seen_at, last_seen_at,
                     usage_count, agent_job_count,
-                    COALESCE(marketplace_version, 'v1')
+                    COALESCE(marketplace_version, 'v1'),
+                    COALESCE(is_removed, 0),
+                    removed_at
                 FROM offerings_old_for_mv_migration;");
 
             // 5. Drop the old table.

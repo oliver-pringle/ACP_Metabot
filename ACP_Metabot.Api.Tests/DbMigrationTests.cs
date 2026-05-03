@@ -308,6 +308,214 @@ public class DbMigrationTests : IDisposable
         Assert.Equal("ok", await IntegrityCheck());
     }
 
+    // -----------------------------------------------------------------
+    // v1.5 tombstone + re-embed-on-content-change tests
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task FreshDb_HasIsRemovedAndRemovedAtColumns()
+    {
+        await _db.InitializeSchemaAsync();
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA table_info(offerings);";
+        await using var reader = await cmd.ExecuteReaderAsync();
+        var cols = new HashSet<string>(StringComparer.Ordinal);
+        while (await reader.ReadAsync()) cols.Add(reader.GetString(1));
+        Assert.Contains("is_removed", cols);
+        Assert.Contains("removed_at", cols);
+    }
+
+    [Fact]
+    public async Task LegacyMigration_AddsTombstoneColumnsAsZero()
+    {
+        await CreateLegacySchemaAsync();
+        await SeedOfferingsLegacy(rowCount: 3);
+        await _db.InitializeSchemaAsync();
+
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT is_removed, removed_at FROM offerings;";
+        await using var reader = await cmd.ExecuteReaderAsync();
+        int rowCount = 0;
+        while (await reader.ReadAsync())
+        {
+            Assert.Equal(0, reader.GetInt32(0));
+            Assert.True(reader.IsDBNull(1));
+            rowCount++;
+        }
+        Assert.Equal(3, rowCount);
+    }
+
+    [Fact]
+    public async Task MarkStaleAsRemoved_TombstonesOnlyMatchingMvAndStaleRows()
+    {
+        await _db.InitializeSchemaAsync();
+        var repo = new OfferingRepository(_db);
+        var nowUtc = DateTime.UtcNow;
+
+        // Insert 4 offerings; 2 fresh, 2 stale, mixed marketplace.
+        await InsertOfferingWithLastSeen("0x01", "a1", "fresh-v1",  "v1", nowUtc.AddHours(-1));
+        await InsertOfferingWithLastSeen("0x02", "a2", "stale-v1",  "v1", nowUtc.AddDays(-3));
+        await InsertOfferingWithLastSeen("0x03", "a3", "fresh-v2",  "v2", nowUtc.AddHours(-1));
+        await InsertOfferingWithLastSeen("0x04", "a4", "stale-v2",  "v2", nowUtc.AddDays(-10));
+
+        // Sweep V1 with 1-day threshold — only stale-v1 should flip.
+        var v1Marked = await repo.MarkStaleAsRemovedAsync("v1", nowUtc.AddDays(-1), nowUtc);
+        Assert.Equal(1, v1Marked);
+
+        // Sweep V2 with 7-day threshold — only stale-v2 should flip.
+        var v2Marked = await repo.MarkStaleAsRemovedAsync("v2", nowUtc.AddDays(-7), nowUtc);
+        Assert.Equal(1, v2Marked);
+
+        // Re-running the V1 sweep is a no-op (the row is already is_removed=1).
+        var v1Again = await repo.MarkStaleAsRemovedAsync("v1", nowUtc.AddDays(-1), nowUtc);
+        Assert.Equal(0, v1Again);
+
+        // And ListAllAsync now hides the two tombstoned rows.
+        var active = await repo.ListAllAsync();
+        Assert.Equal(2, active.Count);
+        Assert.All(active, o => Assert.False(o.IsRemoved));
+    }
+
+    [Fact]
+    public async Task UpsertManyAsync_ReactivatesPreviouslyTombstonedRow()
+    {
+        await _db.InitializeSchemaAsync();
+        var repo = new OfferingRepository(_db);
+        var nowUtc = DateTime.UtcNow;
+
+        // Seed a stale row, sweep it as removed.
+        await InsertOfferingWithLastSeen("0x01", "a1", "search", "v1", nowUtc.AddDays(-3));
+        var marked = await repo.MarkStaleAsRemovedAsync("v1", nowUtc.AddDays(-1), nowUtc);
+        Assert.Equal(1, marked);
+        Assert.Empty(await repo.ListAllAsync()); // hidden
+
+        // The seller puts the offering back. Same content_hash → touch path.
+        var item = new UpsertItem(
+            AgentAddress: "0x01", AgentName: "a1", OfferingName: "search",
+            Description: "test offering", RequirementSchemaJson: null,
+            PriceUsdc: 0.10, PriceType: "fixed", IsPrivate: false, Chain: "base",
+            ContentHash: "0x01|search|v1",
+            UsageCount: 0, AgentJobCount: 0, MarketplaceVersion: "v1");
+        var summary = await repo.UpsertManyAsync(new[] { item }, nowUtc);
+
+        // Touch path advances last_seen_at + clears is_removed.
+        Assert.Equal(0, summary.Added);
+        Assert.Equal(1, summary.Unchanged);
+        var active = await repo.ListAllAsync();
+        Assert.Single(active);
+        Assert.False(active[0].IsRemoved);
+        Assert.Null(active[0].RemovedAt);
+    }
+
+    [Fact]
+    public async Task UpsertManyAsync_ContentChange_DropsExistingEmbedding()
+    {
+        await _db.InitializeSchemaAsync();
+        var repo = new OfferingRepository(_db);
+        var nowUtc = DateTime.UtcNow;
+
+        // Seed an offering + embedding.
+        await InsertOffering("0x01", "agent", "search", "v1");
+        var id = await ScalarLong("SELECT id FROM offerings WHERE offering_name = 'search';");
+        await repo.UpsertEmbeddingAsync(id, "voyage-finance-2", 4, new byte[16], nowUtc);
+        Assert.Equal(1, await Count("offering_embeddings"));
+
+        // Upsert with a CHANGED content_hash (description rewritten).
+        var item = new UpsertItem(
+            AgentAddress: "0x01", AgentName: "agent", OfferingName: "search",
+            Description: "completely rewritten description",
+            RequirementSchemaJson: null,
+            PriceUsdc: 0.10, PriceType: "fixed", IsPrivate: false, Chain: "base",
+            ContentHash: "NEW-HASH-AFTER-REWRITE",
+            UsageCount: 0, AgentJobCount: 0, MarketplaceVersion: "v1");
+        var summary = await repo.UpsertManyAsync(new[] { item }, nowUtc);
+
+        Assert.Equal(1, summary.Updated);
+        // The old embedding should have been dropped so EmbedPendingAsync
+        // re-fires for the new description on the next indexer cycle.
+        Assert.Equal(0, await Count("offering_embeddings"));
+    }
+
+    [Fact]
+    public async Task UpsertManyAsync_NoContentChange_KeepsExistingEmbedding()
+    {
+        await _db.InitializeSchemaAsync();
+        var repo = new OfferingRepository(_db);
+        var nowUtc = DateTime.UtcNow;
+
+        // Seed an offering with a known content_hash, plus a matching embedding.
+        await InsertOfferingWithHash("0x01", "agent", "search", "v1", "STABLE-HASH");
+        var id = await ScalarLong("SELECT id FROM offerings WHERE offering_name = 'search';");
+        await repo.UpsertEmbeddingAsync(id, "voyage-finance-2", 4, new byte[16], nowUtc);
+        Assert.Equal(1, await Count("offering_embeddings"));
+
+        // Upsert with the SAME content_hash (just bumping last_seen_at +
+        // counters). The touch path must NOT delete the embedding.
+        var item = new UpsertItem(
+            AgentAddress: "0x01", AgentName: "agent", OfferingName: "search",
+            Description: "test offering", RequirementSchemaJson: null,
+            PriceUsdc: 0.10, PriceType: "fixed", IsPrivate: false, Chain: "base",
+            ContentHash: "STABLE-HASH",
+            UsageCount: 5, AgentJobCount: 5, MarketplaceVersion: "v1");
+        var summary = await repo.UpsertManyAsync(new[] { item }, nowUtc);
+
+        Assert.Equal(1, summary.Unchanged);
+        Assert.Equal(1, await Count("offering_embeddings"));
+    }
+
+    private async Task InsertOfferingWithLastSeen(string addr, string agentName,
+        string offeringName, string mv, DateTime lastSeenUtc)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var ins = conn.CreateCommand();
+        ins.CommandText = @"
+            INSERT INTO offerings (
+                agent_address, agent_name, offering_name, description,
+                price_usdc, price_type, is_private, chain, content_hash,
+                first_seen_at, last_seen_at, marketplace_version
+            ) VALUES (
+                $a, $an, $on, $desc,
+                0.10, 'fixed', 0, 'base', $hash,
+                $first, $last, $mv
+            );";
+        ins.Parameters.AddWithValue("$a", addr);
+        ins.Parameters.AddWithValue("$an", agentName);
+        ins.Parameters.AddWithValue("$on", offeringName);
+        ins.Parameters.AddWithValue("$desc", "test offering");
+        ins.Parameters.AddWithValue("$hash", $"{addr}|{offeringName}|{mv}");
+        ins.Parameters.AddWithValue("$first", lastSeenUtc.AddDays(-30).ToString("O"));
+        ins.Parameters.AddWithValue("$last",  lastSeenUtc.ToString("O"));
+        ins.Parameters.AddWithValue("$mv", mv);
+        await ins.ExecuteNonQueryAsync();
+    }
+
+    private async Task InsertOfferingWithHash(string addr, string agentName,
+        string offeringName, string mv, string hash)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var ins = conn.CreateCommand();
+        ins.CommandText = @"
+            INSERT INTO offerings (
+                agent_address, agent_name, offering_name, description,
+                price_usdc, price_type, is_private, chain, content_hash,
+                first_seen_at, last_seen_at, marketplace_version
+            ) VALUES (
+                $a, $an, $on, $desc,
+                0.10, 'fixed', 0, 'base', $hash,
+                $now, $now, $mv
+            );";
+        ins.Parameters.AddWithValue("$a", addr);
+        ins.Parameters.AddWithValue("$an", agentName);
+        ins.Parameters.AddWithValue("$on", offeringName);
+        ins.Parameters.AddWithValue("$desc", "test offering");
+        ins.Parameters.AddWithValue("$hash", hash);
+        ins.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
+        ins.Parameters.AddWithValue("$mv", mv);
+        await ins.ExecuteNonQueryAsync();
+    }
+
     /// <summary>
     /// Builds the legacy offering_embeddings table with the FK that bites
     /// the v1.3 migration.

@@ -16,4 +16,9 @@ public record Offering(
     DateTime LastSeenAt,
     long UsageCount,
     long AgentJobCount,
-    string MarketplaceVersion = "v1");
+    string MarketplaceVersion = "v1",
+    // v1.5 tombstone state. IsRemoved=true means the offering has been
+    // missing from upstream fetches for longer than the marketplace's
+    // tombstone threshold. Reactivates automatically on reappearance.
+    bool IsRemoved = false,
+    DateTime? RemovedAt = null);

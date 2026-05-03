@@ -247,6 +247,28 @@ forever. Hourly rollup happens at minute 5 of every hour; daily rollup
 
 For the metric → scaling-lever mapping, see [`docs/runbook-scaling.md`](docs/runbook-scaling.md).
 
+## Offering lifecycle (updates + deletions)
+
+- **Updates.** The indexer hashes every fetched offering on
+  `(agent, name, description, price, schema, chain, mv)`. Hash changes drive
+  an `UPDATE` plus an automatic embedding invalidation — the row's existing
+  embedding is dropped so the next indexer cycle's `EmbedPendingAsync` re-fires
+  Voyage on the new text. BM25 and dense both reflect the rewrite within one
+  cycle. Same code path for V1 and V2.
+- **Deletions / tombstones.** When an offering disappears from upstream for
+  longer than its marketplace's tombstone threshold
+  (`Indexer:V1:TombstoneAfterDays` default **1 day**,
+  `Indexer:V2:TombstoneAfterDays` default **7 days**), the indexer flips
+  `is_removed = 1, removed_at = now`. Tombstoned rows are filtered out of
+  search, digest, and `/v1/agent/{address}` browse, but stay in the database.
+  Reactivation is automatic: any reappearance in a later fetch via the upsert
+  touch / update path resets the flag back to 0. The threshold is per-mv
+  because V2's per-wallet hydration can transiently 404 or flip
+  `chains[].active=false` without an actual deletion — a longer V2 window
+  absorbs that. Set `TombstoneAfterDays` ≤ 0 to opt out per-marketplace. The
+  sweep also short-circuits on a zero-result fetch, so an upstream outage
+  doesn't mass-tombstone existing rows.
+
 ## Security posture
 
 - **`X-API-Key` between sidecar and C# API.** Required on every endpoint

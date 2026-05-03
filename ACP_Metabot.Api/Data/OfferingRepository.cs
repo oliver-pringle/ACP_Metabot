@@ -159,13 +159,18 @@ public class OfferingRepository
 
         await using var tx = conn.BeginTransaction();
 
+        // Touch (content unchanged) — reactivate any tombstoned row at the same
+        // time. A reappearance in upstream is the strongest possible signal
+        // that the seller put it back.
         await using var touch = conn.CreateCommand();
         touch.Transaction = tx;
         touch.CommandText = @"
             UPDATE offerings
             SET last_seen_at    = $now,
                 usage_count     = $usage,
-                agent_job_count = $agentJobs
+                agent_job_count = $agentJobs,
+                is_removed      = 0,
+                removed_at      = NULL
             WHERE id = $id;";
         var tNow = touch.Parameters.Add("$now", SqliteType.Text);
         tNow.Value = nowIso;
@@ -173,6 +178,10 @@ public class OfferingRepository
         var tAgentJobs = touch.Parameters.Add("$agentJobs", SqliteType.Integer);
         var tId = touch.Parameters.Add("$id", SqliteType.Integer);
 
+        // Update (content changed) — same reactivation, plus we drop any
+        // existing embedding so the next indexer cycle re-embeds the new
+        // description. Without this, BM25 would reflect the new text but
+        // the dense corpus would still rank against the stale embedding.
         await using var upd = conn.CreateCommand();
         upd.Transaction = tx;
         upd.CommandText = @"
@@ -187,8 +196,18 @@ public class OfferingRepository
                 content_hash            = $hash,
                 last_seen_at            = $now,
                 usage_count             = $usage,
-                agent_job_count         = $agentJobs
+                agent_job_count         = $agentJobs,
+                is_removed              = 0,
+                removed_at              = NULL
             WHERE id = $id;";
+
+        // Embedding invalidation — runs alongside `upd` whenever the content
+        // hash changes. ON DELETE CASCADE on the offering row would have
+        // handled this for outright deletes; an UPDATE has to do it manually.
+        await using var delEmb = conn.CreateCommand();
+        delEmb.Transaction = tx;
+        delEmb.CommandText = "DELETE FROM offering_embeddings WHERE offering_id = $id;";
+        var dEmbId = delEmb.Parameters.Add("$id", SqliteType.Integer);
         var uAgentName = upd.Parameters.Add("$agentName", SqliteType.Text);
         var uDesc = upd.Parameters.Add("$desc", SqliteType.Text);
         var uSchema = upd.Parameters.Add("$schema", SqliteType.Text);
@@ -259,6 +278,10 @@ public class OfferingRepository
                     uAgentJobs.Value = item.AgentJobCount;
                     uId.Value = ex.Id;
                     await upd.ExecuteNonQueryAsync();
+                    // Drop the old embedding so EmbedPendingAsync re-fires
+                    // with the new description on the next indexer tick.
+                    dEmbId.Value = ex.Id;
+                    await delEmb.ExecuteNonQueryAsync();
                     updated++;
                 }
             }
@@ -284,6 +307,38 @@ public class OfferingRepository
 
         await tx.CommitAsync();
         return new UpsertSummary(added, updated, unchanged);
+    }
+
+    /// <summary>
+    /// Marks rows as removed when their <c>last_seen_at</c> is older than
+    /// <paramref name="staleCutoffUtc"/>, scoped to a single marketplace
+    /// version. Returns the number of rows newly tombstoned.
+    ///
+    /// Reactivation happens automatically: the next time the row reappears in
+    /// an upstream fetch, <see cref="UpsertManyAsync"/>'s touch / update path
+    /// resets <c>is_removed = 0</c>.
+    ///
+    /// Caller (the indexer) is expected to skip this whenever a source's
+    /// fetch failed or returned an abnormally small result set, to avoid mass
+    /// tombstoning on transient upstream outages.
+    /// </summary>
+    public async Task<int> MarkStaleAsRemovedAsync(string marketplaceVersion,
+        DateTime staleCutoffUtc, DateTime nowUtc)
+    {
+        var cutoff = staleCutoffUtc.ToString("O", CultureInfo.InvariantCulture);
+        var nowIso = nowUtc.ToString("O", CultureInfo.InvariantCulture);
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            UPDATE offerings
+            SET is_removed = 1, removed_at = $now
+            WHERE marketplace_version = $mv
+              AND is_removed = 0
+              AND last_seen_at < $cutoff;";
+        cmd.Parameters.AddWithValue("$mv", marketplaceVersion);
+        cmd.Parameters.AddWithValue("$cutoff", cutoff);
+        cmd.Parameters.AddWithValue("$now", nowIso);
+        return await cmd.ExecuteNonQueryAsync();
     }
 
     public async Task UpsertEmbeddingAsync(long offeringId, string model, int dimension, byte[] blob, DateTime nowUtc)
@@ -314,7 +369,8 @@ public class OfferingRepository
             SELECT id, agent_address, agent_name, offering_name, description,
                    requirement_schema_json, price_usdc, price_type, is_private,
                    chain, content_hash, first_seen_at, last_seen_at,
-                   usage_count, agent_job_count, marketplace_version
+                   usage_count, agent_job_count, marketplace_version,
+                   is_removed, removed_at
             FROM offerings WHERE id = $id;";
         cmd.Parameters.AddWithValue("$id", id);
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -330,12 +386,14 @@ public class OfferingRepository
             SELECT o.id, o.agent_address, o.agent_name, o.offering_name, o.description,
                    o.requirement_schema_json, o.price_usdc, o.price_type, o.is_private,
                    o.chain, o.content_hash, o.first_seen_at, o.last_seen_at,
-                   o.usage_count, o.agent_job_count, o.marketplace_version
+                   o.usage_count, o.agent_job_count, o.marketplace_version,
+                   o.is_removed, o.removed_at
             FROM offerings o
             LEFT JOIN offering_embeddings e ON e.offering_id = o.id
-            WHERE e.offering_id IS NULL
-               OR e.dimension != $d
-               OR e.model != $m
+            WHERE o.is_removed = 0
+              AND (e.offering_id IS NULL
+                   OR e.dimension != $d
+                   OR e.model != $m)
             ORDER BY o.id ASC
             LIMIT $lim;";
         cmd.Parameters.AddWithValue("$d", dimension);
@@ -360,18 +418,21 @@ public class OfferingRepository
                    o.requirement_schema_json, o.price_usdc, o.price_type, o.is_private,
                    o.chain, o.content_hash, o.first_seen_at, o.last_seen_at,
                    o.usage_count, o.agent_job_count, o.marketplace_version,
+                   o.is_removed, o.removed_at,
                    e.dimension, e.embedding_blob
             FROM offerings o
             INNER JOIN offering_embeddings e ON e.offering_id = o.id
-            WHERE e.model = $m;";
+            WHERE e.model = $m
+              AND o.is_removed = 0;";
         cmd.Parameters.AddWithValue("$m", requiredModel);
         await using var reader = await cmd.ExecuteReaderAsync();
         var result = new List<(Offering, float[])>();
         while (await reader.ReadAsync())
         {
             var o = MapOffering(reader);
-            var dim = reader.GetInt32(16);
-            var blob = (byte[])reader[17];
+            // Embedding cols sit AFTER the tombstone cols added in v1.5.
+            var dim = reader.GetInt32(18);
+            var blob = (byte[])reader[19];
             var emb = new float[dim];
             Buffer.BlockCopy(blob, 0, emb, 0, dim * sizeof(float));
             result.Add((o, emb));
@@ -446,6 +507,11 @@ public class OfferingRepository
         return collapsed.Contains(' ') ? "\"" + collapsed + "\"" : collapsed;
     }
 
+    /// <summary>
+    /// Active rows only (is_removed = 0). Used by the reputation rebuild and
+    /// the search corpus refresh; both want a "currently on the marketplace"
+    /// view. For tombstoned + active rows together, see ListAllIncludingRemovedAsync.
+    /// </summary>
     public async Task<List<Offering>> ListAllAsync()
     {
         await using var conn = _db.OpenConnection();
@@ -454,14 +520,21 @@ public class OfferingRepository
             SELECT id, agent_address, agent_name, offering_name, description,
                    requirement_schema_json, price_usdc, price_type, is_private,
                    chain, content_hash, first_seen_at, last_seen_at,
-                   usage_count, agent_job_count, marketplace_version
-            FROM offerings;";
+                   usage_count, agent_job_count, marketplace_version,
+                   is_removed, removed_at
+            FROM offerings
+            WHERE is_removed = 0;";
         await using var reader = await cmd.ExecuteReaderAsync();
         var result = new List<Offering>();
         while (await reader.ReadAsync()) result.Add(MapOffering(reader));
         return result;
     }
 
+    /// <summary>
+    /// Active rows only for the given agent. Removed (tombstoned) offerings
+    /// are filtered out so /v1/agent/{address} doesn't surface listings the
+    /// agent has taken down.
+    /// </summary>
     public async Task<List<Offering>> ListByAgentAsync(string agentAddress)
     {
         await using var conn = _db.OpenConnection();
@@ -470,9 +543,11 @@ public class OfferingRepository
             SELECT id, agent_address, agent_name, offering_name, description,
                    requirement_schema_json, price_usdc, price_type, is_private,
                    chain, content_hash, first_seen_at, last_seen_at,
-                   usage_count, agent_job_count, marketplace_version
+                   usage_count, agent_job_count, marketplace_version,
+                   is_removed, removed_at
             FROM offerings
-            WHERE agent_address = $a;";
+            WHERE agent_address = $a
+              AND is_removed = 0;";
         cmd.Parameters.AddWithValue("$a", agentAddress);
         await using var reader = await cmd.ExecuteReaderAsync();
         var result = new List<Offering>();
@@ -496,9 +571,12 @@ public class OfferingRepository
             LEFT JOIN agent_reputation_snapshots s
               ON s.offering_id = o.id AND s.snapshot_date = $cutoff
             WHERE
-              (s.snapshot_date IS NOT NULL AND o.usage_count > s.usage_count)
-              OR
-              (s.snapshot_date IS NULL AND o.usage_count > 0);";
+              o.is_removed = 0
+              AND (
+                (s.snapshot_date IS NOT NULL AND o.usage_count > s.usage_count)
+                OR
+                (s.snapshot_date IS NULL AND o.usage_count > 0)
+              );";
         cmd.Parameters.AddWithValue("$cutoff", cutoffDate);
         await using var reader = await cmd.ExecuteReaderAsync();
         var result = new List<long>();
@@ -515,9 +593,11 @@ public class OfferingRepository
             SELECT id, agent_address, agent_name, offering_name, description,
                    requirement_schema_json, price_usdc, price_type, is_private,
                    chain, content_hash, first_seen_at, last_seen_at,
-                   usage_count, agent_job_count, marketplace_version
+                   usage_count, agent_job_count, marketplace_version,
+                   is_removed, removed_at
             FROM offerings
             WHERE first_seen_at >= $since
+              AND is_removed = 0
             ORDER BY usage_count DESC, first_seen_at DESC
             LIMIT $lim;";
         cmd.Parameters.AddWithValue("$since", sinceIso);
@@ -543,6 +623,7 @@ public class OfferingRepository
             INNER JOIN agent_reputation_snapshots s
               ON s.offering_id = o.id AND s.snapshot_date = $d
             WHERE o.usage_count > s.usage_count
+              AND o.is_removed = 0
             ORDER BY (o.usage_count - s.usage_count) DESC
             LIMIT $lim;";
         cmd.Parameters.AddWithValue("$d", snapshotDate);
@@ -649,6 +730,19 @@ public class OfferingRepository
 
     private static Offering MapOffering(System.Data.Common.DbDataReader reader)
     {
+        // Optional tombstone columns at the end of the projection. Present in
+        // every SELECT below; older callers that read offset-by-offset still
+        // see the existing 16-column shape because is_removed/removed_at
+        // sit at columns 16/17.
+        bool isRemoved = false;
+        DateTime? removedAt = null;
+        if (reader.FieldCount > 16)
+        {
+            if (!reader.IsDBNull(16)) isRemoved = reader.GetInt32(16) != 0;
+            if (reader.FieldCount > 17 && !reader.IsDBNull(17))
+                removedAt = DateTime.Parse(reader.GetString(17),
+                    CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        }
         return new Offering(
             Id: reader.GetInt64(0),
             AgentAddress: reader.GetString(1),
@@ -665,6 +759,8 @@ public class OfferingRepository
             LastSeenAt: DateTime.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
             UsageCount: reader.GetInt64(13),
             AgentJobCount: reader.GetInt64(14),
-            MarketplaceVersion: reader.GetString(15));
+            MarketplaceVersion: reader.GetString(15),
+            IsRemoved: isRemoved,
+            RemovedAt: removedAt);
     }
 }

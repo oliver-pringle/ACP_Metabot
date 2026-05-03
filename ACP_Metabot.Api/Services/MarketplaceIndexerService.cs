@@ -16,8 +16,16 @@ public class MarketplaceIndexerService : BackgroundService
 
     private readonly IServiceProvider _services;
     private readonly ILogger<MarketplaceIndexerService> _logger;
+    private readonly IConfiguration _config;
     private readonly TimeSpan _interval;
     private readonly int _embeddingBatchSize;
+    // Per-marketplace stale thresholds for the v1.5 tombstone sweep. V1's
+    // /api/metrics/skills is a flat list-all, so missing-from-fetch ≈ deleted —
+    // a 1-day threshold is plenty. V2 enumerates by per-wallet hydration that
+    // can transiently 404 or flip active=false on a chain binding without the
+    // seller actually removing anything; a longer threshold absorbs that.
+    private const double DefaultV1TombstoneDays = 1.0;
+    private const double DefaultV2TombstoneDays = 7.0;
 
     public DateTime? LastFetchAt { get; private set; }
     public int LastFetchCount { get; private set; }
@@ -26,6 +34,7 @@ public class MarketplaceIndexerService : BackgroundService
         ILogger<MarketplaceIndexerService> logger)
     {
         _services = services;
+        _config = config;
         _logger = logger;
         var seconds = config.GetValue<int?>("Indexer:IntervalSeconds") ?? 600;
         _interval = TimeSpan.FromSeconds(Math.Max(30, seconds));
@@ -138,6 +147,30 @@ public class MarketplaceIndexerService : BackgroundService
         _logger.LogInformation(
             "[indexer] fetch complete: total={Total} ({PerVersion}) added={Added} updated={Updated} unchanged={Unchanged}",
             totalFetched, perVersionStr, summary.Added, summary.Updated, summary.Unchanged);
+
+        // v1.5 tombstone sweep — for each marketplace whose source returned a
+        // non-zero result this cycle, mark rows we haven't seen in
+        // longer-than-the-threshold as removed. Skipping when the source
+        // returned 0 is the fail-safe: if upstream is down or returned an
+        // empty response, we don't mass-tombstone existing rows.
+        foreach (var (mv, count) in perVersionCounts)
+        {
+            if (count == 0) continue;
+            var key = $"Indexer:{mv.ToUpperInvariant()}:TombstoneAfterDays";
+            var thresholdDays = _config.GetValue<double?>(key)
+                ?? (string.Equals(mv, "v2", StringComparison.OrdinalIgnoreCase)
+                    ? DefaultV2TombstoneDays
+                    : DefaultV1TombstoneDays);
+            if (thresholdDays <= 0) continue; // operator opt-out
+            var staleCutoff = nowUtc.AddDays(-thresholdDays);
+            var marked = await repo.MarkStaleAsRemovedAsync(mv, staleCutoff, nowUtc);
+            if (marked > 0)
+            {
+                _logger.LogInformation(
+                    "[indexer] tombstoned {Marked} {Mv} offering(s) older than {Days} day(s)",
+                    marked, mv, thresholdDays);
+            }
+        }
 
         // Refresh reputation caches with the freshly-persisted corpus.
         // Pull from DB (not the DTO list) so we have the assigned offering ids
