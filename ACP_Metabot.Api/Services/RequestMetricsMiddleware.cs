@@ -23,6 +23,13 @@ public sealed class RequestMetricsMiddleware
 {
     private const int BodyReadCapBytes = 2048;
 
+    // Persistence caps. The body buffer is already 2KB, but the captured
+    // string can still be that long — operator endpoints, backups, and
+    // /metrics/top would all surface it verbatim. Truncate before persistence
+    // so a single sweep query can't leak unbounded user-supplied text.
+    private const int MaxStoredQueryLen = 200;
+    private const int MaxStoredUserAgentLen = 200;
+
     private readonly RequestDelegate _next;
     private readonly MetricsChannel  _channel;
     private readonly ILogger<RequestMetricsMiddleware> _logger;
@@ -100,10 +107,10 @@ public sealed class RequestMetricsMiddleware
                 StatusCode:    statusCode,
                 DurationMs:    (int)sw.ElapsedMilliseconds,
                 Source:        source,
-                UserAgent:     string.IsNullOrEmpty(userAgent) ? null : userAgent,
+                UserAgent:     Truncate(userAgent, MaxStoredUserAgentLen),
                 CallerId:      callerId,
                 RemoteIp:      remoteIp,
-                QueryText:     queryText,
+                QueryText:     Truncate(queryText, MaxStoredQueryLen),
                 AgentAddress:  agentAddress,
                 ProviderError: providerError);
 
@@ -211,5 +218,11 @@ public sealed class RequestMetricsMiddleware
         foreach (var o in options)
             if (path.Equals(o, StringComparison.OrdinalIgnoreCase)) return true;
         return false;
+    }
+
+    private static string? Truncate(string? s, int max)
+    {
+        if (string.IsNullOrEmpty(s)) return null;
+        return s.Length <= max ? s : s.Substring(0, max);
     }
 }

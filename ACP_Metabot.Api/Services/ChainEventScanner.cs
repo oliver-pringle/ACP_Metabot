@@ -81,6 +81,59 @@ public class ChainEventScanner
         _web3 = new Web3(rpcUrl);
     }
 
+    /// <summary>
+    /// Returns the current Base mainnet head block. Exposed so the V2 seller
+    /// scanner can decide its scan window without holding a duplicate Web3
+    /// instance.
+    /// </summary>
+    public async Task<long> GetHeadBlockAsync()
+    {
+        return (long)(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
+    }
+
+    /// <summary>The contract deploy block from configuration. Used as the
+    /// cold-start floor for V2 seller enumeration.</summary>
+    public long DeployBlock => _deployBlock;
+
+    /// <summary>
+    /// Globally scans <see cref="JobCreatedEvent"/> across the configured
+    /// block range with no <c>provider</c> filter, yielding distinct
+    /// (provider, blockNumber) tuples — i.e. every V2 agent that has ever
+    /// been hired in the range. Used by <c>V2SellerScannerService</c> to
+    /// populate the <c>v2_known_sellers</c> table that drives Source A of
+    /// <see cref="MarketplaceSource.AcpV2MarketplaceSource"/>'s wallet set.
+    /// </summary>
+    /// <param name="fromBlock">Inclusive lower bound; clamped to deploy block.</param>
+    /// <param name="toBlock">Inclusive upper bound; usually current head.</param>
+    public async Task<IReadOnlyList<(string Provider, long BlockNumber)>> ScanProvidersAsync(
+        long fromBlock, long toBlock, CancellationToken ct)
+    {
+        var startBlock = Math.Max(fromBlock, _deployBlock);
+        if (startBlock > toBlock) return Array.Empty<(string, long)>();
+
+        var handler = _web3.Eth.GetEvent<JobCreatedEvent>(_contractAddress);
+        // No topic filter on provider — this is the enumerative pass.
+        var logs = await RunChunkedAsync(handler,
+            (fromBP, toBP) => handler.CreateFilterInput(fromBP, toBP),
+            startBlock, toBlock, ct);
+
+        // Keep the FIRST block at which each provider appears, so checkpoint
+        // semantics stay consistent (last_seen advances on subsequent observations).
+        var firstSeen = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        foreach (var log in logs)
+        {
+            var addr = (log.Event.Provider ?? "").Trim().ToLowerInvariant();
+            if (addr.Length != 42 || !addr.StartsWith("0x")) continue;
+            var blk = (long)log.Log.BlockNumber.Value;
+            if (!firstSeen.TryGetValue(addr, out var existing) || blk < existing)
+                firstSeen[addr] = blk;
+        }
+
+        var result = new List<(string, long)>(firstSeen.Count);
+        foreach (var (addr, blk) in firstSeen) result.Add((addr, blk));
+        return result;
+    }
+
     public async Task<ChainScanResult> ScanAgentAsync(
         string agentAddress, long fromBlock, DateTime nowUtc, CancellationToken ct)
     {
