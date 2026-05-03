@@ -40,7 +40,18 @@ services:
       # the pinned acp-metabot bridge subnet so per-IP rate limits partition on
       # the real client IP forwarded by Caddy. Set to "" to disable entirely.
       - TRUSTED_PROXY_NETWORKS=${TRUSTED_PROXY_NETWORKS:-172.28.0.0/16}
+      # Restrict the Host header allowlist. Caddy's default reverse_proxy
+      # preserves the original Host header, so the public domain must be in
+      # the list along with the internal service name (sidecar + cross-bot
+      # acp-shared callers) and localhost (probes / dotnet run).
+      # ACP_METABOT_DOMAIN matches the var Caddy uses for its certificate;
+      # update both together if the public hostname changes.
+      - AllowedHosts=${ACP_METABOT_DOMAIN:-localhost};acp-metabot-api;localhost
     volumes:
+      # Bind-mount must be writable by UID 1654 (the .NET 10 `app` user).
+      # One-time setup on a fresh host: `mkdir -p data && sudo chown 1654:1654 data`.
+      # Existing deployments must run the chown before redeploying with the
+      # non-root container or the API will crash with EACCES on first write.
       - ./data:/data
     networks: [acp-metabot, acp-shared]
     # No ports published — only the sidecar talks to it.

@@ -11,5 +11,12 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app ./
+
+# Drop privileges. The aspnet base image ships with a non-root `app` user
+# (UID 1654 in .NET 10, exposed via $APP_UID). NOTE: the SQLite bind-mount
+# target /data must be writable by this UID on the host — see the docker-
+# compose comment for the one-time `chown 1654:1654 ./data` step.
+USER $APP_UID
 EXPOSE 5000
+
 ENTRYPOINT ["dotnet", "ACP_Metabot.Api.dll"]

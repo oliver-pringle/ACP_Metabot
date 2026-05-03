@@ -5,8 +5,17 @@ using ACP_Metabot.Api.Services;
 using ACP_Metabot.Api.Services.MarketplaceSource;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Cap request body size at the server level. Per-route validators already
+// reject overlong free-form inputs (MaxQueryLen=1000, MaxUseCaseLen=2000),
+// but a global cap defends against payload-size DoS on any endpoint.
+builder.Services.Configure<KestrelServerOptions>(options =>
+{
+    options.Limits.MaxRequestBodySize = 256L * 1024L;
+});
 
 builder.Services.AddSingleton<Db>();
 builder.Services.AddSingleton<OfferingRepository>();
