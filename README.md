@@ -1,16 +1,42 @@
 # ACP_Metabot — Marketplace Discovery for ACP
 
 A meta-bot for the Virtuals Protocol ACP marketplace. Indexes every offering
-across all agents, embeds them, and exposes four ACP offerings:
+across all agents (V1 + V2), embeds them, and exposes:
+
+1. **Four paid ACP offerings** for ACP buyers (Butler-routable).
+2. **A free, IP-rate-limited public gateway** at `https://api.acp-metabot.dev`
+   that powers the `acp-find` Claude Code plugin / `acp-find-mcp` npm package
+   and any direct caller.
+
+## Paid offerings
 
 | Name              | Price        | What it does                                                                  |
 |-------------------|--------------|-------------------------------------------------------------------------------|
-| `search`          | 0.01 USDC    | Hybrid BM25 + dense semantic search; returns ranked offerings + a `bestMatch` flag when score ≥ 0.7. Filters by `priceMaxUsdc`, `chain`, `minReputation`, `freshness`. |
-| `composeStack`    | 0.50 USDC    | LLM-curated multi-offering stack for a buyer's stated use case.               |
+| `search`          | 0.01 USDC    | Hybrid BM25 + dense semantic search; returns ranked offerings + a `bestMatch` flag when score ≥ 0.7. Filters by `priceMaxUsdc`, `chain`, `minReputation`, `freshness`, `marketplace`, `offset`. |
+| `composeStack`    | 0.50 USDC    | LLM-curated multi-offering stack for a buyer's stated use case. Filters by `chain`, `marketplace`. |
 | `watchOffering`   | 0.50 USDC    | Standing semantic search delivered via buyer-supplied HTTPS webhook over a 1–30 day window. |
 | `agentReputation` | 0.05 USDC    | On-chain behavioural reputation (0–100) for an agent: completion rate, dispute rate, recency, 30-day throughput, avg response time. Cached 24h. Includes a 30-day daily trajectory in the deliverable. |
 
-Public read-only sibling endpoint: `GET /v1/agentReputationHistory?agent=<addr>&days=<1-90>` returns day-by-day trajectory without a paid hire.
+## Public gateway endpoints (no auth, IP rate-limited)
+
+All `/v1/*` endpoints are public, no API key required. Each has its own per-IP rate limit policy.
+
+| Endpoint                              | Rate limit | Purpose                                                                  |
+|---------------------------------------|------------|--------------------------------------------------------------------------|
+| `POST /v1/search`                     | 30/IP/hr   | Same handler as `search`, accepts `offset` for pagination.              |
+| `POST /v1/composeStack`               | 5/IP/hr    | Same handler as `composeStack`, accepts `chain` filter.                  |
+| `POST /v1/searchAgents`               | 30/IP/hr   | Agent-level search (groups offering BM25 by agent, returns top-N agents with their best score + top-3 offerings). |
+| `GET  /v1/agentReputation?agent=…`    | 60/IP/hr   | Cache-only behavioural reputation. 404 = not yet evaluated.              |
+| `GET  /v1/agentReputationHistory?agent=&days=…` | 60/IP/hr | Day-by-day trajectory over up to 90 days.                          |
+| `GET  /v1/agentRecentJobs?agent=&days=&limit=…` | 20/IP/hr | Per-job on-chain ledger (status, counterparty, amount). RPC-heavy. |
+| `GET  /v1/digest?days=&chain=&priceMaxUsdc=&marketplace=…` | 60/IP/hr | New launches + biggest hire-count gainers in window. |
+| `GET  /v1/recentHires?days=&limit=…`  | 60/IP/hr   | Top offerings by absolute hire-count delta (gainers only).               |
+| `GET  /v1/agent/{address}`            | 60/IP/hr   | Full agent profile: every offering with descriptions, schemas, prices, per-offering reputation. |
+| `GET  /v1/watches/{id}`               | 60/IP/hr   | Read-only watch status (alive/expired/paused, expiry, alerts fired). Sensitive fields (buyer address, webhook URL) are NOT returned. |
+| `GET  /v1/categories`                 | unlimited  | Canonical marketplace categories with `offeringCount` per category.       |
+| `GET  /v1/health`                     | unlimited  | Diagnostic: corpus size with V1 / V2 split, last fetch, classifier readiness. |
+
+The `acp-find-plugin` repo wraps these endpoints into 14 MCP tools for Claude Code, Cursor, Cline, Windsurf, Codex, Continue, and Claude Desktop.
 
 Built off the BasicBot boilerplate. Live on Base mainnet. Design specs:
 
@@ -23,22 +49,46 @@ Built off the BasicBot boilerplate. Live on Base mainnet. Design specs:
 
 ```
 acp-v2/   (Node 22 / TypeScript)             ACP_Metabot.Api/   (.NET 10)
-├─ search.ts          ──┐                    ├─ POST /search          → SearchService
-├─ composeStack.ts    ──┤── HTTP ──►         ├─ POST /composeStack    → StackComposerService
-├─ watchOffering.ts   ──┤   X-API-Key        ├─ POST /watches         → WatchService
-└─ seller.ts          ──┘                    ├─ GET  /watches/{id}    (operator)
-                                             ├─ POST /watches/{id}/test-fire (operator)
-                                             ├─ GET  /index/stats     (operator)
-                                             ├─ POST /index/refresh   (operator)
-                                             ├─ GET  /health          (unauth'd)
+├─ search.ts          ──┐                    ┌─ INTERNAL (X-API-Key) ─────────────────────┐
+├─ composeStack.ts    ──┤── HTTP ──►         │ POST /search          → SearchService      │
+├─ watchOffering.ts   ──┤   X-API-Key        │ POST /composeStack    → StackComposerService│
+└─ seller.ts          ──┘                    │ POST /searchAgents    → OfferingRepository │
+                                             │ POST /watches         → WatchService       │
+acp-find-plugin / public callers ────HTTPS──►│ POST /watches/{id}/test-fire (operator)    │
+                                             │ GET  /index/stats     (operator)           │
+                                             │ POST /index/refresh   (operator)           │
+                                             │ GET  /metrics/*       (operator, 5x)       │
+                                             │ GET  /health          (unauth'd)           │
+                                             ├─ PUBLIC (/v1/*, IP-rate-limited) ──────────┤
+                                             │ POST /v1/search                            │
+                                             │ POST /v1/composeStack                      │
+                                             │ POST /v1/searchAgents                      │
+                                             │ GET  /v1/agentReputation                   │
+                                             │ GET  /v1/agentReputationHistory            │
+                                             │ GET  /v1/agentRecentJobs                   │
+                                             │ GET  /v1/digest                            │
+                                             │ GET  /v1/recentHires                       │
+                                             │ GET  /v1/agent/{address}                   │
+                                             │ GET  /v1/watches/{id}     (redacted)       │
+                                             │ GET  /v1/categories       (with counts)    │
+                                             │ GET  /v1/health           (with V1/V2 split)│
+                                             └────────────────────────────────────────────┘
                                              ├─ MarketplaceIndexerService (10-min tick)
+                                             ├─ V2SellerScannerService    (chain enum)
+                                             ├─ ReputationWarmerService   (daily 02:00 UTC)
+                                             ├─ LifetimeSnapshotService   (daily 03:00 UTC)
+                                             ├─ MetricsWriterService      (request log)
                                              └─ WatchPollerBackgroundService (30-min tick)
-                                                  └─ SQLite (offerings + embeddings + watches)
+                                                  └─ SQLite (offerings + embeddings + watches
+                                                              + reputation cache + chain blocks
+                                                              + request log + watch_seen)
 ```
 
 The TS sidecar speaks ACP v2 (the SDK is Node-only). The C# API holds the
-indexer, vector search, Claude composer, and watch poller. All inter-service
-calls require an `X-API-Key` header; only `/health` is unauth'd.
+indexer, vector search, Claude composer, watch poller, chain scanner, and
+metrics. Internal endpoints require `X-API-Key`; `/v1/*` is the unauthenticated
+public mirror, IP-rate-limited per-policy. `/health` is the only path with
+neither auth nor rate limiting.
 
 The sidecar polls its own queries against the indexed corpus every
 `intervalHours` and POSTs new matches to a buyer-supplied HTTPS webhook

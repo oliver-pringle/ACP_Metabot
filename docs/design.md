@@ -26,14 +26,31 @@ acp-v2/   (Node 22 / TypeScript)             ACP_Metabot.Api/   (.NET 10)
 ├─ search.ts          ──┐                    ├─ POST /search          → SearchService
 ├─ composeStack.ts    ──┤── HTTP ──►         ├─ POST /composeStack    → StackComposerService
 ├─ watchOffering.ts   ──┤   X-API-Key        ├─ POST /watches         → WatchService
-└─ seller.ts          ──┘                    ├─ GET  /watches/{id}    (operator)
+├─ agentReputation.ts ──┤                    ├─ POST /agentReputation → ReputationService
+└─ seller.ts          ──┘                    ├─ POST /searchAgents    → OfferingRepository
+                                             ├─ GET  /watches/{id}    (operator, full row)
                                              ├─ POST /watches/{id}/test-fire (operator)
                                              ├─ GET  /index/stats     (operator)
                                              ├─ POST /index/refresh   (operator)
+                                             ├─ GET  /metrics/*       (operator, 5x)
                                              ├─ GET  /health          (open)
+                                             │
+                                             │  ┌─ /v1/* PUBLIC MIRROR (no auth, IP rate-limited) ─┐
+                                             │  │ same handlers + offset/chain/priceMaxUsdc filters │
+                                             │  │ + recentHires, searchAgents, agentRecentJobs,    │
+                                             │  │   watches/{id} (redacted), categories (counts),  │
+                                             │  │   health (V1/V2 split)                           │
+                                             │  └──────────────────────────────────────────────────┘
+                                             │
                                              ├─ MarketplaceIndexerService (10-min)
+                                             ├─ V2SellerScannerService    (chain enum)
+                                             ├─ ReputationWarmerService   (daily 02:00 UTC)
+                                             ├─ LifetimeSnapshotService   (daily 03:00 UTC)
+                                             ├─ MetricsWriterService      (request log)
                                              └─ WatchPollerBackgroundService (30-min tick)
-                                                  └─ SQLite (offerings + embeddings + watches)
+                                                  └─ SQLite (offerings + embeddings + watches
+                                                              + reputation cache + chain blocks
+                                                              + request log + watch_seen)
 ```
 
 The split exists because the ACP v2 SDK (`@virtuals-protocol/acp-node-v2`)

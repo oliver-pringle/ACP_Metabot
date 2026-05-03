@@ -1,6 +1,17 @@
 # ACP_Metabot — ACP v2 Sidecar
 
-Node.js sidecar that speaks ACP v2 via `@virtuals-protocol/acp-node-v2`, dispatches the two ACP_Metabot offerings (`search` and `composeStack`), and proxies execution to the C# `ACP_Metabot.Api`.
+Node.js sidecar that speaks ACP v2 via `@virtuals-protocol/acp-node-v2`, dispatches the four ACP_Metabot offerings, and proxies execution to the C# `ACP_Metabot.Api`.
+
+## Offerings
+
+| Offering | Price (USDC) | Source file |
+|---|---|---|
+| `search` | 0.01 | `src/offerings/search.ts` |
+| `composeStack` | 0.50 | `src/offerings/composeStack.ts` |
+| `watchOffering` | 0.50 | `src/offerings/watchOffering.ts` |
+| `agentReputation` | 0.05 | `src/offerings/agentReputation.ts` |
+
+Live, authoritative pricing lives in `src/pricing.ts` — the table above is for orientation only; consult that file before quoting.
 
 ## Setup
 
@@ -19,13 +30,13 @@ V2 has no programmatic registration. Run:
 npm run print-offerings
 ```
 
-Copy each printed block into app.virtuals.io → ACP_Metabot agent → Offerings → New offering.
+Copy each printed block into app.virtuals.io → ACP_Metabot agent → Offerings → New offering. Keep on-chain offering names ≤ 20 chars.
 
 ## Layout
 
 - `src/seller.ts` — entry point
-- `src/offerings/` — `search.ts`, `composeStack.ts`
-- `src/pricing.ts` — USDC price table (search 0.05, composeStack 0.20)
+- `src/offerings/` — `search.ts`, `composeStack.ts`, `watchOffering.ts`, `agentReputation.ts`
+- `src/pricing.ts` — canonical USDC price table (authoritative)
 - `src/deliverable.ts` — inline vs URL deliverables (50 KB threshold)
 - `src/apiClient.ts` — typed HTTP client for the C# API
 - `src/router.ts` — validate + dispatch

@@ -21,36 +21,75 @@ public class DigestService
         _reputation = reputation;
     }
 
-    public async Task<DigestResult> BuildAsync(int windowDays, string? marketplaceFilter = null)
+    public Task<DigestResult> BuildAsync(int windowDays, string? marketplaceFilter = null)
+        => BuildAsync(windowDays, marketplaceFilter,
+            chainFilter: null, priceMaxUsdc: null);
+
+    /// <summary>
+    /// Filterable overload. Optional <paramref name="chainFilter"/> (lowercased
+    /// HashSet) and <paramref name="priceMaxUsdc"/> are applied to both
+    /// `newOfferings` and `gainers`. Wider initial fetch window when filters
+    /// are present so we keep the same final list size.
+    /// </summary>
+    public async Task<DigestResult> BuildAsync(int windowDays, string? marketplaceFilter,
+        HashSet<string>? chainFilter, double? priceMaxUsdc)
     {
         var nowUtc = DateTime.UtcNow;
         var sinceUtc = nowUtc.AddDays(-windowDays);
         var snapshotDate = nowUtc.Date.AddDays(-windowDays).ToString("yyyy-MM-dd");
 
-        // Fetch a wider net than MaxNewOfferings so the post-filter still has
-        // headroom when marketplace is set. ListNewSinceAsync orders by
-        // popularity then recency so the filter doesn't bias toward old rows.
-        var fetchLimit = marketplaceFilter is null ? MaxNewOfferings : MaxNewOfferings * 4;
+        // Fetch a wider net when ANY filter is set so the post-filter still
+        // has headroom. ListNewSinceAsync orders by popularity then recency so
+        // the filter doesn't bias toward old rows.
+        var hasFilter = marketplaceFilter is not null || chainFilter is not null || priceMaxUsdc is not null;
+        var fetchLimit = hasFilter ? MaxNewOfferings * 4 : MaxNewOfferings;
         var newOfferings = await _repo.ListNewSinceAsync(sinceUtc, fetchLimit);
         if (marketplaceFilter is not null)
         {
             newOfferings = newOfferings
                 .Where(o => string.Equals(o.MarketplaceVersion, marketplaceFilter, StringComparison.OrdinalIgnoreCase))
-                .Take(MaxNewOfferings)
                 .ToList();
         }
+        if (chainFilter is not null)
+        {
+            newOfferings = newOfferings
+                .Where(o => chainFilter.Contains(o.Chain.ToLowerInvariant()))
+                .ToList();
+        }
+        if (priceMaxUsdc is double priceCap)
+        {
+            newOfferings = newOfferings.Where(o => o.PriceUsdc <= priceCap).ToList();
+        }
+        if (newOfferings.Count > MaxNewOfferings)
+            newOfferings = newOfferings.Take(MaxNewOfferings).ToList();
 
         var snapshotExists = await _repo.SnapshotExistsAsync(snapshotDate);
         var gainers = snapshotExists
-            ? await _repo.ListGainersAsync(snapshotDate, marketplaceFilter is null ? MaxGainers : MaxGainers * 4)
+            ? await _repo.ListGainersAsync(snapshotDate, hasFilter ? MaxGainers * 4 : MaxGainers)
             : new List<OfferingGainer>();
         if (marketplaceFilter is not null)
         {
             gainers = gainers
                 .Where(g => string.Equals(g.MarketplaceVersion, marketplaceFilter, StringComparison.OrdinalIgnoreCase))
-                .Take(MaxGainers)
                 .ToList();
         }
+        // Gainers don't carry chain/price natively; intersect with the offering
+        // table when those filters are set so the response respects them.
+        if (chainFilter is not null || priceMaxUsdc is double)
+        {
+            // Build an ad-hoc lookup for the gainers we have. List<Offering>
+            // would be cleaner but ListGainersAsync intentionally returns a
+            // narrower DTO to keep the snapshot-comparison query cheap.
+            var allOfferings = await _repo.ListAllAsync();
+            var byId = allOfferings.ToDictionary(o => o.Id);
+            gainers = gainers.Where(g =>
+                byId.TryGetValue(g.OfferingId, out var o)
+                && (chainFilter is null || chainFilter.Contains(o.Chain.ToLowerInvariant()))
+                && (priceMaxUsdc is not double cap || o.PriceUsdc <= cap)
+            ).ToList();
+        }
+        if (gainers.Count > MaxGainers)
+            gainers = gainers.Take(MaxGainers).ToList();
 
         var newOfferingDtos = newOfferings.Select(o => new NewOffering(
             OfferingId: o.Id,
