@@ -27,6 +27,12 @@ services:
       # container fails to start (eager DI for the ReputationWarmer hosted
       # service pulls in ChainEventScanner, which throws at construction).
       - BASE_RPC_URL=${BASE_RPC_URL}
+      # Optional: separate RPC for the V2 seller enumeration scan (unfiltered
+      # eth_getLogs on the V2 contract). publicnode rejects this query shape
+      # with "request timed out"; Coinbase's official mainnet.base.org and
+      # paid Alchemy/QuickNode all handle it. When unset, falls back to
+      # BASE_RPC_URL above.
+      - BASE_RPC_URL_ENUM=${BASE_RPC_URL_ENUM:-}
       - ACP_CONTRACT_ADDRESS_BASE=${ACP_CONTRACT_ADDRESS_BASE:-0x238E541BfefD82238730D00a2208E5497F1832E0}
       # X-Forwarded-* trust list. ForwardedHeaders middleware only honours these
       # headers from peers inside one of these CIDRs; everyone else's headers are
