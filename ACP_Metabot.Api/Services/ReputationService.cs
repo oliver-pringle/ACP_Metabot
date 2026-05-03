@@ -121,6 +121,24 @@ public class ReputationService
             AgentTotalJobs: o.AgentJobCount);
     }
 
+    /// <summary>
+    /// Agent-level summary used by /v1/searchAgents. We only have the
+    /// agent's total jobs (no offering-level usage_count), so the score
+    /// is keyed off the agent's own throughput rather than a single
+    /// offering. <c>OfferingHires</c> is left at 0 because the response
+    /// is per-agent, not per-offering.
+    /// </summary>
+    public ReputationSummary? BuildSearchSummary(string agentAddress, long agentTotalJobs)
+    {
+        if (!IsReady) return null;
+        long maxAgentJobs;
+        lock (_lock) maxAgentJobs = _maxAgentJobCount;
+        return new ReputationSummary(
+            Score: ScoreLog(agentTotalJobs, maxAgentJobs),
+            OfferingHires: 0,
+            AgentTotalJobs: agentTotalJobs);
+    }
+
     // Full /agentReputation response. Caller passes every offering owned by
     // the agent (already loaded from the repo). offeringName is optional —
     // when supplied, the response contains a single `offering` block;

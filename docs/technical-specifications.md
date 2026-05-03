@@ -448,12 +448,50 @@ Response:
 ```
 
 ### `GET /watches/{id}` (operator)
-Returns the full Watch row. Used for debugging.
+Returns the full Watch row including `buyer_address` and `webhook_url`.
+Used for debugging.
 
 ### `POST /watches/{id}/test-fire` (operator)
 Clears `watch_seen` for the given watch and immediately runs a single poll.
 Returns `{ "watchId": "...", "fired": bool }`. Use to verify webhook
 delivery without waiting for genuinely new offerings to be indexed.
+
+## Public gateway (`/v1/*`)
+
+Mirrors most read paths under `/v1/*` for the public `acp-find` plugin
+and direct callers. **No `X-API-Key` required**; each policy has its
+own per-IP `FixedWindowRateLimiter`. Source classification on each
+request log row uses `User-Agent` to distinguish `mcp_plugin` from
+`public_other`.
+
+| Route | Policy | Permits/IP/hr | Notes |
+|---|---|---|---|
+| `POST /v1/search` | `public-search` | 30 | Same handler as internal `/search`. Accepts extra `offset` field (0–1000) for pagination. |
+| `POST /v1/composeStack` | `public-compose` | 5 | Same handler as `/composeStack`. Accepts extra `chain[]` filter (≤8 entries). |
+| `POST /v1/searchAgents` | `public-search-agents` | 30 | Agent-level search via offering BM25 group-by. Returns `{query, count, results: [{agentAddress, agentName, score, totalOfferings, topOfferings, reputation}]}`. |
+| `GET /v1/agentReputation?agent=<addr>` | `public-reputation` | 60 | Cache-only. 404 = not yet evaluated. ETag + 1h Cache-Control. |
+| `GET /v1/agentReputationHistory?agent=&days=<1-90>` | `public-reputation` | 60 | Day-by-day trajectory from `agent_reputation_history`. |
+| `GET /v1/agentRecentJobs?agent=&days=<1-90>&limit=<1-100>` | `public-agent-recent-jobs` | 20 | Per-job on-chain ledger via `ChainEventScanner.ListAgentRecentJobsAsync`. RPC-heavy; tighter limit. Returns `[{jobId, createdAt, status, counterparty, amountUsdc?}]`. |
+| `GET /v1/digest?days=<1-30>` | `public-digest` | 60 | Accepts `chain[]` and `priceMaxUsdc` filters (applied to both newOfferings and gainers). |
+| `GET /v1/recentHires?days=<1-30>&limit=<1-50>` | `public-recent-hires` | 60 | Top gainers only (no newOfferings). Same filters as digest. |
+| `GET /v1/agent/{address}` | `public-browse-agent` | 60 | Full agent profile. |
+| `GET /v1/watches/{id}` | `public-browse-agent` | 60 | **Public-redacted** view: omits `buyerAddress` and `webhookUrl`. Returns watchId, status, query, expiry, alertsDelivered, intervalHours, maxAlerts, marketplace. |
+| `GET /v1/categories` | unlimited | — | Each category now carries `offeringCount` computed from the live corpus. |
+| `GET /v1/health` | unlimited | — | Adds `corpus.v1Count` and `corpus.v2Count` to the response. |
+
+**Why `/v1/watches/{id}` is redacted publicly while the operator path is not:**
+the watch's `webhook_url` is buyer-private and would let an abuser spam
+the destination endpoint if leaked; `buyer_address` identifies the
+purchaser. The operator path (`GET /watches/{id}`, X-API-Key gated) returns
+the full row including those fields for support / debugging.
+
+**Cross-bot consumers.** Sibling bots on the `acp-shared` docker bridge
+that need the full (un-rate-limited, un-redacted) shape call the internal
+endpoints with `X-API-Key: $INTERNAL_API_KEY` instead of going through
+`/v1/*`. ACP_DeFiEval's deep-eval tier does this for live reputation
+lookups via `POST /agentReputation`. New cross-bot integrations should
+prefer the internal path so they don't compete with public callers for
+rate-limit budget.
 
 ## Webhook delivery
 

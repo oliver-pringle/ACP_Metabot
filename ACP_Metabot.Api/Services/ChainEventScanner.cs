@@ -250,6 +250,154 @@ public class ChainEventScanner
         return result;
     }
 
+    /// <summary>
+    /// Per-job ledger for a single agent over the last <paramref name="days"/>.
+    /// Returns up to <paramref name="limit"/> jobs newest-first, each with the
+    /// counterparty (client wallet), creation timestamp, current status
+    /// (active / completed / rejected / expired), and amount in USDC when a
+    /// JobFunded event is present.
+    ///
+    /// RPC-heavy: chunked scans across the requested window. Cap days at 90 to
+    /// keep worst-case RPC budget bounded; the public endpoint clamps further.
+    /// </summary>
+    public async Task<IReadOnlyList<Models.AgentJobRecord>> ListAgentRecentJobsAsync(
+        string agentAddress, int days, int limit, CancellationToken ct)
+    {
+        days = Math.Clamp(days, 1, 90);
+        limit = Math.Clamp(limit, 1, 100);
+
+        var headBlock = (long)(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
+        long capBlocks = (long)days * 86_400L / BaseBlockTimeSeconds;
+        long startBlock = Math.Max(_deployBlock, headBlock - capBlocks);
+        if (startBlock > headBlock) return Array.Empty<Models.AgentJobRecord>();
+
+        // 1. JobCreated where provider = agent — gives the per-job (id, client) tuples.
+        var createdHandler = _web3.Eth.GetEvent<JobCreatedEvent>(_contractAddress);
+        var createdLogs = await RunChunkedAsync(createdHandler,
+            (fromBP, toBP) => createdHandler.CreateFilterInput(
+                (object[]?)null, (object[]?)null, new object[] { agentAddress }, fromBP, toBP),
+            startBlock, headBlock, ct);
+
+        if (createdLogs.Count == 0) return Array.Empty<Models.AgentJobRecord>();
+
+        // Build the per-job records. Status starts as "active"; later events
+        // upgrade it to completed / rejected / expired.
+        var records = new Dictionary<System.Numerics.BigInteger, (DateTime CreatedAt, string Counterparty, string Status, decimal? AmountUsdc)>();
+        foreach (var log in createdLogs)
+        {
+            ct.ThrowIfCancellationRequested();
+            var ts = await GetBlockTimeAsync((long)log.Log.BlockNumber.Value, ct);
+            records[log.Event.JobId] = (ts, log.Event.Client, "active", null);
+        }
+
+        // Sort + truncate now to the window we care about — we only need the
+        // last `limit` jobs, so post-event scans can skip older ones entirely.
+        var orderedJobIds = records
+            .OrderByDescending(kv => kv.Value.CreatedAt)
+            .Take(limit)
+            .Select(kv => kv.Key)
+            .ToList();
+
+        // Build a HashSet for fast membership checks against the batched logs
+        // below. Without this, an agent with thousands of older jobs would
+        // pay full RPC cost just to find statuses we throw away.
+        var keepSet = new HashSet<System.Numerics.BigInteger>(orderedJobIds);
+
+        // 2. JobFunded — amount per job. JobFunded.Amount is uint256; for V1
+        // the unit is the contract's payment token (USDC, 6 decimals on Base).
+        // Convert via decimal division and clamp at decimal.MaxValue to defend
+        // against pathological values from a bad upstream.
+        var fundedHandler = _web3.Eth.GetEvent<JobFundedEvent>(_contractAddress);
+        // 3. JobCompleted / JobRejected / JobExpired — status per job.
+        var completedHandler = _web3.Eth.GetEvent<JobCompletedEvent>(_contractAddress);
+        var rejectedHandler  = _web3.Eth.GetEvent<JobRejectedEvent>(_contractAddress);
+        var expiredHandler   = _web3.Eth.GetEvent<JobExpiredEvent>(_contractAddress);
+
+        const int batchSize = 50;
+        var keptIds = orderedJobIds;
+        for (int i = 0; i < keptIds.Count; i += batchSize)
+        {
+            var batch = keptIds.GetRange(i, Math.Min(batchSize, keptIds.Count - i));
+            var topicJobIds = batch.Select(id => (object)id).ToArray();
+
+            var fundedBatch = await RunChunkedAsync(fundedHandler,
+                (fromBP, toBP) => fundedHandler.CreateFilterInput(
+                    topicJobIds, (object[]?)null, fromBP, toBP),
+                startBlock, headBlock, ct);
+            foreach (var log in fundedBatch)
+            {
+                if (!records.TryGetValue(log.Event.JobId, out var cur)) continue;
+                decimal? usdc = null;
+                try
+                {
+                    // USDC is 6 decimals on Base. Cast big amounts down by
+                    // dividing first to avoid Decimal overflow at the scale
+                    // step. Anything above 1B USDC is almost certainly bad
+                    // data — clamp to defend the response shape.
+                    var raw = log.Event.Amount;
+                    if (raw <= 0) usdc = 0m;
+                    else
+                    {
+                        var divided = raw / 1_000_000;
+                        if (divided > 1_000_000_000) usdc = 1_000_000_000m;
+                        else usdc = (decimal)divided + ((decimal)(long)(raw % 1_000_000)) / 1_000_000m;
+                    }
+                }
+                catch
+                {
+                    usdc = null;
+                }
+                records[log.Event.JobId] = (cur.CreatedAt, cur.Counterparty, cur.Status, usdc);
+            }
+
+            var completedBatch = await RunChunkedAsync(completedHandler,
+                (fromBP, toBP) => completedHandler.CreateFilterInput(
+                    topicJobIds, fromBP, toBP),
+                startBlock, headBlock, ct);
+            foreach (var log in completedBatch)
+            {
+                if (!records.TryGetValue(log.Event.JobId, out var cur)) continue;
+                records[log.Event.JobId] = (cur.CreatedAt, cur.Counterparty, "completed", cur.AmountUsdc);
+            }
+
+            var rejectedBatch = await RunChunkedAsync(rejectedHandler,
+                (fromBP, toBP) => rejectedHandler.CreateFilterInput(
+                    topicJobIds, (object[]?)null, fromBP, toBP),
+                startBlock, headBlock, ct);
+            foreach (var log in rejectedBatch)
+            {
+                if (!records.TryGetValue(log.Event.JobId, out var cur)) continue;
+                // Self-rejections (provider rejecting the buyer) shouldn't
+                // overwrite a completed status. Mirrors ScanAgentAsync logic.
+                if (string.Equals(log.Event.Rejector, agentAddress, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (cur.Status == "completed") continue;
+                records[log.Event.JobId] = (cur.CreatedAt, cur.Counterparty, "rejected", cur.AmountUsdc);
+            }
+
+            var expiredBatch = await RunChunkedAsync(expiredHandler,
+                (fromBP, toBP) => expiredHandler.CreateFilterInput(
+                    topicJobIds, fromBP, toBP),
+                startBlock, headBlock, ct);
+            foreach (var log in expiredBatch)
+            {
+                if (!records.TryGetValue(log.Event.JobId, out var cur)) continue;
+                if (cur.Status == "completed" || cur.Status == "rejected") continue;
+                records[log.Event.JobId] = (cur.CreatedAt, cur.Counterparty, "expired", cur.AmountUsdc);
+            }
+        }
+
+        return orderedJobIds
+            .Select(id => records[id])
+            .Zip(orderedJobIds, (rec, id) => new Models.AgentJobRecord(
+                JobId: id.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                CreatedAt: rec.CreatedAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+                Status: rec.Status,
+                Counterparty: rec.Counterparty,
+                AmountUsdc: rec.AmountUsdc))
+            .ToArray();
+    }
+
     public async Task<ChainScanResult> ScanAgentAsync(
         string agentAddress, long fromBlock, DateTime nowUtc, CancellationToken ct)
     {

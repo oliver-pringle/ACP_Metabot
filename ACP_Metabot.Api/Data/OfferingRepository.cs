@@ -481,6 +481,133 @@ public class OfferingRepository
     }
 
     /// <summary>
+    /// Agent-level search: groups offering-level BM25 hits by agent and
+    /// returns the top-N agents, each with their best BM25 score, total
+    /// number of active offerings, and up to three matching offering names
+    /// for context. Distinct from <see cref="SearchBm25Async"/> which
+    /// returns offering-level rankings.
+    /// </summary>
+    public async Task<IReadOnlyList<AgentSearchHit>> SearchAgentsAsync(
+        string query, int limit, string? marketplaceFilter)
+    {
+        var match = SanitizeFtsQuery(query);
+        if (match is null) return Array.Empty<AgentSearchHit>();
+
+        // Wide net for the grouping pass — we need enough hits per agent to
+        // get a representative top-3 offerings list. 200 candidates is cheap
+        // because we never embed and the FTS index is small.
+        const int FtsHitPoolSize = 200;
+
+        try
+        {
+            await using var conn = _db.OpenConnection();
+            await using var cmd = conn.CreateCommand();
+            var sql = @"
+                SELECT o.agent_address, o.agent_name, o.offering_name,
+                       o.usage_count, o.agent_job_count,
+                       bm25(offerings_fts, 3.0, 2.0, 1.0) AS bm,
+                       o.marketplace_version
+                FROM offerings_fts
+                JOIN offerings o ON o.id = offerings_fts.rowid
+                WHERE offerings_fts MATCH $q
+                  AND o.is_removed = 0";
+            if (marketplaceFilter is not null)
+            {
+                sql += " AND o.marketplace_version = $mv";
+            }
+            sql += " ORDER BY bm LIMIT $lim;";
+            cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("$q", match);
+            cmd.Parameters.AddWithValue("$lim", FtsHitPoolSize);
+            if (marketplaceFilter is not null)
+                cmd.Parameters.AddWithValue("$mv", marketplaceFilter);
+
+            // BM25 in SQLite is "lower = better" (negative-leaning). Group by
+            // agent, keep the best (lowest) bm score, count hits, and the
+            // first-3 offering names in BM25 order.
+            var byAgent = new Dictionary<string,
+                (string Name, double BestBm, int Hits, List<string> Offerings, long Jobs)>(
+                StringComparer.OrdinalIgnoreCase);
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                var addr = reader.GetString(0);
+                var name = reader.GetString(1);
+                var offering = reader.GetString(2);
+                var jobs = reader.GetInt64(4);
+                var bm = reader.GetDouble(5);
+                if (!byAgent.TryGetValue(addr, out var ex))
+                {
+                    byAgent[addr] = (name, bm, 1, new List<string> { offering }, jobs);
+                }
+                else
+                {
+                    if (bm < ex.BestBm) ex.BestBm = bm;
+                    ex.Hits += 1;
+                    if (ex.Offerings.Count < 3) ex.Offerings.Add(offering);
+                    if (jobs > ex.Jobs) ex.Jobs = jobs;
+                    byAgent[addr] = ex;
+                }
+            }
+
+            if (byAgent.Count == 0) return Array.Empty<AgentSearchHit>();
+
+            // Total active offerings per surviving agent (independent of the
+            // FTS query — "the agent has 12 offerings, 4 of which match").
+            var addrs = byAgent.Keys.ToList();
+            var totalOffersByAgent = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            await using (var counter = conn.CreateCommand())
+            {
+                // IN clause via parameter list. Fine up to limit*N ~ 50; any
+                // larger and we'd switch to a temp table.
+                var paramNames = new List<string>();
+                for (int i = 0; i < addrs.Count; i++)
+                {
+                    var p = "$a" + i;
+                    paramNames.Add(p);
+                    counter.Parameters.AddWithValue(p, addrs[i]);
+                }
+                var inList = string.Join(",", paramNames);
+                counter.CommandText = $@"
+                    SELECT agent_address, COUNT(*)
+                    FROM offerings
+                    WHERE is_removed = 0
+                      AND agent_address IN ({inList})";
+                if (marketplaceFilter is not null)
+                {
+                    counter.CommandText += " AND marketplace_version = $mv";
+                    counter.Parameters.AddWithValue("$mv", marketplaceFilter);
+                }
+                counter.CommandText += " GROUP BY agent_address;";
+                await using var counterReader = await counter.ExecuteReaderAsync();
+                while (await counterReader.ReadAsync())
+                {
+                    totalOffersByAgent[counterReader.GetString(0)] = (int)counterReader.GetInt64(1);
+                }
+            }
+
+            return byAgent
+                .OrderByDescending(kv => kv.Value.Hits)
+                .ThenBy(kv => kv.Value.BestBm)
+                .Take(limit)
+                .Select(kv => new AgentSearchHit(
+                    AgentAddress: kv.Key,
+                    AgentName: kv.Value.Name,
+                    // Map BM25 (lower=better, often negative) to [0,1] where 1
+                    // is most relevant. abs() since bm is typically <= 0.
+                    Score: 1.0 / (1.0 + Math.Abs(kv.Value.BestBm)),
+                    TotalOfferings: totalOffersByAgent.TryGetValue(kv.Key, out var c) ? c : kv.Value.Hits,
+                    TopOfferings: kv.Value.Offerings,
+                    TotalJobs: kv.Value.Jobs))
+                .ToArray();
+        }
+        catch (SqliteException)
+        {
+            return Array.Empty<AgentSearchHit>();
+        }
+    }
+
+    /// <summary>
     /// Strips FTS5 operators and wraps multi-token queries in quotes for
     /// paste-safety. Hex contract addresses, tickers with punctuation, and
     /// queries containing colons/parentheses survive intact as phrase matches.

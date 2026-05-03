@@ -48,9 +48,21 @@ Rules:
         _logger = logger;
     }
 
-    public async Task<ComposedStack> ComposeAsync(
+    public Task<ComposedStack> ComposeAsync(
         string useCase, double? budgetUsdc, int maxOfferings,
         string? marketplaceFilter, CancellationToken ct)
+        => ComposeAsync(useCase, budgetUsdc, maxOfferings,
+            marketplaceFilter, chainFilter: null, ct);
+
+    /// <summary>
+    /// Filterable overload. Optional <paramref name="chainFilter"/> narrows the
+    /// candidate pool to a subset of chain ids (e.g. "base", "base-sepolia")
+    /// before Claude curates the final stack.
+    /// </summary>
+    public async Task<ComposedStack> ComposeAsync(
+        string useCase, double? budgetUsdc, int maxOfferings,
+        string? marketplaceFilter, HashSet<string>? chainFilter,
+        CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(useCase))
         {
@@ -64,7 +76,7 @@ Rules:
         // better-ordered candidate pool gives the LLM a head start.
         var candidates = await _search.SearchAsync(useCase, CandidatePoolSize, 0.0, double.PositiveInfinity,
             staleAfterDays: null, rerank: true, categoryFilter: null,
-            chainFilter: null, minReputation: null,
+            chainFilter: chainFilter, minReputation: null,
             marketplaceFilter: marketplaceFilter, ct);
         if (candidates.Count == 0)
         {

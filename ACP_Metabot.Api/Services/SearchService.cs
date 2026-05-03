@@ -41,6 +41,41 @@ public class SearchService
     public DateTime CorpusRefreshedAtUtc => _corpusRefreshedAtUtc;
     public int CorpusCount => Volatile.Read(ref _corpus)?.Count ?? 0;
 
+    /// <summary>
+    /// (categoryName -> active offering count) over the embedded corpus.
+    /// Cheap to compute on demand; the corpus already carries each row's
+    /// pre-tagged category. Returns an empty dict before the first refresh.
+    /// </summary>
+    public Dictionary<string, int> CategoryCounts()
+    {
+        var corpus = Volatile.Read(ref _corpus);
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (corpus is null) return counts;
+        foreach (var (_, _, category) in corpus)
+        {
+            if (string.IsNullOrEmpty(category)) continue;
+            counts[category] = counts.TryGetValue(category, out var c) ? c + 1 : 1;
+        }
+        return counts;
+    }
+
+    /// <summary>
+    /// (marketplaceVersion -> corpus count). Used by /v1/health to show V1
+    /// vs V2 split. Empty dict before the first refresh.
+    /// </summary>
+    public Dictionary<string, int> CorpusByMarketplace()
+    {
+        var corpus = Volatile.Read(ref _corpus);
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (corpus is null) return counts;
+        foreach (var (offering, _, _) in corpus)
+        {
+            var key = string.IsNullOrEmpty(offering.MarketplaceVersion) ? "v1" : offering.MarketplaceVersion;
+            counts[key] = counts.TryGetValue(key, out var c) ? c + 1 : 1;
+        }
+        return counts;
+    }
+
     public SearchService(OfferingRepository repo, VoyageEmbeddingProvider embedder,
         VoyageRerankProvider reranker, ReputationService reputation,
         AgentReputationCacheRepository agentScoreRepo,
@@ -82,8 +117,23 @@ public class SearchService
             tagged.Count, _agentScoreLookup.Count);
     }
 
-    public async Task<IReadOnlyList<OfferingMatch>> SearchAsync(
+    public Task<IReadOnlyList<OfferingMatch>> SearchAsync(
         string query, int limit, double minScore, double priceMaxUsdc,
+        int? staleAfterDays, bool rerank, string? categoryFilter,
+        HashSet<string>? chainFilter, int? minReputation,
+        string? marketplaceFilter,
+        CancellationToken ct)
+        => SearchAsync(query, limit, offset: 0, minScore, priceMaxUsdc,
+            staleAfterDays, rerank, categoryFilter, chainFilter, minReputation,
+            marketplaceFilter, ct);
+
+    /// <summary>
+    /// Pagination-aware overload. Skips <paramref name="offset"/> results before
+    /// taking <paramref name="limit"/>. The blended-and-reranked ordering is
+    /// preserved: pagination operates on the final, sorted candidate list.
+    /// </summary>
+    public async Task<IReadOnlyList<OfferingMatch>> SearchAsync(
+        string query, int limit, int offset, double minScore, double priceMaxUsdc,
         int? staleAfterDays, bool rerank, string? categoryFilter,
         HashSet<string>? chainFilter, int? minReputation,
         string? marketplaceFilter,
@@ -223,6 +273,7 @@ public class SearchService
         }
 
         return ordered
+            .Skip(Math.Max(0, offset))
             .Take(limit)
             .Select(s => new OfferingMatch(
                 OfferingId: s.O.Id,

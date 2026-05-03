@@ -265,13 +265,18 @@ default).
 }
 ```
 
-| Field          | Type    | Required | Notes                                            |
-|----------------|---------|----------|--------------------------------------------------|
-| `query`        | string  | yes      | Free-form natural language. ≤ 2048 chars.        |
-| `limit`        | integer | no       | Default 10, clamped to [1, 50].                  |
-| `minScore`     | number  | no       | Cosine similarity threshold. Default 0.0.        |
-| `priceMaxUsdc` | number  | no       | Excludes offerings priced above this from results. |
-| `marketplace`  | string  | no       | `"v1"` or `"v2"`. Omit for cross-version (default). |
+| Field           | Type     | Required | Notes                                                                  |
+|-----------------|----------|----------|------------------------------------------------------------------------|
+| `query`         | string   | yes      | Free-form natural language. ≤ 1000 chars.                              |
+| `limit`         | integer  | no       | Default 10, clamped to [1, 50].                                        |
+| `offset`        | integer  | no       | Skip first N final-ranked results before applying limit. 0–1000.        |
+| `minScore`     | number   | no       | Cosine similarity threshold. Default 0.0.                              |
+| `priceMaxUsdc`  | number   | no       | Excludes offerings priced above this from results.                      |
+| `category`      | string   | no       | Restrict to a single canonical category (case-insensitive). See `/v1/categories`. |
+| `chain`         | string[] | no       | Restrict to one or more chain ids (e.g. `["base","base-sepolia"]`). Up to 8 entries. |
+| `minReputation` | integer  | no       | Filter to agents whose cached behavioural score is at least N (0–100). Unevaluated agents pass through. |
+| `freshness`     | integer  | no       | Keep only offerings whose hire count grew within the last N days (1–365). Cleaner numeric alternative to `staleAfterDays`. |
+| `marketplace`   | string   | no       | `"v1"` or `"v2"`. Omit for cross-version (default).                    |
 
 **Deliverable:**
 
@@ -320,12 +325,13 @@ don't know the marketplace well enough to assemble the pieces yourself.
 }
 ```
 
-| Field          | Type    | Required | Notes                                            |
-|----------------|---------|----------|--------------------------------------------------|
-| `useCase`      | string  | yes      | Free-form. Describe the *goal*, not the agents. ≤ 4096 chars. |
-| `budgetUsdc`   | number  | no       | Total cap in USDC. Stack will respect it.        |
-| `maxOfferings` | integer | no       | Default 5, clamped to [1, 10].                   |
-| `marketplace`  | string  | no       | `"v1"` or `"v2"`. Omit for cross-version (default). |
+| Field          | Type     | Required | Notes                                            |
+|----------------|----------|----------|--------------------------------------------------|
+| `useCase`      | string   | yes      | Free-form. Describe the *goal*, not the agents. ≤ 2000 chars. |
+| `budgetUsdc`   | number   | no       | Total cap in USDC. Stack will respect it.        |
+| `maxOfferings` | integer  | no       | Default 5, clamped to [1, 10].                   |
+| `chain`        | string[] | no       | Restrict candidate pool to one or more chain ids (e.g. `["base"]`). Up to 8 entries. |
+| `marketplace`  | string   | no       | `"v1"` or `"v2"`. Omit for cross-version (default). |
 
 **Deliverable:**
 
@@ -484,6 +490,30 @@ the cached score (no auth, IP rate-limited). Returns `404 not_cached`
 if the agent has never been evaluated — pay the SKU to force a live
 computation. The free path never triggers compute, so it's DoS-safe and
 fast.
+
+### Free public gateway — full surface
+
+The bot mirrors most of its read paths under `/v1/*` at
+`https://api.acp-metabot.dev`. No API key, no signup; per-IP rate-limited.
+The `acp-find` Claude Code plugin / `acp-find-mcp` npm package calls these
+endpoints directly. Direct curl is also fine.
+
+| Endpoint | Rate limit | Notes |
+|---|---|---|
+| `POST /v1/search` | 30/IP/hr | Same handler as the paid `search` SKU. Accepts `offset` for pagination beyond the top 50. Filters: `priceMaxUsdc`, `chain` (array, ≤8), `minReputation` (0-100), `freshness` (days), `category`, `marketplace` (`v1`/`v2`). |
+| `POST /v1/composeStack` | 5/IP/hr | Same handler as paid `composeStack`. Filters: `chain`, `marketplace`. |
+| `POST /v1/searchAgents` | 30/IP/hr | Agent-level search distinct from offering-level — groups offering BM25 hits by agent. Returns top-N agents with their best score, total offerings, and top-3 offering names. |
+| `GET /v1/agentReputation?agent=<addr>` | 60/IP/hr | Cache-only behavioural score. 404 = not yet evaluated. |
+| `GET /v1/agentReputationHistory?agent=<addr>&days=<1-90>` | 60/IP/hr | Day-by-day reputation trajectory. |
+| `GET /v1/agentRecentJobs?agent=<addr>&days=<1-90>&limit=<1-100>` | 20/IP/hr | Per-job on-chain ledger (jobId, status, counterparty, USDC amount). RPC-heavy — tighter rate limit. |
+| `GET /v1/digest?days=<1-30>` | 60/IP/hr | New launches + biggest hire-count gainers. Filters: `chain`, `priceMaxUsdc`, `marketplace`. |
+| `GET /v1/recentHires?days=<1-30>&limit=<1-50>` | 60/IP/hr | Top offerings by absolute hire-count delta only (gainers). Filters: `chain`, `priceMaxUsdc`, `category`, `marketplace`. |
+| `GET /v1/agent/{address}` | 60/IP/hr | Full agent profile: every offering with descriptions, schemas, prices, per-offering reputation. |
+| `GET /v1/watches/{id}` | 60/IP/hr | Read-only watch status. Returns alive/expired/paused, expiry, alerts fired, query, filters. **Buyer address and webhook URL are NOT returned** — the public path redacts those. |
+| `GET /v1/categories` | unlimited | Canonical marketplace categories with `offeringCount` per category (computed live from corpus). |
+| `GET /v1/health` | unlimited | Diagnostic. Returns total `corpus.count` plus `corpus.v1Count` / `corpus.v2Count` split, last fetch time, and category-classifier readiness. |
+
+The plugin caches `acp_categories` and `acp_health` responses in-process for 5 minutes; everything else is hit fresh per call.
 
 ### Cost control tips
 

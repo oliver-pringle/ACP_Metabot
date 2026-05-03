@@ -186,6 +186,41 @@ builder.Services.AddRateLimiter(options =>
                 Window = TimeSpan.FromHours(1),
                 QueueLimit = 0
             }));
+
+    // Agent-level search — BM25 + group-by, slightly heavier than offering
+    // search but still no embeddings. Same cost class as digest.
+    options.AddPolicy("public-search-agents", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
+                Window = TimeSpan.FromHours(1),
+                QueueLimit = 0
+            }));
+
+    // Recent-hires is a thin wrapper around the gainers query. Cheap.
+    options.AddPolicy("public-recent-hires", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 60,
+                Window = TimeSpan.FromHours(1),
+                QueueLimit = 0
+            }));
+
+    // Per-agent on-chain job ledger. RPC-heavy (JobCreated + JobFunded +
+    // JobCompleted/Rejected/Expired chunked scans), so a tighter cap.
+    options.AddPolicy("public-agent-recent-jobs", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 20,
+                Window = TimeSpan.FromHours(1),
+                QueueLimit = 0
+            }));
 });
 
 var app = builder.Build();
@@ -297,7 +332,8 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, Cancellat
     var marketplace = NormalizeMarketplace(req.Marketplace);
     if (req.Marketplace is not null && marketplace is null)
         return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
-    var results = await svc.SearchAsync(req.Query, limit, minScore, priceMax, staleAfterDays,
+    var offset = req.Offset is null ? 0 : Math.Clamp(req.Offset.Value, 0, 1000);
+    var results = await svc.SearchAsync(req.Query, limit, offset, minScore, priceMax, staleAfterDays,
         rerank, category, chainFilter, req.MinReputation, marketplace, ct);
 
     object? bestMatch = null;
@@ -325,7 +361,19 @@ async Task<IResult> HandleCompose(ComposeRequest req, StackComposerService svc, 
     var marketplace = NormalizeMarketplace(req.Marketplace);
     if (req.Marketplace is not null && marketplace is null)
         return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
-    var stack = await svc.ComposeAsync(req.UseCase, req.BudgetUsdc, max, marketplace, ct);
+
+    HashSet<string>? chainFilter = null;
+    if (req.Chains is { Length: > 0 } cs)
+    {
+        if (cs.Length > 8)
+            return Results.BadRequest(new { error = "chain accepts at most 8 entries" });
+        chainFilter = new HashSet<string>(cs.Select(c => (c ?? "").Trim().ToLowerInvariant()),
+            StringComparer.Ordinal);
+        chainFilter.Remove("");
+        if (chainFilter.Count == 0) chainFilter = null;
+    }
+
+    var stack = await svc.ComposeAsync(req.UseCase, req.BudgetUsdc, max, marketplace, chainFilter, ct);
     return Results.Ok(stack);
 }
 
@@ -370,13 +418,29 @@ async Task<IResult> HandleReputation(AgentReputationRequest req,
     }
 }
 
-async Task<IResult> HandleDigest(int? days, string? marketplace, DigestService svc)
+async Task<IResult> HandleDigest(int? days, string? marketplace,
+    string[]? chain, double? priceMaxUsdc, DigestService svc)
 {
     var window = days is null ? 1 : Math.Clamp(days.Value, 1, 30);
     var marketplaceFilter = NormalizeMarketplace(marketplace);
     if (marketplace is not null && marketplaceFilter is null)
         return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
-    var result = await svc.BuildAsync(window, marketplaceFilter);
+
+    HashSet<string>? chainFilter = null;
+    if (chain is { Length: > 0 })
+    {
+        if (chain.Length > 8)
+            return Results.BadRequest(new { error = "chain accepts at most 8 entries" });
+        chainFilter = new HashSet<string>(chain.Select(c => (c ?? "").Trim().ToLowerInvariant()),
+            StringComparer.Ordinal);
+        chainFilter.Remove("");
+        if (chainFilter.Count == 0) chainFilter = null;
+    }
+
+    if (priceMaxUsdc is double cap && (double.IsNaN(cap) || cap < 0))
+        return Results.BadRequest(new { error = "priceMaxUsdc must be a non-negative number" });
+
+    var result = await svc.BuildAsync(window, marketplaceFilter, chainFilter, priceMaxUsdc);
     return Results.Ok(result);
 }
 
@@ -444,7 +508,8 @@ async Task<IResult> HandleBrowseAgent(string address,
 app.MapPost("/search", HandleSearch);
 app.MapPost("/composeStack", HandleCompose);
 app.MapPost("/agentReputation", HandleReputation);
-app.MapGet("/digest", (int? days, string? marketplace, DigestService svc) => HandleDigest(days, marketplace, svc));
+app.MapGet("/digest", (int? days, string? marketplace, string[]? chain, double? priceMaxUsdc, DigestService svc)
+    => HandleDigest(days, marketplace, chain, priceMaxUsdc, svc));
 app.MapGet("/agent/{address}", (string address,
     OfferingRepository repo, ReputationService reputation)
     => HandleBrowseAgent(address, repo, reputation));
@@ -511,17 +576,33 @@ app.MapGet("/v1/agentReputationHistory",
         AgentReputationHistoryRepository histRepo)
     => HandleReputationHistory(agent, days, histRepo))
     .RequireRateLimiting("public-reputation");
-app.MapGet("/v1/digest", (int? days, string? marketplace, DigestService svc) => HandleDigest(days, marketplace, svc)).RequireRateLimiting("public-digest");
+app.MapGet("/v1/digest", (int? days, string? marketplace, string[]? chain, double? priceMaxUsdc, DigestService svc)
+    => HandleDigest(days, marketplace, chain, priceMaxUsdc, svc))
+    .RequireRateLimiting("public-digest");
 app.MapGet("/v1/agent/{address}", (string address,
     OfferingRepository repo, ReputationService reputation)
     => HandleBrowseAgent(address, repo, reputation)).RequireRateLimiting("public-browse-agent");
 // Static list — no per-IP limit; CDN-cacheable in front of Caddy if abuse appears.
-app.MapGet("/v1/categories", (CategoryService svc) => Results.Ok(new { categories = svc.Categories }));
+// Now includes offeringCount per category (computed from the live corpus
+// so it reflects active, non-tombstoned offerings).
+app.MapGet("/v1/categories", (CategoryService cats, SearchService search) =>
+{
+    var counts = search.CategoryCounts();
+    var items = cats.Categories.Select(c => new
+    {
+        name = c.Name,
+        description = c.Description,
+        offeringCount = counts.TryGetValue(c.Name, out var n) ? n : 0
+    }).ToArray();
+    return Results.Ok(new { categories = items });
+});
 
 // Public diagnostic — used by the acp-find plugin's acp_health tool.
 // Cheap (in-memory reads only); no rate-limit policy needed.
 app.MapGet("/v1/health", (SearchService search, MarketplaceIndexerService idx, CategoryService cats) =>
-    Results.Ok(new
+{
+    var byMarketplace = search.CorpusByMarketplace();
+    return Results.Ok(new
     {
         status = "ok",
         time = DateTime.UtcNow.ToString("O"),
@@ -529,6 +610,8 @@ app.MapGet("/v1/health", (SearchService search, MarketplaceIndexerService idx, C
         corpus = new
         {
             count = search.CorpusCount,
+            v1Count = byMarketplace.TryGetValue("v1", out var v1) ? v1 : 0,
+            v2Count = byMarketplace.TryGetValue("v2", out var v2) ? v2 : 0,
             refreshedAt = search.CorpusRefreshedAtUtc == default
                 ? null
                 : search.CorpusRefreshedAtUtc.ToString("O"),
@@ -543,7 +626,159 @@ app.MapGet("/v1/health", (SearchService search, MarketplaceIndexerService idx, C
             count = cats.Categories.Count,
             ready = cats.IsReady,
         },
-    }));
+    });
+});
+
+// Public read-only watch status. Returns the watch's public state without the
+// sensitive fields (buyer_address, webhook_url) — those identify the buyer
+// and would let abusers spam the webhook destination if leaked. Same rate
+// limit class as agent browse since both are single-row reads.
+app.MapGet("/v1/watches/{id}", async (string id, WatchRepository repo) =>
+{
+    if (string.IsNullOrWhiteSpace(id))
+        return Results.BadRequest(new { error = "watchId is required" });
+    var w = await repo.GetByIdAsync(id);
+    if (w is null) return Results.NotFound(new { error = "watch_not_found" });
+    return Results.Ok(new
+    {
+        watchId = w.Id,
+        status = w.Status,
+        query = w.Query,
+        createdAt = w.CreatedAt.ToString("O"),
+        expiresAt = w.ExpiresAt.ToString("O"),
+        intervalHours = w.IntervalHours,
+        maxAlerts = w.MaxAlerts,
+        alertsDelivered = w.AlertsDelivered,
+        lastPolledAt = w.LastPolledAt?.ToString("O"),
+        marketplace = w.Marketplace,
+        minScore = w.MinScore,
+        priceMaxUsdc = w.PriceMaxUsdc
+    });
+}).RequireRateLimiting("public-browse-agent");
+
+// Public recent-hires: top offerings by absolute hire-count delta in window.
+// Different surface from /v1/digest (which mixes new + gainers); this is
+// purely "what's getting hired right now". Reuses DigestService's gainers
+// computation with the same chain/marketplace/price filters.
+async Task<IResult> HandleRecentHires(int? days, int? limit, string? marketplace,
+    string[]? chain, double? priceMaxUsdc, string? category, DigestService svc)
+{
+    var window = days is null ? 7 : Math.Clamp(days.Value, 1, 30);
+    var cap = limit is null ? 10 : Math.Clamp(limit.Value, 1, 50);
+    var marketplaceFilter = NormalizeMarketplace(marketplace);
+    if (marketplace is not null && marketplaceFilter is null)
+        return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
+
+    HashSet<string>? chainFilter = null;
+    if (chain is { Length: > 0 })
+    {
+        if (chain.Length > 8)
+            return Results.BadRequest(new { error = "chain accepts at most 8 entries" });
+        chainFilter = new HashSet<string>(chain.Select(c => (c ?? "").Trim().ToLowerInvariant()),
+            StringComparer.Ordinal);
+        chainFilter.Remove("");
+        if (chainFilter.Count == 0) chainFilter = null;
+    }
+
+    if (priceMaxUsdc is double p && (double.IsNaN(p) || p < 0))
+        return Results.BadRequest(new { error = "priceMaxUsdc must be a non-negative number" });
+
+    var digest = await svc.BuildAsync(window, marketplaceFilter, chainFilter, priceMaxUsdc);
+    var gainers = digest.Gainers.Take(cap).ToArray();
+    return Results.Ok(new
+    {
+        windowDays = window,
+        snapshotComparison = digest.SnapshotComparison,
+        count = gainers.Length,
+        results = gainers,
+        // category isn't enforced here yet — gainer tuples don't carry the
+        // pre-tagged category. Pass-through hint so the plugin sees what
+        // was requested even if the gateway can't filter on it.
+        categoryRequested = category
+    });
+}
+app.MapGet("/v1/recentHires",
+    (int? days, int? limit, string? marketplace, string[]? chain,
+        double? priceMaxUsdc, string? category, DigestService svc) =>
+        HandleRecentHires(days, limit, marketplace, chain, priceMaxUsdc, category, svc))
+    .RequireRateLimiting("public-recent-hires");
+
+// Public agent-level search. Distinct from /v1/search which ranks offerings;
+// this groups offering-level BM25 hits by agent so the response answers
+// "who are the providers in this space" rather than "which offering matches".
+async Task<IResult> HandleSearchAgents(SearchAgentsRequest req,
+    OfferingRepository repo, ReputationService reputation, CancellationToken ct)
+{
+    if (string.IsNullOrWhiteSpace(req.Query))
+        return Results.BadRequest(new { error = "query is required" });
+    if (req.Query.Length > MaxQueryLen)
+        return Results.BadRequest(new { error = $"query must be {MaxQueryLen} characters or fewer" });
+    var limit = req.Limit is null ? 5 : Math.Clamp(req.Limit.Value, 1, 50);
+    var marketplaceFilter = NormalizeMarketplace(req.Marketplace);
+    if (req.Marketplace is not null && marketplaceFilter is null)
+        return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
+
+    var agents = await repo.SearchAgentsAsync(req.Query, limit, marketplaceFilter);
+    var results = agents.Select(a => new
+    {
+        agentAddress = a.AgentAddress,
+        agentName = a.AgentName,
+        score = Math.Round(a.Score, 4),
+        totalOfferings = a.TotalOfferings,
+        topOfferings = a.TopOfferings,
+        reputation = reputation.BuildSearchSummary(a.AgentAddress, a.TotalJobs)
+    }).ToArray();
+    return Results.Ok(new { query = req.Query, count = results.Length, results });
+}
+app.MapPost("/searchAgents",
+    (SearchAgentsRequest req, OfferingRepository repo, ReputationService reputation,
+        CancellationToken ct) => HandleSearchAgents(req, repo, reputation, ct));
+app.MapPost("/v1/searchAgents",
+    (SearchAgentsRequest req, OfferingRepository repo, ReputationService reputation,
+        CancellationToken ct) => HandleSearchAgents(req, repo, reputation, ct))
+    .RequireRateLimiting("public-search-agents");
+
+// Per-agent on-chain job ledger. RPC-heavy — every call hits the chain via
+// chunked filters across the requested window. Tight rate limit; the plugin
+// caches the response for 5 minutes which absorbs most refresh storms.
+async Task<IResult> HandleAgentRecentJobs(string agent, int? days, int? limit,
+    ChainEventScanner scanner, CancellationToken ct)
+{
+    if (string.IsNullOrWhiteSpace(agent))
+        return Results.BadRequest(new { error = "invalid_address", message = "agent query param is required" });
+    var addr = agent.Trim().ToLowerInvariant();
+    if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+        return Results.BadRequest(new { error = "invalid_address", message = "must be 0x followed by 40 hex chars" });
+    var window = days is null ? 30 : Math.Clamp(days.Value, 1, 90);
+    var cap = limit is null ? 25 : Math.Clamp(limit.Value, 1, 100);
+
+    try
+    {
+        var jobs = await scanner.ListAgentRecentJobsAsync(addr, window, cap, ct);
+        return Results.Ok(new
+        {
+            agentAddress = addr,
+            days = window,
+            count = jobs.Count,
+            jobs
+        });
+    }
+    catch (Exception)
+    {
+        // Don't echo RPC internals back to the client.
+        return Results.Json(new { error = "compute_failed", message = "chain scan failed; please retry" },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+}
+app.MapGet("/agentRecentJobs",
+    ([FromQuery] string agent, [FromQuery] int? days, [FromQuery] int? limit,
+        ChainEventScanner scanner, CancellationToken ct) =>
+        HandleAgentRecentJobs(agent, days, limit, scanner, ct));
+app.MapGet("/v1/agentRecentJobs",
+    ([FromQuery] string agent, [FromQuery] int? days, [FromQuery] int? limit,
+        ChainEventScanner scanner, CancellationToken ct) =>
+        HandleAgentRecentJobs(agent, days, limit, scanner, ct))
+    .RequireRateLimiting("public-agent-recent-jobs");
 
 app.MapGet("/index/stats", async (OfferingRepository repo, MarketplaceIndexerService idx,
     VoyageEmbeddingProvider emb) =>
@@ -656,11 +891,17 @@ public record SearchRequest(
     [property: System.Text.Json.Serialization.JsonPropertyName("chain")] string[]? Chains,
     int? MinReputation,
     int? Freshness,
-    [property: System.Text.Json.Serialization.JsonPropertyName("marketplace")] string? Marketplace);
+    [property: System.Text.Json.Serialization.JsonPropertyName("marketplace")] string? Marketplace,
+    int? Offset = null);
 public record ComposeRequest(
     string UseCase,
     double? BudgetUsdc,
     int? MaxOfferings,
+    [property: System.Text.Json.Serialization.JsonPropertyName("marketplace")] string? Marketplace,
+    [property: System.Text.Json.Serialization.JsonPropertyName("chain")] string[]? Chains = null);
+public record SearchAgentsRequest(
+    string Query,
+    int? Limit,
     [property: System.Text.Json.Serialization.JsonPropertyName("marketplace")] string? Marketplace);
 public record AgentReputationRequest(string AgentAddress);
 
