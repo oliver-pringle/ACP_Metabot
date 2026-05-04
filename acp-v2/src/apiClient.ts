@@ -1,3 +1,14 @@
+export interface SaturationDto {
+  nearDuplicateCount: number;
+  categorySize: number;
+}
+
+export interface PricePercentileDto {
+  value: number | null;
+  peerN: number;
+  lowN: boolean;
+}
+
 export interface OfferingMatch {
   offeringId: number;
   agentName: string;
@@ -8,6 +19,8 @@ export interface OfferingMatch {
   priceType: string;
   chain: string;
   score: number;
+  saturation?: SaturationDto;
+  pricePercentile?: PricePercentileDto;
 }
 
 export interface BestMatch {
@@ -21,6 +34,44 @@ export interface SearchResponse {
   count: number;
   results: OfferingMatch[];
   bestMatch: BestMatch | null;
+}
+
+export interface AgentSearchHitOffering {
+  offeringName: string;
+  priceUsdc: number;
+  marketplaceVersion: "v1" | "v2";
+}
+
+export interface AgentSearchHit {
+  agentAddress: string;
+  agentName: string;
+  score: number;
+  totalOfferings: number;
+  topOfferings: AgentSearchHitOffering[];
+  totalJobs: number;
+  topOfferingNames: string[];
+  marketplaces: ("v1" | "v2")[];
+  dominantMarketplace: "v1" | "v2" | "tied" | "none";
+  agentScore?: number;
+}
+
+export interface AgentSearchResponse {
+  query: string;
+  count: number;
+  agents: AgentSearchHit[];
+}
+
+export interface CrossPresenceMarketplace {
+  offeringCount: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+export interface CrossPresence {
+  v1: CrossPresenceMarketplace | null;
+  v2: CrossPresenceMarketplace | null;
+  inBoth: boolean;
+  dominant: "v1" | "v2" | "tied" | "none";
 }
 
 export interface StackEntry {
@@ -115,6 +166,81 @@ export interface AgentReputationResponse {
   trajectory?: ReputationHistoryPoint[];
 }
 
+// ── BrowseAgent ───────────────────────────────────────────────────────────────
+
+export interface BrowseAgentOffering {
+  offeringId: number;
+  offeringName: string;
+  description: string;
+  priceUsdc: number;
+  priceType: string;
+  chain: string;
+  isPrivate: boolean;
+  requirementSchema?: unknown;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  marketplaceVersion: "v1" | "v2";
+  pricePercentile?: PricePercentileDto;
+}
+
+export interface BrowseAgentResponse {
+  agentAddress: string;
+  agentName: string;
+  reputation: unknown;
+  offerings: BrowseAgentOffering[];
+  crossPresence?: CrossPresence;
+}
+
+// ── Digest ────────────────────────────────────────────────────────────────────
+
+export interface NewAgentRow {
+  address: string;
+  name: string;
+  marketplace: "v1" | "v2";
+  firstSeenAt: string;
+  offeringCount: number;
+}
+
+export interface NewAgentsBlock {
+  count: number;
+  agents: NewAgentRow[];
+}
+
+export interface ChurnRate {
+  rate: number;
+  churnedCount: number;
+  baselineCount: number;
+}
+
+export interface CohortSurvivalRow {
+  cohortWeek: string;
+  cohortStart: string;
+  cohortSize: number;
+  surviving: number;
+  survivalRate: number;
+}
+
+export interface SaturationMapRow {
+  category: string;
+  total: number;
+  saturatedCount: number;
+  saturationPct: number;
+}
+
+export interface DigestResponse {
+  windowDays: number;
+  windowStart: string;
+  snapshotComparison: string;
+  partial: boolean;
+  newOfferings: unknown[];
+  gainers: unknown[];
+  newAgents: NewAgentsBlock;
+  churnRate: ChurnRate;
+  cohortSurvival: CohortSurvivalRow[] | null;
+  saturationMap: SaturationMapRow[];
+  computedAt: string;
+}
+
 export interface ApiClient {
   health(): Promise<HealthResponse>;
   search(req: {
@@ -127,6 +253,16 @@ export interface ApiClient {
     minReputation?: number;
     freshness?: number;
   }): Promise<SearchResponse>;
+  searchAgents(req: {
+    query: string;
+    limit?: number;
+    marketplace?: "v1" | "v2";
+  }): Promise<AgentSearchResponse>;
+  browseAgent(address: string): Promise<BrowseAgentResponse>;
+  digest(req: {
+    days?: number;
+    marketplace?: string;
+  }): Promise<DigestResponse>;
   composeStack(req: { useCase: string; budgetUsdc?: number; maxOfferings?: number }): Promise<ComposedStack>;
   registerWatch(req: RegisterWatchRequest): Promise<RegisterWatchResponse>;
   agentReputation(req: AgentReputationRequest): Promise<AgentReputationResponse>;
@@ -197,6 +333,17 @@ export function createApiClient(
     health: () => request<HealthResponse>("/health"),
     search: (req) =>
       request<SearchResponse>("/search", { method: "POST", body: JSON.stringify(req) }),
+    searchAgents: (req) =>
+      request<AgentSearchResponse>("/searchAgents", { method: "POST", body: JSON.stringify(req) }),
+    browseAgent: (address) =>
+      request<BrowseAgentResponse>(`/agent/${encodeURIComponent(address)}`),
+    digest: (req) => {
+      const params = new URLSearchParams();
+      if (req.days !== undefined) params.set("days", String(req.days));
+      if (req.marketplace) params.set("marketplace", req.marketplace);
+      const qs = params.toString();
+      return request<DigestResponse>(qs ? `/digest?${qs}` : "/digest");
+    },
     composeStack: (req) =>
       request<ComposedStack>("/composeStack", { method: "POST", body: JSON.stringify(req) }),
     registerWatch: (req) =>

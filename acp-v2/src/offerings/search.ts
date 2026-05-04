@@ -8,7 +8,7 @@ import {
 export const search: Offering = {
   name: "search",
   description:
-    "Semantic search across the ACP marketplace. Given a natural-language query (e.g. \"close a position on GMX for under 0.20 USDC\"), returns ranked offerings with agent name, agent address, offering name, price, and a similarity score 0-1. Uses hybrid BM25 + dense fusion so rare-keyword queries (contract addresses, tickers, niche jargon) work alongside semantic ones. Optional filters: priceMaxUsdc, chain, minReputation, freshness. Response includes a bestMatch field when the top result scores above 0.8.",
+    "Semantic search across the ACP marketplace. Given a natural-language query (e.g. \"close a position on GMX for under 0.20 USDC\"), returns ranked offerings with agent name, agent address, offering name, price, and a similarity score 0-1. Uses hybrid BM25 + dense fusion so rare-keyword queries (contract addresses, tickers, niche jargon) work alongside semantic ones. Optional filters: priceMaxUsdc, chain, minReputation, freshness. Response includes a bestMatch field when the top result scores above 0.8. Each offering hit now includes saturation (per-category near-duplicate count) and pricePercentile (within category × marketplace).",
   requirementSchema: {
     type: "object",
     properties: {
@@ -55,6 +55,58 @@ export const search: Offering = {
       }
     },
     required: ["query"]
+  },
+  deliverableSchema: {
+    type: "object",
+    required: ["query", "count", "results"],
+    properties: {
+      query: { type: "string" },
+      count: { type: "integer" },
+      bestMatch: {
+        type: "object",
+        nullable: true,
+        properties: {
+          agentAddress: { type: "string" },
+          offeringName: { type: "string" },
+          score: { type: "number" },
+        },
+      },
+      results: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["offeringId", "agentName", "agentAddress", "offeringName", "description", "priceUsdc", "priceType", "chain", "score"],
+          properties: {
+            offeringId: { type: "integer" },
+            agentName: { type: "string" },
+            agentAddress: { type: "string" },
+            offeringName: { type: "string" },
+            description: { type: "string" },
+            priceUsdc: { type: "number" },
+            priceType: { type: "string" },
+            chain: { type: "string" },
+            score: { type: "number" },
+            saturation: {
+              type: "object",
+              description: "Per-category near-duplicate saturation. nearDuplicateCount = offerings with cosine similarity ≥ threshold in the same category; categorySize = total offerings in category.",
+              properties: {
+                nearDuplicateCount: { type: "integer" },
+                categorySize: { type: "integer" },
+              },
+            },
+            pricePercentile: {
+              type: "object",
+              description: "Price position within the same category × marketplace cohort. value = percentile 0-100 (null when peerN < lowNThreshold); lowN = true when fewer than 5 peers exist.",
+              properties: {
+                value: { type: "number", nullable: true },
+                peerN: { type: "integer" },
+                lowN: { type: "boolean" },
+              },
+            },
+          },
+        },
+      },
+    },
   },
   validate(req) {
     const q = requireString(req.query, "query", 2048);
