@@ -35,6 +35,7 @@ builder.Services.AddSingleton<ScoreCalculator>();
 builder.Services.AddSingleton<VoyageEmbeddingProvider>();
 builder.Services.AddSingleton<IEmbeddingProvider>(sp => sp.GetRequiredService<VoyageEmbeddingProvider>());
 builder.Services.AddSingleton<VoyageRerankProvider>();
+builder.Services.AddSingleton<IRerankProvider, VoyageRerankAdapter>();
 builder.Services.AddSingleton<IClaudeClient, ClaudeApiClient>();
 // Marketplace sources are pluggable via Indexer:Source.
 //   "acp-api"   — live upstream V1 + V2 (V2 toggleable via Indexer:V2:Enabled, default true)
@@ -71,6 +72,7 @@ builder.Services.AddSingleton<PricePercentileCalculator>(_ => new PricePercentil
     lowNThreshold: builder.Configuration.GetValue<int?>("PricePercentile:LowNThreshold") ?? 5));
 builder.Services.AddSingleton<SearchService>();
 builder.Services.AddSingleton<CrossPresenceBuilder>();
+builder.Services.AddSingleton<AgentSearchService>();
 builder.Services.AddSingleton<StackComposerService>();
 builder.Services.AddSingleton<WebhookDeliveryService>();
 builder.Services.AddSingleton<WatchService>();
@@ -754,11 +756,12 @@ app.MapGet("/v1/recentHires",
         HandleRecentHires(days, limit, marketplace, chain, priceMaxUsdc, category, svc))
     .RequireRateLimiting("public-recent-hires");
 
-// Public agent-level search. Distinct from /v1/search which ranks offerings;
-// this groups offering-level BM25 hits by agent so the response answers
-// "who are the providers in this space" rather than "which offering matches".
+// Public agent-level search (v1.7). Dispatches through AgentSearchService which
+// runs a BM25 + dense cosine + RRF fusion + optional rerank pipeline and enriches
+// each hit with TopOfferings records, cross-presence, and cached agentScore.
+// Replaces the v1.6 direct OfferingRepository.SearchAgentsAsync call.
 async Task<IResult> HandleSearchAgents(SearchAgentsRequest req,
-    OfferingRepository repo, ReputationService reputation, CancellationToken ct)
+    AgentSearchService svc, CancellationToken ct)
 {
     if (string.IsNullOrWhiteSpace(req.Query))
         return Results.BadRequest(new { error = "query is required" });
@@ -769,24 +772,15 @@ async Task<IResult> HandleSearchAgents(SearchAgentsRequest req,
     if (req.Marketplace is not null && marketplaceFilter is null)
         return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
 
-    var agents = await repo.SearchAgentsAsync(req.Query, limit, marketplaceFilter);
-    var results = agents.Select(a => new
-    {
-        agentAddress = a.AgentAddress,
-        agentName = a.AgentName,
-        score = Math.Round(a.Score, 4),
-        totalOfferings = a.TotalOfferings,
-        topOfferings = a.TopOfferings,
-        reputation = reputation.BuildSearchSummary(a.AgentAddress, a.TotalJobs)
-    }).ToArray();
-    return Results.Ok(new { query = req.Query, count = results.Length, results });
+    var hits = await svc.SearchAsync(req.Query, limit, marketplaceFilter, ct);
+    return Results.Ok(new { query = req.Query, count = hits.Count, agents = hits });
 }
 app.MapPost("/searchAgents",
-    (SearchAgentsRequest req, OfferingRepository repo, ReputationService reputation,
-        CancellationToken ct) => HandleSearchAgents(req, repo, reputation, ct));
+    (SearchAgentsRequest req, AgentSearchService svc,
+        CancellationToken ct) => HandleSearchAgents(req, svc, ct));
 app.MapPost("/v1/searchAgents",
-    (SearchAgentsRequest req, OfferingRepository repo, ReputationService reputation,
-        CancellationToken ct) => HandleSearchAgents(req, repo, reputation, ct))
+    (SearchAgentsRequest req, AgentSearchService svc,
+        CancellationToken ct) => HandleSearchAgents(req, svc, ct))
     .RequireRateLimiting("public-search-agents");
 
 // Per-agent on-chain job ledger. RPC-heavy — every call hits the chain via
