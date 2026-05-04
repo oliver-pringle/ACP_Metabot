@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 using ACP_Metabot.Api.Models;
 using Microsoft.Data.Sqlite;
 
@@ -45,7 +46,40 @@ public record MetricsErrorRow(
     string? QueryText,
     string? AgentAddress,
     string? RemoteIp);
+
+// One row per distinct user_agent string seen in the window. `Family`
+// classifies the UA into a small set of buckets so callers can roll up
+// without re-parsing the raw string. `Version` is populated for families
+// that embed a version (currently only acp-find-plugin).
+public record MetricsClientRow(
+    string Family,
+    string? Version,
+    string RawUserAgent,
+    long Count,
+    long UniqueIps,
+    string? FirstSeenTs,
+    string? LastSeenTs);
 // ---------------------------------------------------------------------
+
+internal static class UserAgentClassifier
+{
+    private static readonly Regex AcpPlugin = new(
+        @"^acp-find-plugin/([0-9]+(?:\.[0-9]+){0,3})",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex CurlLike = new(
+        @"^curl/", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    public static (string Family, string? Version) Classify(string? ua)
+    {
+        if (string.IsNullOrEmpty(ua)) return ("unknown", null);
+        var m = AcpPlugin.Match(ua);
+        if (m.Success) return ("acp-find-plugin", m.Groups[1].Value);
+        if (CurlLike.IsMatch(ua)) return ("curl", null);
+        if (ua.StartsWith("Mozilla/", StringComparison.OrdinalIgnoreCase)) return ("browser", null);
+        return ("other", null);
+    }
+}
 
 public class RequestMetricsRepository
 {
@@ -389,6 +423,51 @@ public class RequestMetricsRepository
         while (await reader.ReadAsync())
         {
             result.Add(new MetricsTopRow(reader.GetString(0), reader.GetInt64(1)));
+        }
+        return result;
+    }
+
+    // Distinct user_agent strings + per-UA count and unique-IP count.
+    // Bounded by raw retention (14d) since the rollup tables don't
+    // dimension by user_agent. Used by /metrics/clients to answer
+    // "how much of /v1/* traffic is the MCP plugin vs everything else".
+    public async Task<List<MetricsClientRow>> ClientsAsync(int days, int limit)
+    {
+        days  = Math.Clamp(days, 1, 14);
+        limit = Math.Clamp(limit, 1, 200);
+        var cutoff = DateTime.UtcNow.AddDays(-days).ToString("O", CultureInfo.InvariantCulture);
+
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT
+                COALESCE(user_agent, '')  AS ua,
+                COUNT(*)                  AS c,
+                COUNT(DISTINCT remote_ip) AS uniq_ips,
+                MIN(ts)                   AS first_seen,
+                MAX(ts)                   AS last_seen
+            FROM request_log
+            WHERE ts >= $c
+            GROUP BY ua
+            ORDER BY c DESC
+            LIMIT $lim;";
+        cmd.Parameters.AddWithValue("$c",   cutoff);
+        cmd.Parameters.AddWithValue("$lim", limit);
+
+        var result = new List<MetricsClientRow>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var ua = reader.GetString(0);
+            var (family, version) = UserAgentClassifier.Classify(ua);
+            result.Add(new MetricsClientRow(
+                Family:       family,
+                Version:      version,
+                RawUserAgent: ua,
+                Count:        reader.GetInt64(1),
+                UniqueIps:    reader.GetInt64(2),
+                FirstSeenTs:  reader.IsDBNull(3) ? null : reader.GetString(3),
+                LastSeenTs:   reader.IsDBNull(4) ? null : reader.GetString(4)));
         }
         return result;
     }

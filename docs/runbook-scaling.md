@@ -15,9 +15,12 @@ curl -H "X-API-Key: $INTERNAL_API_KEY" https://api.acp-metabot.dev/metrics/times
 curl -H "X-API-Key: $INTERNAL_API_KEY" https://api.acp-metabot.dev/metrics/endpoints?days=7
 curl -H "X-API-Key: $INTERNAL_API_KEY" "https://api.acp-metabot.dev/metrics/top?dim=query&days=7"
 curl -H "X-API-Key: $INTERNAL_API_KEY" "https://api.acp-metabot.dev/metrics/errors?days=1"
+curl -H "X-API-Key: $INTERNAL_API_KEY" "https://api.acp-metabot.dev/metrics/clients?days=7"
 ```
 
 Note: the public gateway (`api.acp-metabot.dev`) does NOT expose `/metrics/*` — those paths are private and only reachable on the internal docker network. Use `docker compose exec acp-metabot-api curl http://localhost:5000/metrics/...` from the droplet, or SSH-tunnel.
+
+`/metrics/clients` returns one row per distinct `User-Agent` over the window with request count, distinct-IP count, first/last-seen timestamps, and a `family` classification (`acp-find-plugin` / `curl` / `browser` / `other` / `unknown`) plus an extracted `version` for `acp-find-plugin`. Use this to answer "how much of `/v1/*` traffic is the MCP plugin vs everything else" and to spot stale plugin versions still in the wild. Bounded by 14 d raw retention (no rollup dimension on `user_agent`).
 
 ## Lever 1 — Cache query embeddings on the search hot path
 

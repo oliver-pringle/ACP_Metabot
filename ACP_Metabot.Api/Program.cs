@@ -838,6 +838,10 @@ app.MapGet("/metrics/errors",
     async (int? days, int? limit, RequestMetricsRepository repo) =>
         Results.Ok(await repo.RecentErrorsAsync(days ?? 1, limit ?? 100)));
 
+app.MapGet("/metrics/clients",
+    async (int? days, int? limit, RequestMetricsRepository repo) =>
+        Results.Ok(await repo.ClientsAsync(days ?? 7, limit ?? 50)));
+
 app.MapPost("/watches", async (RegisterWatchRequest req, WatchService svc, CancellationToken ct) =>
 {
     if (string.IsNullOrWhiteSpace(req.Query))
