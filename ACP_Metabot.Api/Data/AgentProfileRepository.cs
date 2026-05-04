@@ -133,4 +133,46 @@ public class AgentProfileRepository
             r.IsDBNull(5) ? null : r.GetString(5),
             r.GetString(6));
     }
+
+    /// <summary>
+    /// Cold-start backfill — populates agent_profiles for every distinct
+    /// agent_address present in active (non-tombstoned) offerings. Profile
+    /// text is the concatenation of agent_name + "\n\n" + joined
+    /// "{offering_name}: {description}" lines, capped at
+    /// <paramref name="profileTextCap"/> chars. Returns the number of agents
+    /// upserted. Idempotent: rerunning produces the same row count.
+    /// </summary>
+    public async Task<int> BackfillFromOfferingsAsync(int profileTextCap)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var read = conn.CreateCommand();
+        read.CommandText = @"
+            SELECT agent_address, agent_name, offering_name, description
+            FROM offerings
+            WHERE is_removed = 0
+            ORDER BY agent_address, first_seen_at";
+        var byAgent = new Dictionary<string, (string Name, List<string> Lines)>(
+            StringComparer.OrdinalIgnoreCase);
+        await using (var r = await read.ExecuteReaderAsync())
+        {
+            while (await r.ReadAsync())
+            {
+                var key = r.GetString(0).ToLowerInvariant();
+                if (!byAgent.TryGetValue(key, out var t))
+                    byAgent[key] = t = (r.GetString(1), new List<string>());
+                t.Lines.Add($"{r.GetString(2)}: {r.GetString(3)}");
+            }
+        }
+
+        int n = 0;
+        foreach (var (addr, (name, lines)) in byAgent)
+        {
+            var profileText = $"{name}\n\n{string.Join("\n", lines)}";
+            if (profileText.Length > profileTextCap)
+                profileText = profileText.Substring(0, profileTextCap);
+            await UpsertAsync(addr, name, profileText);
+            n++;
+        }
+        return n;
+    }
 }

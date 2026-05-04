@@ -152,4 +152,114 @@ public class AgentProfileRepositoryTests : IDisposable
 
         Assert.Empty(await _repo.ListDirtyAsync(100));
     }
+
+    // ── BackfillFromOfferingsAsync ─────────────────────────────────────────
+
+    [Fact]
+    public async Task BackfillFromOfferings_PopulatesEveryDistinctAgent()
+    {
+        // Seed offerings table directly with two agents, three offerings total.
+        await using (var conn = _db.OpenConnection())
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO offerings (agent_address, agent_name, offering_name, description,
+                    price_usdc, price_type, chain, content_hash, first_seen_at, last_seen_at,
+                    marketplace_version, is_removed)
+                VALUES
+                    ('0xa', 'AgentA', 'scan', 'Scan a wallet', 0.10, 'per_call', 'base', 'h1', $f, $f, 'v2', 0),
+                    ('0xa', 'AgentA', 'audit', 'Deep audit', 5.00, 'per_call', 'base', 'h2', $f, $f, 'v2', 0),
+                    ('0xb', 'AgentB', 'alert', 'Alert on tx', 0.20, 'per_call', 'base', 'h3', $f, $f, 'v1', 0);";
+            cmd.Parameters.AddWithValue("$f", "2026-05-01T00:00:00Z");
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var n = await _repo.BackfillFromOfferingsAsync(profileTextCap: 2000);
+        Assert.Equal(2, n);
+
+        var a = await _repo.GetAsync("0xa");
+        Assert.NotNull(a);
+        Assert.Equal("AgentA", a.AgentName);
+        Assert.Contains("scan", a.ProfileText);
+        Assert.Contains("audit", a.ProfileText);
+        Assert.Null(a.EmbeddedAt);
+
+        var b = await _repo.GetAsync("0xb");
+        Assert.NotNull(b);
+        Assert.Contains("alert", b.ProfileText);
+
+        Assert.Equal(2, (await _repo.ListDirtyAsync(100)).Count);
+    }
+
+    [Fact]
+    public async Task BackfillFromOfferings_SkipsTombstoned()
+    {
+        await using (var conn = _db.OpenConnection())
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO offerings (agent_address, agent_name, offering_name, description,
+                    price_usdc, price_type, chain, content_hash, first_seen_at, last_seen_at,
+                    marketplace_version, is_removed)
+                VALUES
+                    ('0xa', 'AgentA', 'old',  'tombstoned', 0.10, 'per_call', 'base', 'h1', $f, $f, 'v2', 1),
+                    ('0xa', 'AgentA', 'live', 'active',     0.10, 'per_call', 'base', 'h2', $f, $f, 'v2', 0);";
+            cmd.Parameters.AddWithValue("$f", "2026-05-01T00:00:00Z");
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var n = await _repo.BackfillFromOfferingsAsync(profileTextCap: 2000);
+        Assert.Equal(1, n);
+
+        var a = await _repo.GetAsync("0xa");
+        Assert.NotNull(a);
+        Assert.DoesNotContain("tombstoned", a.ProfileText);
+        Assert.Contains("active", a.ProfileText);
+    }
+
+    [Fact]
+    public async Task BackfillFromOfferings_RespectsCap()
+    {
+        var longDesc = new string('x', 5000);
+        await using (var conn = _db.OpenConnection())
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO offerings (agent_address, agent_name, offering_name, description,
+                    price_usdc, price_type, chain, content_hash, first_seen_at, last_seen_at,
+                    marketplace_version, is_removed)
+                VALUES ('0xa', 'A', 'big', $d, 0.10, 'per_call', 'base', 'h1', $f, $f, 'v2', 0)";
+            cmd.Parameters.AddWithValue("$d", longDesc);
+            cmd.Parameters.AddWithValue("$f", "2026-05-01T00:00:00Z");
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        await _repo.BackfillFromOfferingsAsync(profileTextCap: 500);
+        var a = await _repo.GetAsync("0xa");
+        Assert.NotNull(a);
+        Assert.True(a.ProfileText.Length <= 500);
+    }
+
+    [Fact]
+    public async Task BackfillFromOfferings_IsIdempotent()
+    {
+        await using (var conn = _db.OpenConnection())
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO offerings (agent_address, agent_name, offering_name, description,
+                    price_usdc, price_type, chain, content_hash, first_seen_at, last_seen_at,
+                    marketplace_version, is_removed)
+                VALUES ('0xa', 'AgentA', 'scan', 'Scan', 0.10, 'per_call', 'base', 'h', $f, $f, 'v2', 0);";
+            cmd.Parameters.AddWithValue("$f", "2026-05-01T00:00:00Z");
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var n1 = await _repo.BackfillFromOfferingsAsync(2000);
+        var n2 = await _repo.BackfillFromOfferingsAsync(2000);
+        Assert.Equal(1, n1);
+        Assert.Equal(1, n2);  // re-run produces the same row count (UPSERT)
+
+        Assert.Single(await _repo.ListDirtyAsync(100));  // exactly one agent_profiles row
+    }
 }
