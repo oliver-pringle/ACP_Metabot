@@ -96,6 +96,7 @@ builder.Services.AddSingleton<ReputationWarmerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ReputationWarmerService>());
 builder.Services.AddSingleton<MetricsWriterService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MetricsWriterService>());
+builder.Services.AddHostedService<AgentProfileEmbedderService>();
 
 builder.Services.AddOpenApi();
 
