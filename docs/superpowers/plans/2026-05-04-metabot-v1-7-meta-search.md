@@ -163,8 +163,13 @@ Inside `InitializeSchemaAsync`, after the existing `offerings`-related blocks, a
 await using var agentProfilesCmd = conn.CreateCommand();
 agentProfilesCmd.CommandText = @"
     -- v1.7: agent profile corpus + embedding for hybrid agent search.
+    -- Surrogate INTEGER PK (matching the offerings pattern): TEXT PK tables
+    -- get an implicit rowid that is NOT VACUUM-stable; FTS5 external-content
+    -- joins would silently desynchronise. agent_address kept UNIQUE for the
+    -- repository-level lookup primitive.
     CREATE TABLE IF NOT EXISTS agent_profiles (
-        agent_address     TEXT    PRIMARY KEY,
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_address     TEXT    NOT NULL UNIQUE,
         agent_name        TEXT    NOT NULL,
         profile_text      TEXT    NOT NULL,
         embedding         BLOB,
@@ -179,32 +184,32 @@ agentProfilesCmd.CommandText = @"
 
     CREATE VIRTUAL TABLE IF NOT EXISTS agent_profiles_fts USING fts5(
         agent_name, profile_text,
-        content='agent_profiles', content_rowid='rowid',
+        content='agent_profiles', content_rowid='id',
         tokenize='unicode61 remove_diacritics 2'
     );
 
     CREATE TRIGGER IF NOT EXISTS agent_profiles_ai AFTER INSERT ON agent_profiles BEGIN
         INSERT INTO agent_profiles_fts(rowid, agent_name, profile_text)
-        VALUES (new.rowid, new.agent_name, new.profile_text);
+        VALUES (new.id, new.agent_name, new.profile_text);
     END;
 
     CREATE TRIGGER IF NOT EXISTS agent_profiles_ad AFTER DELETE ON agent_profiles BEGIN
         INSERT INTO agent_profiles_fts(agent_profiles_fts, rowid, agent_name, profile_text)
-        VALUES ('delete', old.rowid, old.agent_name, old.profile_text);
+        VALUES ('delete', old.id, old.agent_name, old.profile_text);
     END;
 
     CREATE TRIGGER IF NOT EXISTS agent_profiles_au
     AFTER UPDATE OF agent_name, profile_text ON agent_profiles BEGIN
         INSERT INTO agent_profiles_fts(agent_profiles_fts, rowid, agent_name, profile_text)
-        VALUES ('delete', old.rowid, old.agent_name, old.profile_text);
+        VALUES ('delete', old.id, old.agent_name, old.profile_text);
         INSERT INTO agent_profiles_fts(rowid, agent_name, profile_text)
-        VALUES (new.rowid, new.agent_name, new.profile_text);
+        VALUES (new.id, new.agent_name, new.profile_text);
     END;
 ";
 await agentProfilesCmd.ExecuteNonQueryAsync();
 ```
 
-Note `AFTER UPDATE OF agent_name, profile_text` (column-scoped) — same defensive pattern as `offerings_au` to avoid spurious FTS rebuilds when only `last_change_at` / `embedded_at` change.
+Note `AFTER UPDATE OF agent_name, profile_text` (column-scoped) — same defensive pattern as `offerings_au` to avoid spurious FTS rebuilds when only `last_change_at` / `embedded_at` change. And note `content_rowid='id'` (not the default `rowid`) — the surrogate `id` is VACUUM-stable, the implicit rowid is not.
 
 - [ ] **Step 4: Run tests to verify they pass**
 

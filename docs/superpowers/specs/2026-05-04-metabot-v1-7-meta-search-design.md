@@ -217,9 +217,15 @@ Out of scope (deferred to v1.8 or later):
 ## Schema (additions in `Db.cs`)
 
 ```sql
--- agent profile corpus and embedding
+-- agent profile corpus and embedding.
+-- Surrogate INTEGER PK (matching the offerings pattern): TEXT PK tables get an
+-- implicit rowid that is not VACUUM-stable, which would silently desynchronise
+-- the FTS5 external-content mirror. agent_address is UNIQUE for the
+-- repository-level lookup primitive. agent_address values are stored
+-- lowercased.
 CREATE TABLE IF NOT EXISTS agent_profiles (
-    agent_address       TEXT    PRIMARY KEY,             -- lowercase
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_address       TEXT    NOT NULL UNIQUE,         -- lowercased
     agent_name          TEXT    NOT NULL,
     profile_text        TEXT    NOT NULL,                -- concatenation, retained for re-embed + debug
     embedding           BLOB,                            -- matches offering_embeddings dimension/model
@@ -231,25 +237,30 @@ CREATE INDEX IF NOT EXISTS ix_agent_profiles_dirty
     ON agent_profiles(last_change_at)
     WHERE embedded_at IS NULL OR last_change_at > embedded_at;
 
--- FTS5 mirror over agent_name + profile_text
+-- FTS5 mirror over agent_name + profile_text. content_rowid='id' so the FTS
+-- index references the stable surrogate, not the implicit rowid.
 CREATE VIRTUAL TABLE IF NOT EXISTS agent_profiles_fts USING fts5(
     agent_name, profile_text,
-    content='agent_profiles', content_rowid='rowid',
+    content='agent_profiles', content_rowid='id',
     tokenize='unicode61 remove_diacritics 2'
 );
 CREATE TRIGGER IF NOT EXISTS agent_profiles_ai AFTER INSERT ON agent_profiles BEGIN
     INSERT INTO agent_profiles_fts(rowid, agent_name, profile_text)
-    VALUES (new.rowid, new.agent_name, new.profile_text);
+    VALUES (new.id, new.agent_name, new.profile_text);
 END;
 CREATE TRIGGER IF NOT EXISTS agent_profiles_ad AFTER DELETE ON agent_profiles BEGIN
     INSERT INTO agent_profiles_fts(agent_profiles_fts, rowid, agent_name, profile_text)
-    VALUES ('delete', old.rowid, old.agent_name, old.profile_text);
+    VALUES ('delete', old.id, old.agent_name, old.profile_text);
 END;
-CREATE TRIGGER IF NOT EXISTS agent_profiles_au AFTER UPDATE ON agent_profiles BEGIN
+-- AFTER UPDATE OF column-scoped (same pattern as offerings_au, v1.2 lesson):
+-- the indexer-side last_change_at / embedded_at writes must NOT fire the FTS
+-- rebuild.
+CREATE TRIGGER IF NOT EXISTS agent_profiles_au
+AFTER UPDATE OF agent_name, profile_text ON agent_profiles BEGIN
     INSERT INTO agent_profiles_fts(agent_profiles_fts, rowid, agent_name, profile_text)
-    VALUES ('delete', old.rowid, old.agent_name, old.profile_text);
+    VALUES ('delete', old.id, old.agent_name, old.profile_text);
     INSERT INTO agent_profiles_fts(rowid, agent_name, profile_text)
-    VALUES (new.rowid, new.agent_name, new.profile_text);
+    VALUES (new.id, new.agent_name, new.profile_text);
 END;
 ```
 
