@@ -7,6 +7,9 @@ export interface Price {
 
 const PRICE_USDC: Record<string, number> = {
   search: 0.01,
+  searchAgents: 0.01,
+  browseAgent: 0.01,
+  today: 0.02,
   composeStack: 0.50,
   watchOffering: 0.50,
   agentReputation: 0.05,

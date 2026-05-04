@@ -11,6 +11,8 @@ public class SearchService
     private readonly ReputationService _reputation;
     private readonly AgentReputationCacheRepository _agentScoreRepo;
     private readonly CategoryService _categories;
+    private readonly SaturationCalculator _saturation;
+    private readonly PricePercentileCalculator _pricePercentile;
     private readonly ILogger<SearchService> _logger;
 
     // Pool size for the rerank pass. The reranker is much more expensive
@@ -40,6 +42,23 @@ public class SearchService
 
     public DateTime CorpusRefreshedAtUtc => _corpusRefreshedAtUtc;
     public int CorpusCount => Volatile.Read(ref _corpus)?.Count ?? 0;
+
+    /// <summary>
+    /// Returns the pre-tagged category for a single offering, looked up by id
+    /// in the in-memory corpus. Returns null when the corpus hasn't loaded yet
+    /// or the offering isn't present (e.g. recently removed). O(n) scan is fine
+    /// for typical agent portfolio sizes (single digits to low hundreds).
+    /// </summary>
+    public string? GetCategoryForOffering(long offeringId)
+    {
+        var corpus = Volatile.Read(ref _corpus);
+        if (corpus is null) return null;
+        foreach (var (offering, _, category) in corpus)
+        {
+            if (offering.Id == offeringId) return category;
+        }
+        return null;
+    }
 
     /// <summary>
     /// (categoryName -> active offering count) over the embedded corpus.
@@ -79,7 +98,10 @@ public class SearchService
     public SearchService(OfferingRepository repo, VoyageEmbeddingProvider embedder,
         VoyageRerankProvider reranker, ReputationService reputation,
         AgentReputationCacheRepository agentScoreRepo,
-        CategoryService categories, ILogger<SearchService> logger)
+        CategoryService categories,
+        SaturationCalculator saturation,
+        PricePercentileCalculator pricePercentile,
+        ILogger<SearchService> logger)
     {
         _repo = repo;
         _embedder = embedder;
@@ -87,6 +109,8 @@ public class SearchService
         _reputation = reputation;
         _agentScoreRepo = agentScoreRepo;
         _categories = categories;
+        _saturation = saturation;
+        _pricePercentile = pricePercentile;
         _logger = logger;
     }
 
@@ -97,6 +121,12 @@ public class SearchService
             .Select(t => (t.Offering, t.Embedding, _categories.Classify(t.Embedding)))
             .ToList();
         Volatile.Write(ref _corpus, tagged);
+
+        // Refresh saturation + price-percentile calculators in lockstep so
+        // per-hit enrichments are always consistent with the current corpus.
+        _saturation.Refresh(tagged.Select(c => (c.Item1.Id, c.Item3 ?? string.Empty, c.Item2)));
+        _pricePercentile.Refresh(tagged.Select(c =>
+            (c.Item1.Id, c.Item3 ?? string.Empty, c.Item1.MarketplaceVersion ?? "v1", c.Item1.PriceUsdc)));
 
         // Refresh the (agent -> score) snapshot in lockstep with the corpus
         // so the minReputation filter operates on consistent data without
@@ -275,19 +305,29 @@ public class SearchService
         return ordered
             .Skip(Math.Max(0, offset))
             .Take(limit)
-            .Select(s => new OfferingMatch(
-                OfferingId: s.O.Id,
-                AgentName: s.O.AgentName,
-                AgentAddress: s.O.AgentAddress,
-                OfferingName: s.O.OfferingName,
-                Description: s.O.Description,
-                PriceUsdc: s.O.PriceUsdc,
-                PriceType: s.O.PriceType,
-                Chain: s.O.Chain,
-                Score: Math.Round(s.Cosine, 4),
-                Reputation: s.Rep,
-                Category: s.Category,
-                MarketplaceVersion: s.O.MarketplaceVersion))
+            .Select(s =>
+            {
+                var cat = s.Category ?? string.Empty;
+                var mv  = s.O.MarketplaceVersion ?? "v1";
+                var pp  = _pricePercentile.Compute(s.O.Id, cat, mv, s.O.PriceUsdc);
+                return new OfferingMatch(
+                    OfferingId: s.O.Id,
+                    AgentName: s.O.AgentName,
+                    AgentAddress: s.O.AgentAddress,
+                    OfferingName: s.O.OfferingName,
+                    Description: s.O.Description,
+                    PriceUsdc: s.O.PriceUsdc,
+                    PriceType: s.O.PriceType,
+                    Chain: s.O.Chain,
+                    Score: Math.Round(s.Cosine, 4),
+                    Reputation: s.Rep,
+                    Category: s.Category,
+                    MarketplaceVersion: mv,
+                    Saturation: new SaturationDto(
+                        _saturation.NearDuplicateCount(s.O.Id, cat),
+                        _saturation.CategorySize(cat)),
+                    PricePercentile: new PricePercentileDto(pp.Value, pp.PeerN, pp.LowN));
+            })
             .ToArray();
     }
 

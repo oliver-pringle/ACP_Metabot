@@ -47,7 +47,17 @@ acp-v2/   (Node 22 / TypeScript)             ACP_Metabot.Api/   (.NET 10)
                                              ├─ ReputationWarmerService   (daily 02:00 UTC)
                                              ├─ LifetimeSnapshotService   (daily 03:00 UTC)
                                              ├─ MetricsWriterService      (request log)
-                                             └─ WatchPollerBackgroundService (30-min tick)
+                                             ├─ WatchPollerBackgroundService (30-min tick)
+                                             └─ AgentProfileEmbedderService (5-min, v1.7)
+                                                drains agent_profiles dirty queue
+                                                via Voyage; cold-start backfills
+                                                from offerings.
+
+v1.7 also adds three pure-function services off SearchService._corpus:
+- SaturationCalculator     (per-offering near-duplicate count + per-category rollup)
+- PricePercentileCalculator (within category × marketplace)
+- CrossPresenceBuilder      (V1 ↔ V2 footprint per agent)
+plus AgentSearchService (hybrid BM25 + dense + rerank ranker behind /v1/searchAgents).
                                                   └─ SQLite (offerings + embeddings + watches
                                                               + reputation cache + chain blocks
                                                               + request log + watch_seen)

@@ -79,6 +79,8 @@ env-vars locally. The API reads them through `IConfiguration`.
 | `Embeddings__Provider`            | `voyage`                                    | Only `voyage` supported. |
 | `Embeddings__Model`               | `voyage-3-large`                            | 1024-dim. |
 | `Claude__Model`                   | `claude-sonnet-4-6`                         | Used by `composeStack`. |
+| `Saturation__Threshold`           | `0.85`                                      | Cosine similarity threshold for counting an offering as a near-duplicate within its category. Used by `SaturationCalculator` for per-hit `saturation` and `/v1/digest` `saturationMap`. Env-tunable without redeploy. |
+| `PricePercentile__LowNThreshold`  | `5`                                         | Minimum peer count for a percentile to be considered reliable. When `peerN < LowNThreshold`, `lowN: true` and `value: null` are returned. |
 | `VOYAGE_API_KEY`                  | *(required)*                                | https://dash.voyageai.com/ |
 | `ANTHROPIC_API_KEY`               | *(required)*                                | https://console.anthropic.com/settings/keys |
 | `INTERNAL_API_KEY`                | *(required)*                                | Shared secret with sidecar. Generate with `openssl rand -hex 32`. |
@@ -185,6 +187,61 @@ chain + schema JSON, used for cheap change detection during upserts.
 `watches.status` values: `active`, `expired`, `exhausted` (max alerts
 hit), `webhook_failing` (still polled, but webhook unreliable),
 `cancelled` (5+ consecutive POST failures).
+
+### v1.7 schema additions (`agent_profiles` corpus)
+
+Added in `InitializeSchemaAsync` alongside the v1.7 migration:
+
+```sql
+-- Agent profile corpus and embedding.
+-- Surrogate INTEGER PK (matching the offerings pattern) so FTS5
+-- external-content rowid is VACUUM-stable.
+CREATE TABLE IF NOT EXISTS agent_profiles (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_address       TEXT    NOT NULL UNIQUE,         -- lowercased
+    agent_name          TEXT    NOT NULL,
+    profile_text        TEXT    NOT NULL,                -- concatenation of name + offering names/descriptions
+    embedding           BLOB,                            -- same model/dimension as offering_embeddings
+    embedding_model     TEXT,
+    embedded_at         TEXT,                            -- ISO 8601 UTC; null until first embed
+    last_change_at      TEXT    NOT NULL                 -- bumped when offering set changes
+);
+CREATE INDEX IF NOT EXISTS ix_agent_profiles_dirty
+    ON agent_profiles(last_change_at)
+    WHERE embedded_at IS NULL OR last_change_at > embedded_at;
+
+-- FTS5 mirror — content_rowid='id' references the stable surrogate PK.
+CREATE VIRTUAL TABLE IF NOT EXISTS agent_profiles_fts USING fts5(
+    agent_name, profile_text,
+    content='agent_profiles', content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+);
+-- Sync triggers: INSERT, DELETE, and UPDATE OF agent_name/profile_text only.
+-- last_change_at / embedded_at writes must NOT re-fire the FTS rebuild
+-- (column-scoped AFTER UPDATE, same lesson as offerings_au from v1.2).
+```
+
+`last_change_at` is bumped inside the same transaction as an offering write
+(insert, update, or tombstone) for the relevant `agent_address`. Cold-start
+backfill runs once per boot and populates `agent_profiles` for every distinct
+`agent_address` in `offerings` with `last_change_at = now()` and
+`embedded_at = null`. `AgentProfileEmbedderService` then drains the dirty queue.
+
+### v1.7 background service — `AgentProfileEmbedderService`
+
+An `IHostedService` that runs after each indexer cycle tick:
+
+- **Dirty queue** — selects all `agent_profiles` rows where
+  `embedded_at IS NULL OR last_change_at > embedded_at` (the
+  `ix_agent_profiles_dirty` partial index makes this fast).
+- **Batch size** — 128 per Voyage call (Voyage's batch endpoint limit).
+- **Cold-start** — full corpus rebuild; budgeted at ~500 agents × ~600 tokens
+  ≈ 300K tokens ≈ $0.018 at current Voyage pricing. Completes within ~10 min.
+- **Steady state** — ~10–30 dirty agents per ~30-min cycle; trivial cost.
+- **Failure mode** — rate-limit hit → log + skip remaining batch → retry next
+  cycle. The agent search endpoint falls back to BM25-only for agents with no
+  embedding yet; cold-start does not break the endpoint.
+- **Model** — reuses `Embeddings:Model` (same as offering embeddings).
 
 ### v1.3 schema migration (V1 + V2 dual-source)
 
@@ -468,7 +525,7 @@ request log row uses `User-Agent` to distinguish `mcp_plugin` from
 |---|---|---|---|
 | `POST /v1/search` | `public-search` | 30 | Same handler as internal `/search`. Accepts extra `offset` field (0–1000) for pagination. |
 | `POST /v1/composeStack` | `public-compose` | 5 | Same handler as `/composeStack`. Accepts extra `chain[]` filter (≤8 entries). |
-| `POST /v1/searchAgents` | `public-search-agents` | 30 | Agent-level search via offering BM25 group-by. Returns `{query, count, results: [{agentAddress, agentName, score, totalOfferings, topOfferings, reputation}]}`. |
+| `POST /v1/searchAgents` | `public-search-agents` | 30 | Agent-level hybrid search (BM25 + dense + Voyage rerank). Returns `{query, count, agents: [{agentAddress, agentName, score, totalOfferings, topOfferings (records), topOfferingNames (string[] mirror), totalJobs, marketplaces, dominantMarketplace, agentScore}]}`. Rate-limit class unchanged at 30/IP/hr; per-call cost higher than v1.6 (embedding + rerank API). |
 | `GET /v1/agentReputation?agent=<addr>` | `public-reputation` | 60 | Cache-only. 404 = not yet evaluated. ETag + 1h Cache-Control. |
 | `GET /v1/agentReputationHistory?agent=&days=<1-90>` | `public-reputation` | 60 | Day-by-day trajectory from `agent_reputation_history`. |
 | `GET /v1/agentRecentJobs?agent=&days=<1-90>&limit=<1-100>` | `public-agent-recent-jobs` | 20 | Per-job on-chain ledger via `ChainEventScanner.ListAgentRecentJobsAsync`. RPC-heavy; tighter limit. Returns `[{jobId, createdAt, status, counterparty, amountUsdc?}]`. |

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using ACP_Metabot.Api.Services;
 
 namespace ACP_Metabot.Api.Models;
 
@@ -18,10 +19,14 @@ public record AgentBrowseOffering(
     [property: JsonPropertyName("reputation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         ReputationSummary? Reputation,
     [property: JsonPropertyName("marketplaceVersion")]
-        string MarketplaceVersion = "v1");
+        string MarketplaceVersion = "v1",
+    [property: JsonPropertyName("pricePercentile"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        PricePercentileDto? PricePercentile = null);
 
 public record AgentBrowseResult(
     [property: JsonPropertyName("agentAddress")] string AgentAddress,
     [property: JsonPropertyName("agentName")]    string AgentName,
     [property: JsonPropertyName("reputation")]   AgentReputationResult Reputation,
-    [property: JsonPropertyName("offerings")]    IReadOnlyList<AgentBrowseOffering> Offerings);
+    [property: JsonPropertyName("offerings")]    IReadOnlyList<AgentBrowseOffering> Offerings,
+    [property: JsonPropertyName("crossPresence"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        CrossPresence? CrossPresence = null);

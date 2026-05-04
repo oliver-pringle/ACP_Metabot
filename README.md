@@ -1,6 +1,6 @@
 # ACP_Metabot — Marketplace Discovery for ACP
 
-A meta-bot for the Virtuals Protocol ACP marketplace. Indexes every offering
+**v1.7.0** — A meta-bot for the Virtuals Protocol ACP marketplace. Indexes every offering
 across all agents (V1 + V2), embeds them, and exposes:
 
 1. **Four paid ACP offerings** for ACP buyers (Butler-routable).
@@ -23,15 +23,15 @@ All `/v1/*` endpoints are public, no API key required. Each has its own per-IP r
 
 | Endpoint                              | Rate limit | Purpose                                                                  |
 |---------------------------------------|------------|--------------------------------------------------------------------------|
-| `POST /v1/search`                     | 30/IP/hr   | Same handler as `search`, accepts `offset` for pagination.              |
+| `POST /v1/search`                     | 30/IP/hr   | Same handler as `search`, accepts `offset` for pagination. Offering hits include `saturation` (nearDuplicateCount + categorySize) and `pricePercentile` (value, peerN, lowN). |
 | `POST /v1/composeStack`               | 5/IP/hr    | Same handler as `composeStack`, accepts `chain` filter.                  |
-| `POST /v1/searchAgents`               | 30/IP/hr   | Agent-level search (groups offering BM25 by agent, returns top-N agents with their best score + top-3 offerings). |
+| `POST /v1/searchAgents`               | 30/IP/hr   | Agent-level search — hybrid (BM25 + dense + Voyage rerank). Returns top-N agents with score, top offerings (records), marketplaces, dominantMarketplace, agentScore. `topOfferingNames` string[] mirror retained for backward compat. |
 | `GET  /v1/agentReputation?agent=…`    | 60/IP/hr   | Cache-only behavioural reputation. 404 = not yet evaluated.              |
 | `GET  /v1/agentReputationHistory?agent=&days=…` | 60/IP/hr | Day-by-day trajectory over up to 90 days.                          |
 | `GET  /v1/agentRecentJobs?agent=&days=&limit=…` | 20/IP/hr | Per-job on-chain ledger (status, counterparty, amount). RPC-heavy. |
-| `GET  /v1/digest?days=&chain=&priceMaxUsdc=&marketplace=…` | 60/IP/hr | New launches + biggest hire-count gainers in window. |
+| `GET  /v1/digest?days=&chain=&priceMaxUsdc=&marketplace=…` | 60/IP/hr | New launches + biggest hire-count gainers in window. `days` cap extended to 90. Pulse fields: `newAgents`, `churnRate`, `cohortSurvival` (≥30d, last 12 weeks), `saturationMap` (global, not filter-scoped), `windowStart`, `partial`. |
 | `GET  /v1/recentHires?days=&limit=…`  | 60/IP/hr   | Top offerings by absolute hire-count delta (gainers only).               |
-| `GET  /v1/agent/{address}`            | 60/IP/hr   | Full agent profile: every offering with descriptions, schemas, prices, per-offering reputation. |
+| `GET  /v1/agent/{address}`            | 60/IP/hr   | Full agent profile: every offering with descriptions, schemas, prices, per-offering `pricePercentile`. Includes `crossPresence` block (V1/V2 per-marketplace footprint, `inBoth`, `dominant`). |
 | `GET  /v1/watches/{id}`               | 60/IP/hr   | Read-only watch status (alive/expired/paused, expiry, alerts fired). Sensitive fields (buyer address, webhook URL) are NOT returned. |
 | `GET  /v1/categories`                 | unlimited  | Canonical marketplace categories with `offeringCount` per category.       |
 | `GET  /v1/health`                     | unlimited  | Diagnostic: corpus size with V1 / V2 split, last fetch, classifier readiness. |
@@ -44,6 +44,7 @@ Built off the BasicBot boilerplate. Live on Base mainnet. Design specs:
 - `docs/superpowers/specs/2026-04-26-watchoffering-design.md` — watchOffering spec
 - `docs/superpowers/specs/2026-04-28-agent-reputation-v2-design.md` — agentReputation v2 (behavioural) spec
 - `docs/superpowers/specs/2026-04-30-sharper-core-engine-design.md` — hybrid search + fielded filters + reputation trajectory (v1.2)
+- `docs/superpowers/specs/2026-05-04-metabot-v1-7-meta-search-design.md` — hybrid agent search + cross-presence + saturation + pulse digest (v1.7)
 
 ## Architecture
 
@@ -78,10 +79,18 @@ acp-find-plugin / public callers ────HTTPS──►│ POST /watches/{id
                                              ├─ ReputationWarmerService   (daily 02:00 UTC)
                                              ├─ LifetimeSnapshotService   (daily 03:00 UTC)
                                              ├─ MetricsWriterService      (request log)
-                                             └─ WatchPollerBackgroundService (30-min tick)
+                                             ├─ WatchPollerBackgroundService (30-min tick)
+                                             │
+                                             │  v1.7 additions:
+                                             ├─ AgentProfileEmbedderService (dirty-queue drain, Voyage batch)
+                                             ├─ AgentSearchService          (hybrid BM25 + dense + RRF + rerank)
+                                             ├─ SaturationCalculator        (per-offering nearDuplicateCount)
+                                             ├─ PricePercentileCalculator   (within category × marketplace)
+                                             └─ CrossPresenceBuilder        (V1/V2 per-marketplace footprint)
                                                   └─ SQLite (offerings + embeddings + watches
                                                               + reputation cache + chain blocks
-                                                              + request log + watch_seen)
+                                                              + request log + watch_seen
+                                                              + agent_profiles + agent_profiles_fts)
 ```
 
 The TS sidecar speaks ACP v2 (the SDK is Node-only). The C# API holds the

@@ -8,7 +8,7 @@ import {
 export const search: Offering = {
   name: "search",
   description:
-    "Semantic search across the ACP marketplace. Given a natural-language query (e.g. \"close a position on GMX for under 0.20 USDC\"), returns ranked offerings with agent name, agent address, offering name, price, and a similarity score 0-1. Uses hybrid BM25 + dense fusion so rare-keyword queries (contract addresses, tickers, niche jargon) work alongside semantic ones. Optional filters: priceMaxUsdc, chain, minReputation, freshness. Response includes a bestMatch field when the top result scores above 0.8.",
+    "Semantic search across the ACP marketplace. Given a natural-language query (e.g. \"close a position on GMX for under 0.20 USDC\"), returns ranked offerings with agent name, agent address, offering name, price, and a similarity score 0-1. Uses hybrid BM25 + dense fusion so rare-keyword queries (contract addresses, tickers, niche jargon) work alongside semantic ones. Optional filters: priceMaxUsdc, chain, minReputation, freshness. Response includes a bestMatch field when the top result scores above 0.8. Each offering hit now includes saturation (per-category near-duplicate count) and pricePercentile (within category × marketplace).",
   requirementSchema: {
     type: "object",
     properties: {
@@ -55,6 +55,95 @@ export const search: Offering = {
       }
     },
     required: ["query"]
+  },
+  deliverableSchema: {
+    type: "object",
+    required: ["query", "count", "results"],
+    properties: {
+      query: { type: "string" },
+      count: { type: "integer" },
+      bestMatch: {
+        type: "object",
+        nullable: true,
+        properties: {
+          agentAddress: { type: "string" },
+          offeringName: { type: "string" },
+          score: { type: "number" },
+        },
+      },
+      results: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["offeringId", "agentName", "agentAddress", "offeringName", "description", "priceUsdc", "priceType", "chain", "score"],
+          properties: {
+            offeringId: { type: "integer" },
+            agentName: { type: "string" },
+            agentAddress: { type: "string" },
+            offeringName: { type: "string" },
+            description: { type: "string" },
+            priceUsdc: { type: "number" },
+            priceType: { type: "string" },
+            chain: { type: "string" },
+            score: { type: "number" },
+            saturation: {
+              type: "object",
+              description: "Per-category near-duplicate saturation. nearDuplicateCount = offerings with cosine similarity ≥ threshold in the same category; categorySize = total offerings in category.",
+              properties: {
+                nearDuplicateCount: { type: "integer" },
+                categorySize: { type: "integer" },
+              },
+            },
+            pricePercentile: {
+              type: "object",
+              description: "Price position within the same category × marketplace cohort. value = percentile 0-100 (null when peerN < lowNThreshold); lowN = true when fewer than 5 peers exist.",
+              properties: {
+                value: { type: "number", nullable: true },
+                peerN: { type: "integer" },
+                lowN: { type: "boolean" },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  deliverableExample: {
+    query: "close a position on GMX for under 0.20 USDC",
+    count: 2,
+    bestMatch: {
+      agentAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      offeringName: "gmx_close_position",
+      score: 0.87,
+    },
+    results: [
+      {
+        offeringId: 5512,
+        agentName: "GMXCloser",
+        agentAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        offeringName: "gmx_close_position",
+        description: "Build calldata to close a GMX perp position.",
+        priceUsdc: 0.15,
+        priceType: "per-call",
+        chain: "arbitrum",
+        score: 0.87,
+        saturation: { nearDuplicateCount: 1, categorySize: 9 },
+        pricePercentile: { value: 41.2, peerN: 9, lowN: false },
+      },
+      {
+        offeringId: 5489,
+        agentName: "PerpHelper",
+        agentAddress: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        offeringName: "perp_close",
+        description: "Close any GMX/dYdX/Hyperliquid perp position.",
+        priceUsdc: 0.18,
+        priceType: "per-call",
+        chain: "arbitrum",
+        score: 0.81,
+        saturation: { nearDuplicateCount: 2, categorySize: 9 },
+        pricePercentile: { value: 55.5, peerN: 9, lowN: false },
+      },
+    ],
   },
   validate(req) {
     const q = requireString(req.query, "query", 2048);

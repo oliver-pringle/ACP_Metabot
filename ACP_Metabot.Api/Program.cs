@@ -18,6 +18,7 @@ builder.Services.Configure<KestrelServerOptions>(options =>
 });
 
 builder.Services.AddSingleton<Db>();
+builder.Services.AddSingleton<AgentProfileRepository>();
 builder.Services.AddSingleton<OfferingRepository>();
 builder.Services.AddSingleton<WatchRepository>();
 builder.Services.AddSingleton<AgentReputationCacheRepository>();
@@ -34,6 +35,7 @@ builder.Services.AddSingleton<ScoreCalculator>();
 builder.Services.AddSingleton<VoyageEmbeddingProvider>();
 builder.Services.AddSingleton<IEmbeddingProvider>(sp => sp.GetRequiredService<VoyageEmbeddingProvider>());
 builder.Services.AddSingleton<VoyageRerankProvider>();
+builder.Services.AddSingleton<IRerankProvider, VoyageRerankAdapter>();
 builder.Services.AddSingleton<IClaudeClient, ClaudeApiClient>();
 // Marketplace sources are pluggable via Indexer:Source.
 //   "acp-api"   — live upstream V1 + V2 (V2 toggleable via Indexer:V2:Enabled, default true)
@@ -64,7 +66,13 @@ switch (indexerSource)
 builder.Services.AddSingleton<ReputationService>();
 builder.Services.AddSingleton<CategoryService>();
 builder.Services.AddSingleton<DigestService>();
+builder.Services.AddSingleton<SaturationCalculator>(_ => new SaturationCalculator(
+    threshold: builder.Configuration.GetValue<double?>("Saturation:Threshold") ?? 0.85));
+builder.Services.AddSingleton<PricePercentileCalculator>(_ => new PricePercentileCalculator(
+    lowNThreshold: builder.Configuration.GetValue<int?>("PricePercentile:LowNThreshold") ?? 5));
 builder.Services.AddSingleton<SearchService>();
+builder.Services.AddSingleton<CrossPresenceBuilder>();
+builder.Services.AddSingleton<AgentSearchService>();
 builder.Services.AddSingleton<StackComposerService>();
 builder.Services.AddSingleton<WebhookDeliveryService>();
 builder.Services.AddSingleton<WatchService>();
@@ -90,6 +98,7 @@ builder.Services.AddSingleton<ReputationWarmerService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ReputationWarmerService>());
 builder.Services.AddSingleton<MetricsWriterService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MetricsWriterService>());
+builder.Services.AddHostedService<AgentProfileEmbedderService>();
 
 builder.Services.AddOpenApi();
 
@@ -437,7 +446,7 @@ async Task<IResult> HandleReputation(AgentReputationRequest req,
 async Task<IResult> HandleDigest(int? days, string? marketplace,
     string[]? chain, double? priceMaxUsdc, DigestService svc)
 {
-    var window = days is null ? 1 : Math.Clamp(days.Value, 1, 30);
+    var window = days is null ? 1 : Math.Clamp(days.Value, 1, 90);
     var marketplaceFilter = NormalizeMarketplace(marketplace);
     if (marketplace is not null && marketplaceFilter is null)
         return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
@@ -461,7 +470,9 @@ async Task<IResult> HandleDigest(int? days, string? marketplace,
 }
 
 async Task<IResult> HandleBrowseAgent(string address,
-    OfferingRepository repo, ReputationService reputation)
+    OfferingRepository repo, ReputationService reputation,
+    CrossPresenceBuilder crossPresence, PricePercentileCalculator pricePercentile,
+    SearchService search)
 {
     if (string.IsNullOrWhiteSpace(address))
         return Results.BadRequest(new { error = "agentAddress is required" });
@@ -477,6 +488,7 @@ async Task<IResult> HandleBrowseAgent(string address,
         return Results.NotFound(new { error = "agent not found" });
 
     var rep = reputation.Build(offerings, offeringName: null);
+    var cp = await crossPresence.BuildAsync(addr);
 
     var browseOfferings = offerings
         .OrderByDescending(o => o.UsageCount)
@@ -496,6 +508,9 @@ async Task<IResult> HandleBrowseAgent(string address,
                     // rather than failing the whole browse call.
                 }
             }
+            var category = search.GetCategoryForOffering(o.Id) ?? string.Empty;
+            var mv = o.MarketplaceVersion ?? "v1";
+            var pp = pricePercentile.Compute(o.Id, category, mv, o.PriceUsdc);
             return new AgentBrowseOffering(
                 OfferingId: o.Id,
                 OfferingName: o.OfferingName,
@@ -508,7 +523,8 @@ async Task<IResult> HandleBrowseAgent(string address,
                 FirstSeenAt: o.FirstSeenAt.ToString("O"),
                 LastSeenAt: o.LastSeenAt.ToString("O"),
                 Reputation: reputation.BuildSearchSummary(o),
-                MarketplaceVersion: o.MarketplaceVersion);
+                MarketplaceVersion: mv,
+                PricePercentile: new PricePercentileDto(pp.Value, pp.PeerN, pp.LowN));
         })
         .ToArray();
 
@@ -516,7 +532,8 @@ async Task<IResult> HandleBrowseAgent(string address,
         AgentAddress: addr,
         AgentName: offerings[0].AgentName,
         Reputation: rep,
-        Offerings: browseOfferings);
+        Offerings: browseOfferings,
+        CrossPresence: cp);
 
     return Results.Ok(result);
 }
@@ -527,8 +544,10 @@ app.MapPost("/agentReputation", HandleReputation);
 app.MapGet("/digest", (int? days, string? marketplace, string[]? chain, double? priceMaxUsdc, DigestService svc)
     => HandleDigest(days, marketplace, chain, priceMaxUsdc, svc));
 app.MapGet("/agent/{address}", (string address,
-    OfferingRepository repo, ReputationService reputation)
-    => HandleBrowseAgent(address, repo, reputation));
+    OfferingRepository repo, ReputationService reputation,
+    CrossPresenceBuilder crossPresence, PricePercentileCalculator pricePercentile,
+    SearchService search)
+    => HandleBrowseAgent(address, repo, reputation, crossPresence, pricePercentile, search));
 app.MapGet("/categories", (CategoryService svc) => Results.Ok(new { categories = svc.Categories }));
 
 // Public gateway — same logic, no X-API-Key, IP rate-limited.
@@ -596,8 +615,11 @@ app.MapGet("/v1/digest", (int? days, string? marketplace, string[]? chain, doubl
     => HandleDigest(days, marketplace, chain, priceMaxUsdc, svc))
     .RequireRateLimiting("public-digest");
 app.MapGet("/v1/agent/{address}", (string address,
-    OfferingRepository repo, ReputationService reputation)
-    => HandleBrowseAgent(address, repo, reputation)).RequireRateLimiting("public-browse-agent");
+    OfferingRepository repo, ReputationService reputation,
+    CrossPresenceBuilder crossPresence, PricePercentileCalculator pricePercentile,
+    SearchService search)
+    => HandleBrowseAgent(address, repo, reputation, crossPresence, pricePercentile, search))
+    .RequireRateLimiting("public-browse-agent");
 // Static list — no per-IP limit; CDN-cacheable in front of Caddy if abuse appears.
 // Now includes offeringCount per category (computed from the live corpus
 // so it reflects active, non-tombstoned offerings).
@@ -734,11 +756,12 @@ app.MapGet("/v1/recentHires",
         HandleRecentHires(days, limit, marketplace, chain, priceMaxUsdc, category, svc))
     .RequireRateLimiting("public-recent-hires");
 
-// Public agent-level search. Distinct from /v1/search which ranks offerings;
-// this groups offering-level BM25 hits by agent so the response answers
-// "who are the providers in this space" rather than "which offering matches".
+// Public agent-level search (v1.7). Dispatches through AgentSearchService which
+// runs a BM25 + dense cosine + RRF fusion + optional rerank pipeline and enriches
+// each hit with TopOfferings records, cross-presence, and cached agentScore.
+// Replaces the v1.6 direct OfferingRepository.SearchAgentsAsync call.
 async Task<IResult> HandleSearchAgents(SearchAgentsRequest req,
-    OfferingRepository repo, ReputationService reputation, CancellationToken ct)
+    AgentSearchService svc, CancellationToken ct)
 {
     if (string.IsNullOrWhiteSpace(req.Query))
         return Results.BadRequest(new { error = "query is required" });
@@ -749,24 +772,15 @@ async Task<IResult> HandleSearchAgents(SearchAgentsRequest req,
     if (req.Marketplace is not null && marketplaceFilter is null)
         return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
 
-    var agents = await repo.SearchAgentsAsync(req.Query, limit, marketplaceFilter);
-    var results = agents.Select(a => new
-    {
-        agentAddress = a.AgentAddress,
-        agentName = a.AgentName,
-        score = Math.Round(a.Score, 4),
-        totalOfferings = a.TotalOfferings,
-        topOfferings = a.TopOfferings,
-        reputation = reputation.BuildSearchSummary(a.AgentAddress, a.TotalJobs)
-    }).ToArray();
-    return Results.Ok(new { query = req.Query, count = results.Length, results });
+    var hits = await svc.SearchAsync(req.Query, limit, marketplaceFilter, ct);
+    return Results.Ok(new { query = req.Query, count = hits.Count, agents = hits });
 }
 app.MapPost("/searchAgents",
-    (SearchAgentsRequest req, OfferingRepository repo, ReputationService reputation,
-        CancellationToken ct) => HandleSearchAgents(req, repo, reputation, ct));
+    (SearchAgentsRequest req, AgentSearchService svc,
+        CancellationToken ct) => HandleSearchAgents(req, svc, ct));
 app.MapPost("/v1/searchAgents",
-    (SearchAgentsRequest req, OfferingRepository repo, ReputationService reputation,
-        CancellationToken ct) => HandleSearchAgents(req, repo, reputation, ct))
+    (SearchAgentsRequest req, AgentSearchService svc,
+        CancellationToken ct) => HandleSearchAgents(req, svc, ct))
     .RequireRateLimiting("public-search-agents");
 
 // Per-agent on-chain job ledger. RPC-heavy — every call hits the chain via

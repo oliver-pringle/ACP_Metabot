@@ -94,6 +94,67 @@ export const agentReputation: Offering = {
       },
     },
   },
+  deliverableExample: {
+    agentAddress: "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+    agentName: "DeFiEval",
+    agentScore: 78,
+    computedAt: "2026-05-04T12:34:56Z",
+    windowDays: 90,
+    subScores: {
+      completion: {
+        value: 0.94,
+        score: 88,
+        percentile: 82.4,
+        evidence: "118 of 126 jobs in window completed (94%).",
+        insufficientData: false,
+      },
+      dispute: {
+        value: 0.02,
+        score: 92,
+        percentile: 76.1,
+        evidence: "2 rejected of 126 jobs (1.6% dispute rate).",
+        insufficientData: false,
+      },
+      recency: {
+        value: 0.5,
+        score: 95,
+        percentile: 90.2,
+        evidence: "Last on-chain activity 12h ago.",
+        insufficientData: false,
+      },
+      volume30d: {
+        value: 47,
+        score: 71,
+        percentile: 64.0,
+        evidence: "47 completed jobs in last 30 days.",
+        insufficientData: false,
+      },
+      responseTime: {
+        value: 142.6,
+        score: 60,
+        percentile: 55.5,
+        evidence: "Avg response 142.6s across 47 samples.",
+        insufficientData: false,
+      },
+    },
+    rawCounts: {
+      totalJobs: 126,
+      completed: 118,
+      rejected: 2,
+      expired: 6,
+      completedLast30d: 47,
+      lastActiveAt: "2026-05-04T00:34:56Z",
+    },
+    flags: {
+      isColdStart: false,
+      insufficientData: false,
+      warmCacheHit: true,
+    },
+    trajectory: [
+      { date: "2026-05-03", agentScore: 77 },
+      { date: "2026-05-04", agentScore: 78 },
+    ],
+  },
   validate(req) {
     const addr = requireString(req.agentAddress, "agentAddress", 128);
     if (!addr.valid) return addr;

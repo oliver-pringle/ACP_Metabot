@@ -28,9 +28,77 @@ public record OfferingGainer(
     [property: JsonPropertyName("marketplaceVersion")]
         string MarketplaceVersion = "v1");
 
-public record DigestResult(
-    [property: JsonPropertyName("windowDays")]         int WindowDays,
-    [property: JsonPropertyName("snapshotComparison")] string SnapshotComparison,
-    [property: JsonPropertyName("newOfferings")]       IReadOnlyList<NewOffering> NewOfferings,
-    [property: JsonPropertyName("gainers")]            IReadOnlyList<OfferingGainer> Gainers,
-    [property: JsonPropertyName("computedAt")]         string ComputedAt);
+// ── New Agents ────────────────────────────────────────────────────────────────
+
+public record NewAgentRow(
+    [property: JsonPropertyName("address")]          string Address,
+    [property: JsonPropertyName("name")]             string Name,
+    [property: JsonPropertyName("marketplace")]      string Marketplace,
+    [property: JsonPropertyName("firstSeenAt")]      string FirstSeenAt,
+    [property: JsonPropertyName("offeringCount")]    int OfferingCount);
+
+public record NewAgentsBlock(
+    [property: JsonPropertyName("count")]   int Count,
+    [property: JsonPropertyName("agents")]  IReadOnlyList<NewAgentRow> Agents);
+
+// ── Churn Rate ────────────────────────────────────────────────────────────────
+
+public record ChurnRate(
+    [property: JsonPropertyName("rate")]           double Rate,
+    [property: JsonPropertyName("churnedCount")]   int ChurnedCount,
+    [property: JsonPropertyName("baselineCount")]  int BaselineCount);
+
+// ── Cohort Survival ───────────────────────────────────────────────────────────
+
+public record CohortSurvivalRow(
+    [property: JsonPropertyName("cohortWeek")]     string CohortWeek,
+    [property: JsonPropertyName("cohortStart")]    string CohortStart,
+    [property: JsonPropertyName("cohortSize")]     int CohortSize,
+    [property: JsonPropertyName("surviving")]      int Surviving,
+    [property: JsonPropertyName("survivalRate")]   double SurvivalRate);
+
+// ── Saturation Map ────────────────────────────────────────────────────────────
+
+public record SaturationMapRow(
+    [property: JsonPropertyName("category")]       string Category,
+    [property: JsonPropertyName("total")]          int Total,
+    [property: JsonPropertyName("saturatedCount")] int SaturatedCount,
+    [property: JsonPropertyName("saturationPct")]  double SaturationPct);
+
+// ── Digest Result ─────────────────────────────────────────────────────────────
+
+public class DigestResult
+{
+    [JsonPropertyName("windowDays")]
+    public int WindowDays { get; set; }
+
+    [JsonPropertyName("windowStart")]
+    public string WindowStart { get; set; } = "";
+
+    [JsonPropertyName("snapshotComparison")]
+    public string SnapshotComparison { get; set; } = "";
+
+    [JsonPropertyName("partial")]
+    public bool Partial { get; set; }
+
+    [JsonPropertyName("newOfferings")]
+    public IReadOnlyList<NewOffering> NewOfferings { get; set; } = Array.Empty<NewOffering>();
+
+    [JsonPropertyName("gainers")]
+    public IReadOnlyList<OfferingGainer> Gainers { get; set; } = Array.Empty<OfferingGainer>();
+
+    [JsonPropertyName("newAgents")]
+    public NewAgentsBlock NewAgents { get; set; } = new NewAgentsBlock(0, Array.Empty<NewAgentRow>());
+
+    [JsonPropertyName("churnRate")]
+    public ChurnRate ChurnRate { get; set; } = new ChurnRate(0.0, 0, 0);
+
+    [JsonPropertyName("cohortSurvival"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<CohortSurvivalRow>? CohortSurvival { get; set; }
+
+    [JsonPropertyName("saturationMap")]
+    public IReadOnlyList<SaturationMapRow> SaturationMap { get; set; } = Array.Empty<SaturationMapRow>();
+
+    [JsonPropertyName("computedAt")]
+    public string ComputedAt { get; set; } = "";
+}

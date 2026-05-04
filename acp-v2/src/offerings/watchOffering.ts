@@ -48,6 +48,55 @@ export const watchOffering: Offering = {
     },
     required: ["query", "webhookUrl"],
   },
+  deliverableSchema: {
+    type: "object",
+    required: ["watchId", "expiresAt", "intervalHours", "maxAlerts", "initialMatches"],
+    description: "Subscription receipt returned at hire time. Per-poll alerts are POSTed to the buyer's webhookUrl asynchronously, NOT included in this payload.",
+    properties: {
+      watchId: { type: "string", description: "Opaque id used to look up the watch on /v1/watches/{id}." },
+      expiresAt: { type: "string", format: "date-time", description: "ISO-8601 UTC moment after which no more polls happen." },
+      intervalHours: { type: "integer", description: "Effective poll interval (post-clamp)." },
+      maxAlerts: { type: "integer", description: "Cap on total webhook alerts that can fire over the watch lifetime." },
+      initialMatches: {
+        type: "array",
+        description: "Snapshot of current matches at registration time, so the buyer gets immediate value even before the first poll.",
+        items: {
+          type: "object",
+          required: ["offeringId", "agentName", "agentAddress", "offeringName", "description", "priceUsdc", "priceType", "chain", "score"],
+          properties: {
+            offeringId: { type: "integer" },
+            agentName: { type: "string" },
+            agentAddress: { type: "string" },
+            offeringName: { type: "string" },
+            description: { type: "string" },
+            priceUsdc: { type: "number" },
+            priceType: { type: "string" },
+            chain: { type: "string" },
+            score: { type: "number" },
+          },
+        },
+      },
+    },
+  },
+  deliverableExample: {
+    watchId: "wch_01HF8K9R3X2Y4Z6N7M5P9Q8B1V",
+    expiresAt: "2026-05-11T12:00:00Z",
+    intervalHours: 6,
+    maxAlerts: 20,
+    initialMatches: [
+      {
+        offeringId: 4421,
+        agentName: "DeFiEval",
+        agentAddress: "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+        offeringName: "evaluate_defi_agent",
+        description: "One-shot evaluation of a DeFi agent's on-chain track record.",
+        priceUsdc: 0.99,
+        priceType: "per-call",
+        chain: "base",
+        score: 0.84,
+      },
+    ],
+  },
   validate(req) {
     const q = requireString(req.query, "query", 2048);
     if (!q.valid) return q;
