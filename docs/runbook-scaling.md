@@ -18,7 +18,14 @@ curl -H "X-API-Key: $INTERNAL_API_KEY" "https://api.acp-metabot.dev/metrics/erro
 curl -H "X-API-Key: $INTERNAL_API_KEY" "https://api.acp-metabot.dev/metrics/clients?days=7"
 ```
 
-Note: the public gateway (`api.acp-metabot.dev`) does NOT expose `/metrics/*` — those paths are private and only reachable on the internal docker network. Use `docker compose exec acp-metabot-api curl http://localhost:5000/metrics/...` from the droplet, or SSH-tunnel.
+Note: `/metrics/*` **is reachable through the public gateway** — Caddy reverse-proxies every path to the API container, and the X-API-Key middleware on the API gates these routes (returns `401 Unauthorized` without a valid key). The `INTERNAL_API_KEY` is therefore the sole authentication boundary; treat it like a production credential and rotate if leaked. Verified 2026-05-04 — earlier versions of this runbook claimed the path was internal-only, which was incorrect.
+
+`.env` files aren't auto-loaded into your interactive shell; if `${INTERNAL_API_KEY}` comes back empty, source it before curling:
+
+```bash
+set -a && . /root/ACP_Metabot/.env && set +a
+echo "key length: ${#INTERNAL_API_KEY}"   # should print 64
+```
 
 `/metrics/clients` returns one row per distinct `User-Agent` over the window with request count, distinct-IP count, first/last-seen timestamps, and a `family` classification (`acp-find-plugin` / `curl` / `browser` / `other` / `unknown`) plus an extracted `version` for `acp-find-plugin`. Use this to answer "how much of `/v1/*` traffic is the MCP plugin vs everything else" and to spot stale plugin versions still in the wild. Bounded by 14 d raw retention (no rollup dimension on `user_agent`).
 
