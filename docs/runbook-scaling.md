@@ -83,6 +83,8 @@ The beacon is opt-out via `ACP_DISABLE_BOOT_BEACON=1`. Self-hosted gateways (any
 
 **Effort:** ~2 hours. Single-file change. **Risk:** Low — cache miss is correct behaviour.
 
+**v1.7 background workers:** `AgentProfileEmbedderService` (added in v1.7) drains the `agent_profiles` dirty queue every 5 minutes in batches of up to 128. Cold-start runs `BackfillFromOfferingsAsync` once. Steady-state cost is ~10–30 dirty agents/cycle = trivial. Cold-start cost is one-time: ~500 agents × ~600 tokens each ≈ $0.018 at Voyage 4 pricing. The same Voyage account quota that gates `/v1/search` and `/v1/searchAgents` also gates this — if Voyage rate-limits, embeds defer to the next cycle (rows stay dirty, no data loss).
+
 ## Lever 2 — Quantize embeddings to int8
 
 **Signal:** Container memory exceeds 70% of droplet RAM, OR `corpus.count × 1024 × 4 bytes > 200 MB` (corpus count surfaced via `/v1/health`).
@@ -119,7 +121,7 @@ The beacon is opt-out via `ACP_DISABLE_BOOT_BEACON=1`. Self-hosted gateways (any
 |---|---|---|
 | `public-search` | `POST /v1/search` | 30 |
 | `public-compose` | `POST /v1/composeStack` | 5 |
-| `public-search-agents` | `POST /v1/searchAgents` | 30 |
+| `public-search-agents` | `POST /v1/searchAgents` | 30 (v1.7: now embedding + rerank backed; per-call cost higher than v1.6 BM25-only) |
 | `public-reputation` | `GET /v1/agentReputation*` | 60 |
 | `public-digest` | `GET /v1/digest` | 60 |
 | `public-recent-hires` | `GET /v1/recentHires` | 60 |
