@@ -839,8 +839,23 @@ app.MapGet("/metrics/errors",
         Results.Ok(await repo.RecentErrorsAsync(days ?? 1, limit ?? 100)));
 
 app.MapGet("/metrics/clients",
-    async (int? days, int? limit, RequestMetricsRepository repo) =>
-        Results.Ok(await repo.ClientsAsync(days ?? 7, limit ?? 50)));
+    async (int? days, int? limit, string? family, string? excludeFamilies,
+           RequestMetricsRepository repo) =>
+    {
+        var exclude = string.IsNullOrWhiteSpace(excludeFamilies)
+            ? null
+            : excludeFamilies.Split(',', StringSplitOptions.RemoveEmptyEntries
+                                       | StringSplitOptions.TrimEntries);
+        return Results.Ok(await repo.ClientsAsync(days ?? 7, limit ?? 50, family, exclude));
+    });
+
+app.MapGet("/metrics/clients/summary",
+    async (int? days, RequestMetricsRepository repo) =>
+        Results.Ok(await repo.ClientsSummaryAsync(days ?? 7)));
+
+app.MapGet("/metrics/clients/endpoints",
+    async (int? days, int? limit, string? family, RequestMetricsRepository repo) =>
+        Results.Ok(await repo.ClientEndpointsAsync(days ?? 7, limit ?? 50, family)));
 
 app.MapPost("/watches", async (RegisterWatchRequest req, WatchService svc, CancellationToken ct) =>
 {

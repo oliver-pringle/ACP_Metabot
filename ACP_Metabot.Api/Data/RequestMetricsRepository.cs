@@ -59,6 +59,24 @@ public record MetricsClientRow(
     long UniqueIps,
     string? FirstSeenTs,
     string? LastSeenTs);
+
+// Per-family rollup. `DistinctUserAgents` counts distinct UA strings
+// inside the family — useful for spotting plugin version fragmentation
+// (one family, many versions).
+public record MetricsClientFamilySummaryRow(
+    string Family,
+    long Count,
+    long UniqueIps,
+    long DistinctUserAgents);
+
+// Per-endpoint rollup, optionally scoped to one family. Used to answer
+// "what endpoints does curl/8.5.0 hit?" — when `family=curl` is passed
+// to /metrics/clients/endpoints, the row counts are restricted to the
+// curl traffic only.
+public record MetricsClientEndpointRow(
+    string Endpoint,
+    long Count,
+    long UniqueIps);
 // ---------------------------------------------------------------------
 
 internal static class UserAgentClassifier
@@ -427,11 +445,39 @@ public class RequestMetricsRepository
         return result;
     }
 
+    // SQL CTE that classifies each request_log row by user-agent family.
+    // KEEP IN SYNC with UserAgentClassifier.Classify(). The C# classifier
+    // remains the canonical source for per-row Family/Version on returned
+    // rows; this CTE exists so SQL-side filtering and grouping by family
+    // can apply BEFORE LIMIT/GROUP BY.
+    private const string ClassifiedCte = @"
+        WITH classified AS (
+            SELECT
+                COALESCE(user_agent, '') AS ua,
+                remote_ip,
+                endpoint,
+                ts,
+                CASE
+                    WHEN user_agent IS NULL OR user_agent = ''        THEN 'unknown'
+                    WHEN user_agent LIKE 'acp-find-plugin/%'          THEN 'acp-find-plugin'
+                    WHEN user_agent LIKE 'curl/%'                     THEN 'curl'
+                    WHEN user_agent LIKE 'Mozilla/%'                  THEN 'browser'
+                    ELSE 'other'
+                END AS family
+            FROM request_log
+            WHERE ts >= $c
+        )";
+
     // Distinct user_agent strings + per-UA count and unique-IP count.
     // Bounded by raw retention (14d) since the rollup tables don't
     // dimension by user_agent. Used by /metrics/clients to answer
     // "how much of /v1/* traffic is the MCP plugin vs everything else".
-    public async Task<List<MetricsClientRow>> ClientsAsync(int days, int limit)
+    //
+    // `family` filters to one family (e.g. "acp-find-plugin"). `excludeFamilies`
+    // drops listed families from the result. Both are applied in SQL so LIMIT
+    // counts the right rows. Pass either, both, or neither.
+    public async Task<List<MetricsClientRow>> ClientsAsync(
+        int days, int limit, string? family = null, IReadOnlyList<string>? excludeFamilies = null)
     {
         days  = Math.Clamp(days, 1, 14);
         limit = Math.Clamp(limit, 1, 200);
@@ -439,35 +485,139 @@ public class RequestMetricsRepository
 
         await using var conn = _db.OpenConnection();
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"
+        cmd.Parameters.AddWithValue("$c",   cutoff);
+        cmd.Parameters.AddWithValue("$lim", limit);
+
+        var whereClauses = new List<string>();
+        if (!string.IsNullOrWhiteSpace(family))
+        {
+            whereClauses.Add("family = $family");
+            cmd.Parameters.AddWithValue("$family", family.ToLowerInvariant());
+        }
+        if (excludeFamilies is { Count: > 0 })
+        {
+            var paramNames = new List<string>(excludeFamilies.Count);
+            for (var i = 0; i < excludeFamilies.Count; i++)
+            {
+                var p = $"$ex{i}";
+                paramNames.Add(p);
+                cmd.Parameters.AddWithValue(p, excludeFamilies[i].ToLowerInvariant());
+            }
+            whereClauses.Add($"family NOT IN ({string.Join(",", paramNames)})");
+        }
+        var whereSql = whereClauses.Count == 0 ? "" : "WHERE " + string.Join(" AND ", whereClauses);
+
+        cmd.CommandText = $@"
+            {ClassifiedCte}
             SELECT
-                COALESCE(user_agent, '')  AS ua,
+                ua,
                 COUNT(*)                  AS c,
                 COUNT(DISTINCT remote_ip) AS uniq_ips,
                 MIN(ts)                   AS first_seen,
                 MAX(ts)                   AS last_seen
-            FROM request_log
-            WHERE ts >= $c
+            FROM classified
+            {whereSql}
             GROUP BY ua
             ORDER BY c DESC
             LIMIT $lim;";
-        cmd.Parameters.AddWithValue("$c",   cutoff);
-        cmd.Parameters.AddWithValue("$lim", limit);
 
         var result = new List<MetricsClientRow>();
         await using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
             var ua = reader.GetString(0);
-            var (family, version) = UserAgentClassifier.Classify(ua);
+            var (fam, version) = UserAgentClassifier.Classify(ua);
             result.Add(new MetricsClientRow(
-                Family:       family,
+                Family:       fam,
                 Version:      version,
                 RawUserAgent: ua,
                 Count:        reader.GetInt64(1),
                 UniqueIps:    reader.GetInt64(2),
                 FirstSeenTs:  reader.IsDBNull(3) ? null : reader.GetString(3),
                 LastSeenTs:   reader.IsDBNull(4) ? null : reader.GetString(4)));
+        }
+        return result;
+    }
+
+    // Per-family summary: total request count, unique IPs, and the number
+    // of distinct UA strings observed inside each family. The last column
+    // is what tells you whether a family is one client or many — e.g.
+    // acp-find-plugin family with distinctUserAgents=5 means 5 versions
+    // are in the wild.
+    public async Task<List<MetricsClientFamilySummaryRow>> ClientsSummaryAsync(int days)
+    {
+        days = Math.Clamp(days, 1, 14);
+        var cutoff = DateTime.UtcNow.AddDays(-days).ToString("O", CultureInfo.InvariantCulture);
+
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.Parameters.AddWithValue("$c", cutoff);
+        cmd.CommandText = $@"
+            {ClassifiedCte}
+            SELECT
+                family,
+                COUNT(*)                  AS c,
+                COUNT(DISTINCT remote_ip) AS uniq_ips,
+                COUNT(DISTINCT ua)        AS distinct_uas
+            FROM classified
+            GROUP BY family
+            ORDER BY c DESC;";
+
+        var result = new List<MetricsClientFamilySummaryRow>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new MetricsClientFamilySummaryRow(
+                Family:             reader.GetString(0),
+                Count:              reader.GetInt64(1),
+                UniqueIps:          reader.GetInt64(2),
+                DistinctUserAgents: reader.GetInt64(3)));
+        }
+        return result;
+    }
+
+    // Per-endpoint counts, optionally restricted to one family. Use with
+    // `family=curl` to discover what's behind a high-volume non-plugin
+    // family — e.g. health-check loops vs. real /v1/search abuse.
+    public async Task<List<MetricsClientEndpointRow>> ClientEndpointsAsync(
+        int days, int limit, string? family = null)
+    {
+        days  = Math.Clamp(days, 1, 14);
+        limit = Math.Clamp(limit, 1, 200);
+        var cutoff = DateTime.UtcNow.AddDays(-days).ToString("O", CultureInfo.InvariantCulture);
+
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.Parameters.AddWithValue("$c",   cutoff);
+        cmd.Parameters.AddWithValue("$lim", limit);
+
+        var familyClause = "";
+        if (!string.IsNullOrWhiteSpace(family))
+        {
+            familyClause = "WHERE family = $family";
+            cmd.Parameters.AddWithValue("$family", family.ToLowerInvariant());
+        }
+
+        cmd.CommandText = $@"
+            {ClassifiedCte}
+            SELECT
+                endpoint,
+                COUNT(*)                  AS c,
+                COUNT(DISTINCT remote_ip) AS uniq_ips
+            FROM classified
+            {familyClause}
+            GROUP BY endpoint
+            ORDER BY c DESC
+            LIMIT $lim;";
+
+        var result = new List<MetricsClientEndpointRow>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            result.Add(new MetricsClientEndpointRow(
+                Endpoint:  reader.GetString(0),
+                Count:     reader.GetInt64(1),
+                UniqueIps: reader.GetInt64(2)));
         }
         return result;
     }

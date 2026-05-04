@@ -27,7 +27,27 @@ set -a && . /root/ACP_Metabot/.env && set +a
 echo "key length: ${#INTERNAL_API_KEY}"   # should print 64
 ```
 
-`/metrics/clients` returns one row per distinct `User-Agent` over the window with request count, distinct-IP count, first/last-seen timestamps, and a `family` classification (`acp-find-plugin` / `curl` / `browser` / `other` / `unknown`) plus an extracted `version` for `acp-find-plugin`. Use this to answer "how much of `/v1/*` traffic is the MCP plugin vs everything else" and to spot stale plugin versions still in the wild. Bounded by 14 d raw retention (no rollup dimension on `user_agent`).
+### Client (User-Agent) telemetry
+
+Three endpoints answer "who is calling the gateway and what are they hitting?". All bounded by 14 d raw retention since the rollup tables don't dimension by `user_agent`.
+
+```bash
+# 1. List per User-Agent (existing). Filter to one family or exclude noise.
+curl -H "X-API-Key: $INTERNAL_API_KEY" "https://api.acp-metabot.dev/metrics/clients?days=7"
+curl -H "X-API-Key: $INTERNAL_API_KEY" "https://api.acp-metabot.dev/metrics/clients?days=7&family=acp-find-plugin"
+curl -H "X-API-Key: $INTERNAL_API_KEY" "https://api.acp-metabot.dev/metrics/clients?days=7&excludeFamilies=curl,unknown"
+
+# 2. High-level summary by family.
+curl -H "X-API-Key: $INTERNAL_API_KEY" "https://api.acp-metabot.dev/metrics/clients/summary?days=7"
+
+# 3. Per-endpoint breakdown — optionally restricted to one family.
+#    Use this to drill into "what endpoints does curl/8.5.0 hit?".
+curl -H "X-API-Key: $INTERNAL_API_KEY" "https://api.acp-metabot.dev/metrics/clients/endpoints?days=7&family=curl"
+```
+
+Families: `acp-find-plugin` (with extracted `version`), `curl`, `browser` (anything starting with `Mozilla/`), `unknown` (empty/null UA), `other` (anything else — bots, scanners, custom integrations). The C# `UserAgentClassifier` and the `ClassifiedCte` SQL in `RequestMetricsRepository` implement the same rules; tests in `ACP_Metabot.Api.Tests/UserAgentClassifierTests.cs` pin the C# side, so any drift between them is loud.
+
+**Worked example — investigating high-volume non-plugin traffic:** if `/metrics/clients/summary` shows `curl` is dominating with N requests, run `/metrics/clients/endpoints?family=curl` to see if it's hitting `/health` (uptime monitor — fine), `/v1/search` repeatedly with one query (likely abuse — see Lever 5 below), or `/v1/*` evenly (real integrator using curl directly — interesting).
 
 ## Lever 1 — Cache query embeddings on the search hot path
 
