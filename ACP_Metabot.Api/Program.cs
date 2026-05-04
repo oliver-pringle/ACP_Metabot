@@ -18,6 +18,7 @@ builder.Services.Configure<KestrelServerOptions>(options =>
 });
 
 builder.Services.AddSingleton<Db>();
+builder.Services.AddSingleton<AgentProfileRepository>();
 builder.Services.AddSingleton<OfferingRepository>();
 builder.Services.AddSingleton<WatchRepository>();
 builder.Services.AddSingleton<AgentReputationCacheRepository>();

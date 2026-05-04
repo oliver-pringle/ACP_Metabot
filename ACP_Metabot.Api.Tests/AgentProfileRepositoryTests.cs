@@ -86,4 +86,70 @@ public class AgentProfileRepositoryTests : IDisposable
         await _repo.BumpLastChangeAtAsync("0xabc");
         Assert.Single(await _repo.ListDirtyAsync(100));
     }
+
+    // ── OfferingRepository integration: dirty-flag wiring ──────────────────
+
+    [Fact]
+    public async Task OfferingUpsert_BumpsAgentProfileDirtyFlag_OnNewOffering()
+    {
+        // Pre-condition: agent profile exists and is clean.
+        await _repo.UpsertAsync("0xabc", "AgentA", "profile A");
+        await _repo.MarkEmbeddedAsync("0xabc", "voyage-3-large", new byte[] { 1 });
+        Assert.Empty(await _repo.ListDirtyAsync(100));
+
+        // Indexer ingests a new offering for that agent through OfferingRepository.
+        var offeringRepo = new OfferingRepository(_db, _repo);
+        await Task.Delay(20);
+        await offeringRepo.UpsertManyAsync(new[]
+        {
+            new UpsertItem(
+                AgentAddress: "0xabc",
+                AgentName: "AgentA",
+                OfferingName: "my_offering",
+                Description: "does stuff",
+                RequirementSchemaJson: null,
+                PriceUsdc: 0.99,
+                PriceType: "flat",
+                IsPrivate: false,
+                Chain: "base",
+                ContentHash: "hash1",
+                UsageCount: 0,
+                AgentJobCount: 0)
+        }, DateTime.UtcNow);
+
+        Assert.Single(await _repo.ListDirtyAsync(100));
+    }
+
+    [Fact]
+    public async Task OfferingUpsert_DoesNotBump_OnPureTouchUpdate()
+    {
+        // Pre-condition: profile exists and is clean; offering already in DB.
+        await _repo.UpsertAsync("0xabc", "AgentA", "profile A");
+        var offeringRepo = new OfferingRepository(_db, _repo);
+        var item = new UpsertItem(
+            AgentAddress: "0xabc",
+            AgentName: "AgentA",
+            OfferingName: "my_offering",
+            Description: "does stuff",
+            RequirementSchemaJson: null,
+            PriceUsdc: 0.99,
+            PriceType: "flat",
+            IsPrivate: false,
+            Chain: "base",
+            ContentHash: "hash1",
+            UsageCount: 5,
+            AgentJobCount: 1);
+        // First upsert inserts the offering and bumps.
+        await offeringRepo.UpsertManyAsync(new[] { item }, DateTime.UtcNow);
+        // Now mark the profile clean.
+        await _repo.MarkEmbeddedAsync("0xabc", "voyage-3-large", new byte[] { 1 });
+        Assert.Empty(await _repo.ListDirtyAsync(100));
+
+        await Task.Delay(20);
+        // Second upsert: same content_hash, only usage_count changed → pure touch, no bump.
+        var touch = item with { UsageCount = 10, AgentJobCount = 2 };
+        await offeringRepo.UpsertManyAsync(new[] { touch }, DateTime.UtcNow);
+
+        Assert.Empty(await _repo.ListDirtyAsync(100));
+    }
 }

@@ -18,8 +18,13 @@ public record UpsertSummary(int Added, int Updated, int Unchanged);
 public class OfferingRepository
 {
     private readonly Db _db;
+    private readonly AgentProfileRepository? _agentProfiles;
 
-    public OfferingRepository(Db db) => _db = db;
+    public OfferingRepository(Db db, AgentProfileRepository? agentProfiles = null)
+    {
+        _db = db;
+        _agentProfiles = agentProfiles;
+    }
 
     public async Task<UpsertResult> UpsertAsync(
         string agentAddress, string agentName, string offeringName,
@@ -62,6 +67,7 @@ public class OfferingRepository
                     touch.Parameters.AddWithValue("$agentJobs", agentJobCount);
                     touch.Parameters.AddWithValue("$id", existingId);
                     await touch.ExecuteNonQueryAsync();
+                    // Pure touch — no profile change, no dirty bump.
                     return new UpsertResult(existingId, IsNew: false, ContentChanged: false);
                 }
 
@@ -94,6 +100,9 @@ public class OfferingRepository
                 upd.Parameters.AddWithValue("$agentJobs", agentJobCount);
                 upd.Parameters.AddWithValue("$id", existingId);
                 await upd.ExecuteNonQueryAsync();
+                // Content changed — profile changed, bump dirty flag.
+                if (_agentProfiles is not null)
+                    await _agentProfiles.BumpLastChangeAtAsync(agentAddress);
                 return new UpsertResult(existingId, IsNew: false, ContentChanged: true);
             }
         }
@@ -127,6 +136,9 @@ public class OfferingRepository
         ins.Parameters.AddWithValue("$agentJobs", agentJobCount);
         ins.Parameters.AddWithValue("$mv", marketplaceVersion);
         var newId = (long)(await ins.ExecuteScalarAsync() ?? 0L);
+        // New offering inserted — profile changed, bump dirty flag.
+        if (_agentProfiles is not null)
+            await _agentProfiles.BumpLastChangeAtAsync(agentAddress);
         return new UpsertResult(newId, IsNew: true, ContentChanged: true);
     }
 
@@ -142,18 +154,20 @@ public class OfferingRepository
         await using var conn = _db.OpenConnection();
 
         // Pre-fetch existing rows: (mv, agent_address, offering_name) ->
-        // (id, content_hash). Composite key matches the v1.3 UNIQUE constraint
-        // so v1 and v2 rows for the same (addr, name) don't collide here.
-        var existing = new Dictionary<string, (long Id, string Hash)>(
+        // (id, content_hash, is_removed). Composite key matches the v1.3 UNIQUE
+        // constraint so v1 and v2 rows for the same (addr, name) don't collide.
+        // is_removed is needed so we can detect touch-reactivations (where the
+        // content_hash is unchanged but a tombstoned offering reappears).
+        var existing = new Dictionary<string, (long Id, string Hash, bool IsRemoved)>(
             capacity: items.Count, StringComparer.Ordinal);
         await using (var pre = conn.CreateCommand())
         {
-            pre.CommandText = "SELECT marketplace_version, agent_address, offering_name, id, content_hash FROM offerings;";
+            pre.CommandText = "SELECT marketplace_version, agent_address, offering_name, id, content_hash, is_removed FROM offerings;";
             await using var reader = await pre.ExecuteReaderAsync();
             while (await reader.ReadAsync())
             {
                 var key = reader.GetString(0) + "|" + reader.GetString(1) + "|" + reader.GetString(2);
-                existing[key] = (reader.GetInt64(3), reader.GetString(4));
+                existing[key] = (reader.GetInt64(3), reader.GetString(4), reader.GetInt32(5) != 0);
             }
         }
 
@@ -251,6 +265,12 @@ public class OfferingRepository
         var iAgentJobs = ins.Parameters.Add("$agentJobs", SqliteType.Integer);
         var iMv = ins.Parameters.Add("$mv", SqliteType.Text);
 
+        // Collect agent addresses whose profiles genuinely changed so we can
+        // bump agent_profiles.last_change_at after the transaction commits.
+        // Pure touch (same content_hash, not previously tombstoned) is NOT a
+        // profile change — applying the v1.2 trigger-storm lesson at the app level.
+        var profileChanged = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var item in items)
         {
             var key = item.MarketplaceVersion + "|" + item.AgentAddress + "|" + item.OfferingName;
@@ -263,6 +283,10 @@ public class OfferingRepository
                     tId.Value = ex.Id;
                     await touch.ExecuteNonQueryAsync();
                     unchanged++;
+                    // Touch-reactivation: offering was tombstoned but reappeared
+                    // with the same content_hash — that IS a profile change.
+                    if (ex.IsRemoved)
+                        profileChanged.Add(item.AgentAddress.ToLowerInvariant());
                 }
                 else
                 {
@@ -283,6 +307,8 @@ public class OfferingRepository
                     dEmbId.Value = ex.Id;
                     await delEmb.ExecuteNonQueryAsync();
                     updated++;
+                    // Mirrored fields changed — profile changed.
+                    profileChanged.Add(item.AgentAddress.ToLowerInvariant());
                 }
             }
             else
@@ -302,10 +328,21 @@ public class OfferingRepository
                 iMv.Value = item.MarketplaceVersion;
                 await ins.ExecuteNonQueryAsync();
                 added++;
+                // New offering — profile changed.
+                profileChanged.Add(item.AgentAddress.ToLowerInvariant());
             }
         }
 
         await tx.CommitAsync();
+
+        // Bump dirty flag for each agent whose offering set changed.
+        // Runs after commit so the bump is never rolled back with the tx.
+        if (_agentProfiles is not null)
+        {
+            foreach (var addr in profileChanged)
+                await _agentProfiles.BumpLastChangeAtAsync(addr);
+        }
+
         return new UpsertSummary(added, updated, unchanged);
     }
 
@@ -328,6 +365,26 @@ public class OfferingRepository
         var cutoff = staleCutoffUtc.ToString("O", CultureInfo.InvariantCulture);
         var nowIso = nowUtc.ToString("O", CultureInfo.InvariantCulture);
         await using var conn = _db.OpenConnection();
+
+        // Collect the distinct agent addresses that are about to be tombstoned
+        // so we can bump their dirty flags after the UPDATE commits.
+        var tombstonedAgents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (_agentProfiles is not null)
+        {
+            await using var sel = conn.CreateCommand();
+            sel.CommandText = @"
+                SELECT DISTINCT agent_address
+                FROM offerings
+                WHERE marketplace_version = $mv
+                  AND is_removed = 0
+                  AND last_seen_at < $cutoff;";
+            sel.Parameters.AddWithValue("$mv", marketplaceVersion);
+            sel.Parameters.AddWithValue("$cutoff", cutoff);
+            await using var reader = await sel.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+                tombstonedAgents.Add(reader.GetString(0).ToLowerInvariant());
+        }
+
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             UPDATE offerings
@@ -338,7 +395,13 @@ public class OfferingRepository
         cmd.Parameters.AddWithValue("$mv", marketplaceVersion);
         cmd.Parameters.AddWithValue("$cutoff", cutoff);
         cmd.Parameters.AddWithValue("$now", nowIso);
-        return await cmd.ExecuteNonQueryAsync();
+        var rowsAffected = await cmd.ExecuteNonQueryAsync();
+
+        // Bump dirty flag for each agent whose offering set shrank.
+        foreach (var addr in tombstonedAgents)
+            await _agentProfiles!.BumpLastChangeAtAsync(addr);
+
+        return rowsAffected;
     }
 
     public async Task UpsertEmbeddingAsync(long offeringId, string model, int dimension, byte[] blob, DateTime nowUtc)
