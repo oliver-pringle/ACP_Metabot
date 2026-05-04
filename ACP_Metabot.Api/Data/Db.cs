@@ -261,11 +261,13 @@ public class Db
             );
 
             -- v1.7: agent profile corpus + embedding for hybrid agent search.
-            -- Each agent gets one row keyed by wallet address. FTS5 mirror +
-            -- triggers keep the lexical index in sync. The partial index drives
-            -- the embedder dirty-queue without a full scan.
+            -- Surrogate INTEGER PK matches the offerings pattern — TEXT PK tables get an
+            -- implicit rowid that's not VACUUM-stable, which would break FTS5 external-
+            -- content joins silently. agent_address stays UNIQUE for the
+            -- repository-level lookup primitive.
             CREATE TABLE IF NOT EXISTS agent_profiles (
-                agent_address     TEXT    PRIMARY KEY,
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_address     TEXT    NOT NULL UNIQUE,
                 agent_name        TEXT    NOT NULL,
                 profile_text      TEXT    NOT NULL,
                 embedding         BLOB,
@@ -280,18 +282,18 @@ public class Db
 
             CREATE VIRTUAL TABLE IF NOT EXISTS agent_profiles_fts USING fts5(
                 agent_name, profile_text,
-                content='agent_profiles', content_rowid='rowid',
+                content='agent_profiles', content_rowid='id',
                 tokenize='unicode61 remove_diacritics 2'
             );
 
             CREATE TRIGGER IF NOT EXISTS agent_profiles_ai AFTER INSERT ON agent_profiles BEGIN
                 INSERT INTO agent_profiles_fts(rowid, agent_name, profile_text)
-                VALUES (new.rowid, new.agent_name, new.profile_text);
+                VALUES (new.id, new.agent_name, new.profile_text);
             END;
 
             CREATE TRIGGER IF NOT EXISTS agent_profiles_ad AFTER DELETE ON agent_profiles BEGIN
                 INSERT INTO agent_profiles_fts(agent_profiles_fts, rowid, agent_name, profile_text)
-                VALUES ('delete', old.rowid, old.agent_name, old.profile_text);
+                VALUES ('delete', old.id, old.agent_name, old.profile_text);
             END;
 
             -- Scoped to FTS-mirrored columns only. Updates that only change
@@ -300,9 +302,9 @@ public class Db
             CREATE TRIGGER IF NOT EXISTS agent_profiles_au
             AFTER UPDATE OF agent_name, profile_text ON agent_profiles BEGIN
                 INSERT INTO agent_profiles_fts(agent_profiles_fts, rowid, agent_name, profile_text)
-                VALUES ('delete', old.rowid, old.agent_name, old.profile_text);
+                VALUES ('delete', old.id, old.agent_name, old.profile_text);
                 INSERT INTO agent_profiles_fts(rowid, agent_name, profile_text)
-                VALUES (new.rowid, new.agent_name, new.profile_text);
+                VALUES (new.id, new.agent_name, new.profile_text);
             END;
             ";
         await cmd.ExecuteNonQueryAsync();

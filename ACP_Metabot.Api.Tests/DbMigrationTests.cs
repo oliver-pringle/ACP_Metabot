@@ -521,6 +521,28 @@ public class DbMigrationTests : IDisposable
         Assert.Contains("ix_agent_profiles_dirty", plan);
     }
 
+    [Fact]
+    public async Task AgentProfilesFts_RoundTripsInsertAndMatch()
+    {
+        await _db.InitializeSchemaAsync();
+        await using var conn = _db.OpenConnection();
+
+        await using var ins = conn.CreateCommand();
+        ins.CommandText = @"
+            INSERT INTO agent_profiles (agent_address, agent_name, profile_text, last_change_at)
+            VALUES ('0xabc', 'WhaleWatcher', 'tracks large on-chain holders', '2026-05-04T00:00:00Z')";
+        await ins.ExecuteNonQueryAsync();
+
+        await using var match = conn.CreateCommand();
+        match.CommandText = @"
+            SELECT ap.agent_address
+            FROM agent_profiles_fts
+            JOIN agent_profiles ap ON ap.id = agent_profiles_fts.rowid
+            WHERE agent_profiles_fts MATCH 'whale OR holders'";
+        var hit = (string?)await match.ExecuteScalarAsync();
+        Assert.Equal("0xabc", hit);
+    }
+
     private async Task InsertOfferingWithLastSeen(string addr, string agentName,
         string offeringName, string mv, DateTime lastSeenUtc)
     {
