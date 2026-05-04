@@ -65,6 +65,10 @@ switch (indexerSource)
 builder.Services.AddSingleton<ReputationService>();
 builder.Services.AddSingleton<CategoryService>();
 builder.Services.AddSingleton<DigestService>();
+builder.Services.AddSingleton<SaturationCalculator>(_ => new SaturationCalculator(
+    threshold: builder.Configuration.GetValue<double?>("Saturation:Threshold") ?? 0.85));
+builder.Services.AddSingleton<PricePercentileCalculator>(_ => new PricePercentileCalculator(
+    lowNThreshold: builder.Configuration.GetValue<int?>("PricePercentile:LowNThreshold") ?? 5));
 builder.Services.AddSingleton<SearchService>();
 builder.Services.AddSingleton<StackComposerService>();
 builder.Services.AddSingleton<WebhookDeliveryService>();
