@@ -465,6 +465,62 @@ public class DbMigrationTests : IDisposable
         Assert.Equal(1, await Count("offering_embeddings"));
     }
 
+    // -----------------------------------------------------------------
+    // v1.7 agent_profiles schema tests
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task Migration_CreatesAgentProfilesTable()
+    {
+        await _db.InitializeSchemaAsync();
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='agent_profiles'";
+        var n = (long)(await cmd.ExecuteScalarAsync())!;
+        Assert.Equal(1, n);
+    }
+
+    [Fact]
+    public async Task Migration_CreatesAgentProfilesFtsAndTriggers()
+    {
+        await _db.InitializeSchemaAsync();
+        await using var conn = _db.OpenConnection();
+
+        await using var ftsCmd = conn.CreateCommand();
+        ftsCmd.CommandText = "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='agent_profiles_fts'";
+        Assert.Equal(1L, (long)(await ftsCmd.ExecuteScalarAsync())!);
+
+        await using var trgCmd = conn.CreateCommand();
+        trgCmd.CommandText = "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'agent_profiles_%' ORDER BY name";
+        var triggers = new List<string>();
+        await using var r = await trgCmd.ExecuteReaderAsync();
+        while (await r.ReadAsync()) triggers.Add(r.GetString(0));
+        Assert.Equal(new[] { "agent_profiles_ad", "agent_profiles_ai", "agent_profiles_au" }, triggers);
+    }
+
+    [Fact]
+    public async Task Migration_AgentProfilesDirtyIndexWorks()
+    {
+        await _db.InitializeSchemaAsync();
+        await using var conn = _db.OpenConnection();
+
+        await using var ins = conn.CreateCommand();
+        ins.CommandText = @"
+            INSERT INTO agent_profiles (agent_address, agent_name, profile_text, last_change_at)
+            VALUES ('0xabc', 'AgentA', 'profile A', '2026-05-04T00:00:00Z')";
+        await ins.ExecuteNonQueryAsync();
+
+        await using var explain = conn.CreateCommand();
+        explain.CommandText = @"
+            EXPLAIN QUERY PLAN
+            SELECT agent_address FROM agent_profiles
+            WHERE embedded_at IS NULL OR last_change_at > embedded_at";
+        var plan = "";
+        await using var pr = await explain.ExecuteReaderAsync();
+        while (await pr.ReadAsync()) plan += pr.GetString(3) + "|";
+        Assert.Contains("ix_agent_profiles_dirty", plan);
+    }
+
     private async Task InsertOfferingWithLastSeen(string addr, string agentName,
         string offeringName, string mv, DateTime lastSeenUtc)
     {
