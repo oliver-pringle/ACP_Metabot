@@ -49,6 +49,32 @@ Families: `acp-find-plugin` (with extracted `version`), `curl`, `browser` (anyth
 
 **Worked example — investigating high-volume non-plugin traffic:** if `/metrics/clients/summary` shows `curl` is dominating with N requests, run `/metrics/clients/endpoints?family=curl` to see if it's hitting `/health` (uptime monitor — fine), `/v1/search` repeatedly with one query (likely abuse — see Lever 5 below), or `/v1/*` evenly (real integrator using curl directly — interesting).
 
+### Plugin activation funnel
+
+The MCP server (`acp-find-mcp` ≥ 0.6.0) fires one beacon to `POST /v1/plugin/boot` on every successful `initialize` handshake. The route returns `204 No Content`; the metrics middleware records it like any other request, so it shows up under the `acp-find-plugin` family with `endpoint=/v1/plugin/boot`. This separates "npx-cache populated" from "MCP client actually started this server" — three numbers form the funnel:
+
+```bash
+# A. Distinct boot events (one per process start) — signals "the plugin
+#    actually ran under a real client", not just sat in npx cache.
+curl -H "X-API-Key: $INTERNAL_API_KEY" \
+  "https://api.acp-metabot.dev/metrics/clients/endpoints?days=7&family=acp-find-plugin" | \
+  jq '.[] | select(.endpoint == "/v1/plugin/boot")'
+
+# B. Distinct invocation events (any /v1/* call EXCLUDING the boot beacon).
+curl -H "X-API-Key: $INTERNAL_API_KEY" \
+  "https://api.acp-metabot.dev/metrics/clients/endpoints?days=7&family=acp-find-plugin" | \
+  jq '[.[] | select(.endpoint != "/v1/plugin/boot")] | {totalCalls: (map(.count) | add), distinctEndpoints: length}'
+
+# C. Distinct IPs in the plugin family overall — the "active install" denominator.
+curl -H "X-API-Key: $INTERNAL_API_KEY" \
+  "https://api.acp-metabot.dev/metrics/clients/summary?days=7" | \
+  jq '.[] | select(.family == "acp-find-plugin")'
+```
+
+Activation rate ≈ `(B.distinctEndpoints > 0 ? 1 : 0) per IP` — i.e., what fraction of booting clients actually invoke a tool. Any IP that booted but never invoked is a "stillborn install" worth thinking about (broken config, user opened the tool list and walked away, etc.).
+
+The beacon is opt-out via `ACP_DISABLE_BOOT_BEACON=1`. Self-hosted gateways (anyone overriding `ACP_API_URL`) still send the beacon to whatever they pointed at — same data shape; harmless on a dev gateway.
+
 ## Lever 1 — Cache query embeddings on the search hot path
 
 **Signal:** `/metrics/timeseries` shows p95 latency on `/v1/search` exceeds 2 s sustained over 30 minutes, OR `/metrics/endpoints` shows `voyage_errors` rate exceeds 1% of `/v1/search` volume.

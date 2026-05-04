@@ -221,6 +221,22 @@ builder.Services.AddRateLimiter(options =>
                 Window = TimeSpan.FromHours(1),
                 QueueLimit = 0
             }));
+
+    // Plugin boot beacon — fired once per MCP-server process start to give
+    // the operator a clean activation funnel signal (install -> boot -> tool-call).
+    // 30/IP/hr leaves plenty of headroom for dev cycles where someone keeps
+    // restarting their MCP client; abuse here is harmless (zero-cost endpoint
+    // returning 204) but rate-limiting keeps it from being a free amplifier
+    // for someone trying to flood the request_log table.
+    options.AddPolicy("public-plugin-boot", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
+                Window = TimeSpan.FromHours(1),
+                QueueLimit = 0
+            }));
 });
 
 var app = builder.Build();
@@ -628,6 +644,21 @@ app.MapGet("/v1/health", (SearchService search, MarketplaceIndexerService idx, C
         },
     });
 });
+
+// Plugin activation beacon. Fired once per MCP-server boot by acp-find-mcp
+// (>= 0.6.0) right after handling the MCP `initialize` request — proves the
+// server actually started under a real client, separate from npx-cache or
+// scanner downloads. Body is ignored; the metrics middleware records the
+// User-Agent (`acp-find-plugin/X.Y.Z`) and remote_ip via request_log, which
+// `/metrics/clients/endpoints?family=acp-find-plugin` then surfaces.
+//
+// Returns 204 No Content with empty body. Side-effect free.
+//
+// Privacy: no body content is read or persisted. The signal is purely
+// (User-Agent, IP, timestamp) — same shape every other request already
+// captures. Plugin users can opt out with `ACP_DISABLE_BOOT_BEACON=1`.
+app.MapPost("/v1/plugin/boot", () => Results.NoContent())
+    .RequireRateLimiting("public-plugin-boot");
 
 // Public read-only watch status. Returns the watch's public state without the
 // sensitive fields (buyer_address, webhook_url) — those identify the buyer
