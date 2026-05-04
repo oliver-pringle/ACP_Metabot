@@ -660,8 +660,16 @@ public class OfferingRepository
                     // is most relevant. abs() since bm is typically <= 0.
                     Score: 1.0 / (1.0 + Math.Abs(kv.Value.BestBm)),
                     TotalOfferings: totalOffersByAgent.TryGetValue(kv.Key, out var c) ? c : kv.Value.Hits,
-                    TopOfferings: kv.Value.Offerings,
-                    TotalJobs: kv.Value.Jobs))
+                    // v1.7: wrap legacy string list as minimal AgentSearchHitOffering records.
+                    // Phase 5.2 AgentSearchService will populate price/version properly.
+                    TopOfferings: kv.Value.Offerings
+                        .Select(name => new AgentSearchHitOffering(name, 0.0, ""))
+                        .ToArray(),
+                    TotalJobs: kv.Value.Jobs,
+                    TopOfferingNames: kv.Value.Offerings,
+                    Marketplaces: Array.Empty<string>(),
+                    DominantMarketplace: "none",
+                    AgentScore: null))
                 .ToArray();
         }
         catch (SqliteException)
