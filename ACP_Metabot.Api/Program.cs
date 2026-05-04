@@ -446,7 +446,7 @@ async Task<IResult> HandleReputation(AgentReputationRequest req,
 async Task<IResult> HandleDigest(int? days, string? marketplace,
     string[]? chain, double? priceMaxUsdc, DigestService svc)
 {
-    var window = days is null ? 1 : Math.Clamp(days.Value, 1, 30);
+    var window = days is null ? 1 : Math.Clamp(days.Value, 1, 90);
     var marketplaceFilter = NormalizeMarketplace(marketplace);
     if (marketplace is not null && marketplaceFilter is null)
         return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });

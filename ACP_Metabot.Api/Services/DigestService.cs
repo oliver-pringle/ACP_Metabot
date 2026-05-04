@@ -7,40 +7,76 @@ namespace ACP_Metabot.Api.Services;
 // Computes the daily / N-day digest: newly-launched offerings + offerings
 // whose hire count grew most over the window. Pure read path — relies on
 // the snapshot table written by MarketplaceIndexerService.
+//
+// v1.7 additions: newAgents / churnRate / cohortSurvival / saturationMap /
+//   windowStart / partial flag. Hourly per-(filter-set) in-memory cache
+//   prevents thundering-herd on cold filter combinations.
 public class DigestService
 {
     private readonly OfferingRepository _repo;
     private readonly ReputationService _reputation;
+    private readonly SaturationCalculator _saturation;
 
     private const int MaxNewOfferings = 25;
     private const int MaxGainers = 25;
 
-    public DigestService(OfferingRepository repo, ReputationService reputation)
+    // Sub-task E: hourly per-filter-set cache
+    private readonly Dictionary<string, (DateTime Bucket, DigestResult Result)> _cache = new();
+    private readonly SemaphoreSlim _lock = new(1, 1);
+
+    private static string CacheKey(int days, string? mv, HashSet<string>? chain, double? price)
+    {
+        var c = chain is null ? "" : string.Join(",", chain.OrderBy(s => s));
+        return $"d={days}|m={mv ?? ""}|c={c}|p={price?.ToString() ?? ""}";
+    }
+
+    public DigestService(OfferingRepository repo, ReputationService reputation,
+        SaturationCalculator saturation)
     {
         _repo = repo;
         _reputation = reputation;
+        _saturation = saturation;
     }
 
+    // Backward-compat overload — delegate to 4-arg version.
     public Task<DigestResult> BuildAsync(int windowDays, string? marketplaceFilter = null)
-        => BuildAsync(windowDays, marketplaceFilter,
-            chainFilter: null, priceMaxUsdc: null);
+        => BuildAsync(windowDays, marketplaceFilter, chainFilter: null, priceMaxUsdc: null);
 
     /// <summary>
     /// Filterable overload. Optional <paramref name="chainFilter"/> (lowercased
-    /// HashSet) and <paramref name="priceMaxUsdc"/> are applied to both
-    /// `newOfferings` and `gainers`. Wider initial fetch window when filters
-    /// are present so we keep the same final list size.
+    /// HashSet) and <paramref name="priceMaxUsdc"/> are applied to all result
+    /// fields. Hourly cache keyed on the full filter tuple.
     /// </summary>
     public async Task<DigestResult> BuildAsync(int windowDays, string? marketplaceFilter,
+        HashSet<string>? chainFilter, double? priceMaxUsdc)
+    {
+        var hourBucket = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month,
+            DateTime.UtcNow.Day, DateTime.UtcNow.Hour, 0, 0, DateTimeKind.Utc);
+        var key = CacheKey(windowDays, marketplaceFilter, chainFilter, priceMaxUsdc);
+
+        if (_cache.TryGetValue(key, out var entry) && entry.Bucket == hourBucket)
+            return entry.Result;
+
+        await _lock.WaitAsync();
+        try
+        {
+            if (_cache.TryGetValue(key, out entry) && entry.Bucket == hourBucket)
+                return entry.Result;
+
+            var fresh = await BuildUncachedAsync(windowDays, marketplaceFilter, chainFilter, priceMaxUsdc);
+            _cache[key] = (hourBucket, fresh);
+            return fresh;
+        }
+        finally { _lock.Release(); }
+    }
+
+    private async Task<DigestResult> BuildUncachedAsync(int windowDays, string? marketplaceFilter,
         HashSet<string>? chainFilter, double? priceMaxUsdc)
     {
         var nowUtc = DateTime.UtcNow;
         var sinceUtc = nowUtc.AddDays(-windowDays);
         var snapshotDate = nowUtc.Date.AddDays(-windowDays).ToString("yyyy-MM-dd");
 
-        // Fetch a wider net when ANY filter is set so the post-filter still
-        // has headroom. ListNewSinceAsync orders by popularity then recency so
-        // the filter doesn't bias toward old rows.
         var hasFilter = marketplaceFilter is not null || chainFilter is not null || priceMaxUsdc is not null;
         var fetchLimit = hasFilter ? MaxNewOfferings * 4 : MaxNewOfferings;
         var newOfferings = await _repo.ListNewSinceAsync(sinceUtc, fetchLimit);
@@ -73,13 +109,8 @@ public class DigestService
                 .Where(g => string.Equals(g.MarketplaceVersion, marketplaceFilter, StringComparison.OrdinalIgnoreCase))
                 .ToList();
         }
-        // Gainers don't carry chain/price natively; intersect with the offering
-        // table when those filters are set so the response respects them.
         if (chainFilter is not null || priceMaxUsdc is double)
         {
-            // Build an ad-hoc lookup for the gainers we have. List<Offering>
-            // would be cleaner but ListGainersAsync intentionally returns a
-            // narrower DTO to keep the snapshot-comparison query cheap.
             var allOfferings = await _repo.ListAllAsync();
             var byId = allOfferings.ToDictionary(o => o.Id);
             gainers = gainers.Where(g =>
@@ -104,11 +135,55 @@ public class DigestService
             Reputation: _reputation.BuildSearchSummary(o),
             MarketplaceVersion: o.MarketplaceVersion)).ToArray();
 
-        return new DigestResult(
-            WindowDays: windowDays,
-            SnapshotComparison: snapshotExists ? "available" : "insufficient_history",
-            NewOfferings: newOfferingDtos,
-            Gainers: gainers,
-            ComputedAt: nowUtc.ToString("O", CultureInfo.InvariantCulture));
+        // Sub-task A: newAgents + windowStart + partial flag
+        var (newAgentsTotal, newAgentsTop) = await _repo.ListNewAgentsSinceAsync(
+            sinceUtc, marketplaceFilter, chainFilter, priceMaxUsdc, topLimit: 10);
+
+        // Sub-task B: churnRate
+        var (churnBaseline, churnchurned) = await _repo.ComputeChurnAsync(
+            sinceUtc, marketplaceFilter, chainFilter, priceMaxUsdc);
+
+        // Sub-task C: cohortSurvival (only when windowDays >= 30)
+        IReadOnlyList<CohortSurvivalRow>? cohortSurvival = null;
+        if (windowDays >= 30)
+        {
+            var buckets = await _repo.ListCohortBucketsAsync(sinceUtc, marketplaceFilter, chainFilter, priceMaxUsdc);
+            var rows = new List<CohortSurvivalRow>();
+            foreach (var b in buckets.Take(12))
+            {
+                var surviving = await _repo.CountSurvivingInCohortAsync(
+                    b.WeekStart, b.WeekEnd, marketplaceFilter, chainFilter, priceMaxUsdc);
+                var rate = b.Size == 0 ? 0.0 : (double)surviving / b.Size;
+                rows.Add(new CohortSurvivalRow(
+                    CohortWeek: b.WeekIso,
+                    CohortStart: b.WeekStart.ToString("O", CultureInfo.InvariantCulture),
+                    CohortSize: b.Size,
+                    Surviving: surviving,
+                    SurvivalRate: rate));
+            }
+            cohortSurvival = rows;
+        }
+
+        // Sub-task D: saturationMap (global — not filter-scoped)
+        var saturationMap = _saturation.PerCategory()
+            .Select(c => new SaturationMapRow(c.Category, c.Total, c.SaturatedCount, c.SaturationPct))
+            .ToList();
+
+        return new DigestResult
+        {
+            WindowDays         = windowDays,
+            WindowStart        = sinceUtc.ToString("O", CultureInfo.InvariantCulture),
+            SnapshotComparison = snapshotExists ? "available" : "insufficient_history",
+            Partial            = !snapshotExists,
+            NewOfferings       = newOfferingDtos,
+            Gainers            = gainers,
+            NewAgents          = new NewAgentsBlock(newAgentsTotal, newAgentsTop),
+            ChurnRate          = churnBaseline == 0
+                ? new Models.ChurnRate(0.0, churnchurned, churnBaseline)
+                : new Models.ChurnRate((double)churnchurned / churnBaseline, churnchurned, churnBaseline),
+            CohortSurvival     = cohortSurvival,
+            SaturationMap      = saturationMap,
+            ComputedAt         = nowUtc.ToString("O", CultureInfo.InvariantCulture),
+        };
     }
 }

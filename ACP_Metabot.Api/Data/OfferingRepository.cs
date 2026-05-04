@@ -926,6 +926,256 @@ public class OfferingRepository
         return dict;
     }
 
+    // ── Digest helpers (v1.7) ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns total count of new agents whose first offering was seen after
+    /// <paramref name="sinceUtc"/>, plus the top <paramref name="topLimit"/>
+    /// agents ordered by first_seen_at DESC.
+    /// </summary>
+    public async Task<(int TotalCount, IReadOnlyList<NewAgentRow> Top)> ListNewAgentsSinceAsync(
+        DateTime sinceUtc, string? marketplaceFilter, HashSet<string>? chainFilter,
+        double? priceMaxUsdc, int topLimit = 10)
+    {
+        var sinceIso = sinceUtc.ToString("O", CultureInfo.InvariantCulture);
+        await using var conn = _db.OpenConnection();
+
+        // Count total distinct new agents in window
+        await using var countCmd = conn.CreateCommand();
+        countCmd.CommandText = BuildNewAgentsCountSql(marketplaceFilter, chainFilter, priceMaxUsdc);
+        countCmd.Parameters.AddWithValue("$since", sinceIso);
+        if (marketplaceFilter is not null) countCmd.Parameters.AddWithValue("$mv", marketplaceFilter);
+        if (priceMaxUsdc is double pm) countCmd.Parameters.AddWithValue("$pmax", pm);
+        var countObj = await countCmd.ExecuteScalarAsync();
+        var total = Convert.ToInt32(countObj ?? 0);
+
+        // Fetch top rows
+        await using var topCmd = conn.CreateCommand();
+        topCmd.CommandText = BuildNewAgentsTopSql(marketplaceFilter, chainFilter, priceMaxUsdc);
+        topCmd.Parameters.AddWithValue("$since", sinceIso);
+        topCmd.Parameters.AddWithValue("$lim", topLimit);
+        if (marketplaceFilter is not null) topCmd.Parameters.AddWithValue("$mv", marketplaceFilter);
+        if (priceMaxUsdc is double pm2) topCmd.Parameters.AddWithValue("$pmax", pm2);
+        await using var reader = await topCmd.ExecuteReaderAsync();
+        var rows = new List<NewAgentRow>();
+        while (await reader.ReadAsync())
+        {
+            rows.Add(new NewAgentRow(
+                Address: reader.GetString(0),
+                Name: reader.GetString(1),
+                Marketplace: reader.GetString(2),
+                FirstSeenAt: reader.GetString(3),
+                OfferingCount: reader.GetInt32(4)));
+        }
+        return (total, rows);
+    }
+
+    private static string BuildNewAgentsCountSql(string? mv, HashSet<string>? chain, double? price)
+    {
+        var where = BuildNewAgentsWhere(mv, chain, price);
+        return $@"
+            SELECT COUNT(DISTINCT agent_address)
+            FROM offerings
+            WHERE first_seen_at >= $since
+              AND is_removed = 0
+              {where};";
+    }
+
+    private static string BuildNewAgentsTopSql(string? mv, HashSet<string>? chain, double? price)
+    {
+        var where = BuildNewAgentsWhere(mv, chain, price);
+        return $@"
+            SELECT
+                agent_address,
+                MAX(agent_name)   AS agent_name,
+                marketplace_version,
+                MIN(first_seen_at) AS first_seen,
+                COUNT(*)           AS offering_count
+            FROM offerings
+            WHERE first_seen_at >= $since
+              AND is_removed = 0
+              {where}
+            GROUP BY agent_address
+            HAVING MIN(first_seen_at) >= $since
+            ORDER BY first_seen DESC
+            LIMIT $lim;";
+    }
+
+    private static string BuildNewAgentsWhere(string? mv, HashSet<string>? chain, double? price)
+    {
+        var sb = new System.Text.StringBuilder();
+        if (mv is not null) sb.Append("AND marketplace_version = $mv ");
+        if (chain is { Count: > 0 })
+        {
+            var inList = string.Join(",", chain.Select(c => $"'{c.Replace("'", "''")}'"));
+            sb.Append($"AND LOWER(chain) IN ({inList}) ");
+        }
+        if (price is not null) sb.Append("AND price_usdc <= $pmax ");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Computes churn: agents that had ≥1 active offering at window start but
+    /// have 0 active offerings now.
+    /// </summary>
+    public async Task<(int Baseline, int Churned)> ComputeChurnAsync(
+        DateTime windowStartUtc, string? marketplace, HashSet<string>? chainFilter, double? priceMaxUsdc)
+    {
+        var windowStartIso = windowStartUtc.ToString("O", CultureInfo.InvariantCulture);
+        await using var conn = _db.OpenConnection();
+
+        // Baseline: agents with ≥1 offering active at windowStart (seen before + not yet removed)
+        await using var baseCmd = conn.CreateCommand();
+        baseCmd.CommandText = @"
+            SELECT DISTINCT agent_address FROM offerings
+            WHERE first_seen_at <= $ws
+              AND (is_removed = 0 OR removed_at > $ws);";
+        baseCmd.Parameters.AddWithValue("$ws", windowStartIso);
+        var baselineAgents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var br = await baseCmd.ExecuteReaderAsync();
+        while (await br.ReadAsync()) baselineAgents.Add(br.GetString(0));
+
+        // Currently active agents (has ≥1 is_removed=0 offering)
+        await using var activeCmd = conn.CreateCommand();
+        activeCmd.CommandText = @"
+            SELECT DISTINCT agent_address FROM offerings
+            WHERE is_removed = 0;";
+        var activeAgents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var ar = await activeCmd.ExecuteReaderAsync();
+        while (await ar.ReadAsync()) activeAgents.Add(ar.GetString(0));
+
+        // Apply optional filters to restrict which agents are considered
+        // (chain/price filtering on baseline — use active offerings for address set)
+        // For simplicity, filters scope the baseline set by intersection with
+        // agents that have at least one offering matching the filter criteria.
+        if (marketplace is not null || chainFilter is not null || priceMaxUsdc is not null)
+        {
+            await using var filterCmd = conn.CreateCommand();
+            var chainIn = chainFilter is { Count: > 0 }
+                ? string.Join(",", chainFilter.Select(c => $"'{c.Replace("'", "''")}'"))
+                : null;
+            var fWhere = new System.Text.StringBuilder("WHERE is_removed = 0 ");
+            if (marketplace is not null) fWhere.Append("AND marketplace_version = $mv ");
+            if (chainIn is not null) fWhere.Append($"AND LOWER(chain) IN ({chainIn}) ");
+            if (priceMaxUsdc is not null) fWhere.Append("AND price_usdc <= $pmax ");
+            filterCmd.CommandText = $"SELECT DISTINCT agent_address FROM offerings {fWhere};";
+            if (marketplace is not null) filterCmd.Parameters.AddWithValue("$mv", marketplace);
+            if (priceMaxUsdc is double pm) filterCmd.Parameters.AddWithValue("$pmax", pm);
+            var filteredAgents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await using var fr = await filterCmd.ExecuteReaderAsync();
+            while (await fr.ReadAsync()) filteredAgents.Add(fr.GetString(0));
+            baselineAgents.IntersectWith(filteredAgents);
+        }
+
+        var churned = baselineAgents.Count(a => !activeAgents.Contains(a));
+        return (baselineAgents.Count, churned);
+    }
+
+    // ── Cohort Survival helpers ───────────────────────────────────────────────
+
+    public record CohortBucket(
+        string WeekIso, DateTime WeekStart, DateTime WeekEnd, int Size);
+
+    /// <summary>
+    /// Returns per ISO-week buckets for agents whose first offering appeared in the window.
+    /// </summary>
+    public async Task<IReadOnlyList<CohortBucket>> ListCohortBucketsAsync(
+        DateTime sinceUtc, string? marketplace, HashSet<string>? chainFilter, double? priceMaxUsdc)
+    {
+        var sinceIso = sinceUtc.ToString("O", CultureInfo.InvariantCulture);
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+
+        var chainIn = chainFilter is { Count: > 0 }
+            ? string.Join(",", chainFilter.Select(c => $"'{c.Replace("'", "''")}'"))
+            : null;
+        var where = new System.Text.StringBuilder("WHERE is_removed = 0 AND first_seen_at >= $since ");
+        if (marketplace is not null) where.Append("AND marketplace_version = $mv ");
+        if (chainIn is not null) where.Append($"AND LOWER(chain) IN ({chainIn}) ");
+        if (priceMaxUsdc is not null) where.Append("AND price_usdc <= $pmax ");
+
+        cmd.CommandText = $@"
+            SELECT agent_address, MIN(first_seen_at) AS first_seen
+            FROM offerings
+            {where}
+            GROUP BY agent_address
+            HAVING MIN(first_seen_at) >= $since
+            ORDER BY first_seen ASC;";
+        cmd.Parameters.AddWithValue("$since", sinceIso);
+        if (marketplace is not null) cmd.Parameters.AddWithValue("$mv", marketplace);
+        if (priceMaxUsdc is double pm) cmd.Parameters.AddWithValue("$pmax", pm);
+
+        var agents = new List<(string addr, DateTime firstSeen)>();
+        await using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var fs = DateTime.Parse(reader.GetString(1), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+            agents.Add((reader.GetString(0), fs));
+        }
+
+        // Group by ISO week
+        var byWeek = new Dictionary<string, (DateTime WeekStart, int Count)>(StringComparer.Ordinal);
+        foreach (var (_, firstSeen) in agents)
+        {
+            var year = ISOWeek.GetYear(firstSeen);
+            var week = ISOWeek.GetWeekOfYear(firstSeen);
+            var key = $"{year}-W{week:D2}";
+            var weekStart = ISOWeek.ToDateTime(year, week, DayOfWeek.Monday);
+            if (byWeek.TryGetValue(key, out var existing))
+                byWeek[key] = (existing.WeekStart, existing.Count + 1);
+            else
+                byWeek[key] = (weekStart, 1);
+        }
+
+        return byWeek
+            .OrderBy(kv => kv.Value.WeekStart)
+            .Select(kv => new CohortBucket(
+                kv.Key,
+                kv.Value.WeekStart,
+                kv.Value.WeekStart.AddDays(7),
+                kv.Value.Count))
+            .ToList();
+    }
+
+    /// <summary>
+    /// Counts agents in the cohort [weekStart, weekEnd) that are still "surviving":
+    /// has ≥1 currently active offering (is_removed = 0).
+    /// </summary>
+    public async Task<int> CountSurvivingInCohortAsync(
+        DateTime weekStart, DateTime weekEnd,
+        string? marketplace, HashSet<string>? chainFilter, double? priceMaxUsdc)
+    {
+        var wsIso = weekStart.ToString("O", CultureInfo.InvariantCulture);
+        var weIso = weekEnd.ToString("O", CultureInfo.InvariantCulture);
+        await using var conn = _db.OpenConnection();
+
+        // Get agents first seen in cohort week
+        await using var cohortCmd = conn.CreateCommand();
+        cohortCmd.CommandText = @"
+            SELECT DISTINCT agent_address FROM offerings
+            WHERE first_seen_at >= $ws AND first_seen_at < $we;";
+        cohortCmd.Parameters.AddWithValue("$ws", wsIso);
+        cohortCmd.Parameters.AddWithValue("$we", weIso);
+        var cohortAgents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var cr = await cohortCmd.ExecuteReaderAsync();
+        while (await cr.ReadAsync()) cohortAgents.Add(cr.GetString(0));
+
+        if (cohortAgents.Count == 0) return 0;
+
+        // Of those, count how many have ≥1 active offering today
+        await using var activeCmd = conn.CreateCommand();
+        activeCmd.CommandText = @"
+            SELECT DISTINCT agent_address FROM offerings
+            WHERE is_removed = 0;";
+        var activeAgents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var ar = await activeCmd.ExecuteReaderAsync();
+        while (await ar.ReadAsync()) activeAgents.Add(ar.GetString(0));
+
+        return cohortAgents.Count(a => activeAgents.Contains(a));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+
     private static Offering MapOffering(System.Data.Common.DbDataReader reader)
     {
         // Optional tombstone columns at the end of the projection. Present in
