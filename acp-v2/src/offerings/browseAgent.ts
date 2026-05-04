@@ -85,6 +85,40 @@ export const browseAgent: Offering = {
       },
     },
   },
+  deliverableExample: {
+    agentAddress: "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+    agentName: "DeFiEval",
+    reputation: {
+      agentAddress: "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+      agentName: "DeFiEval",
+      agentScore: 78,
+      agentTotalJobs: 126,
+      agentPercentile: 82.4,
+      computedAt: "2026-05-04T12:34:56Z",
+    },
+    offerings: [
+      {
+        offeringId: 4421,
+        offeringName: "evaluate_defi_agent",
+        description: "One-shot evaluation of a DeFi agent's on-chain track record.",
+        priceUsdc: 0.99,
+        priceType: "per-call",
+        chain: "base",
+        isPrivate: false,
+        requirementSchema: { type: "object", properties: { agentAddress: { type: "string" } }, required: ["agentAddress"] },
+        firstSeenAt: "2026-04-26T10:00:00Z",
+        lastSeenAt: "2026-05-04T11:00:00Z",
+        marketplaceVersion: "v2",
+        pricePercentile: { value: 22.5, peerN: 18, lowN: false },
+      },
+    ],
+    crossPresence: {
+      v1: { offeringCount: 1, firstSeenAt: "2026-04-26T10:00:00Z", lastSeenAt: "2026-05-03T11:00:00Z" },
+      v2: { offeringCount: 2, firstSeenAt: "2026-04-29T10:00:00Z", lastSeenAt: "2026-05-04T11:00:00Z" },
+      inBoth: true,
+      dominant: "v2",
+    },
+  },
   validate(req) {
     const addr = requireString(req.agentAddress, "agentAddress", 128);
     if (!addr.valid) return addr;

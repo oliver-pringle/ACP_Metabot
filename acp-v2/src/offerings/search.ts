@@ -108,6 +108,43 @@ export const search: Offering = {
       },
     },
   },
+  deliverableExample: {
+    query: "close a position on GMX for under 0.20 USDC",
+    count: 2,
+    bestMatch: {
+      agentAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      offeringName: "gmx_close_position",
+      score: 0.87,
+    },
+    results: [
+      {
+        offeringId: 5512,
+        agentName: "GMXCloser",
+        agentAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        offeringName: "gmx_close_position",
+        description: "Build calldata to close a GMX perp position.",
+        priceUsdc: 0.15,
+        priceType: "per-call",
+        chain: "arbitrum",
+        score: 0.87,
+        saturation: { nearDuplicateCount: 1, categorySize: 9 },
+        pricePercentile: { value: 41.2, peerN: 9, lowN: false },
+      },
+      {
+        offeringId: 5489,
+        agentName: "PerpHelper",
+        agentAddress: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        offeringName: "perp_close",
+        description: "Close any GMX/dYdX/Hyperliquid perp position.",
+        priceUsdc: 0.18,
+        priceType: "per-call",
+        chain: "arbitrum",
+        score: 0.81,
+        saturation: { nearDuplicateCount: 2, categorySize: 9 },
+        pricePercentile: { value: 55.5, peerN: 9, lowN: false },
+      },
+    ],
+  },
   validate(req) {
     const q = requireString(req.query, "query", 2048);
     if (!q.valid) return q;

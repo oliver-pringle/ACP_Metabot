@@ -502,13 +502,13 @@ endpoints directly. Direct curl is also fine.
 |---|---|---|
 | `POST /v1/search` | 30/IP/hr | Same handler as the paid `search` SKU. Accepts `offset` for pagination beyond the top 50. Filters: `priceMaxUsdc`, `chain` (array, ≤8), `minReputation` (0-100), `freshness` (days), `category`, `marketplace` (`v1`/`v2`). |
 | `POST /v1/composeStack` | 5/IP/hr | Same handler as paid `composeStack`. Filters: `chain`, `marketplace`. |
-| `POST /v1/searchAgents` | 30/IP/hr | Agent-level search distinct from offering-level — groups offering BM25 hits by agent. Returns top-N agents with their best score, total offerings, and top-3 offering names. |
+| `POST /v1/searchAgents` | 30/IP/hr | Agent-level search — hybrid (BM25 + dense + Voyage rerank). Returns top-N agents with `score` (opaque post-rerank cosine, sort by it), `topOfferings` (records with name + price + marketplace), `topOfferingNames` (string[] mirror for backward compat), `marketplaces`, `dominantMarketplace`, `agentScore`. |
 | `GET /v1/agentReputation?agent=<addr>` | 60/IP/hr | Cache-only behavioural score. 404 = not yet evaluated. |
 | `GET /v1/agentReputationHistory?agent=<addr>&days=<1-90>` | 60/IP/hr | Day-by-day reputation trajectory. |
 | `GET /v1/agentRecentJobs?agent=<addr>&days=<1-90>&limit=<1-100>` | 20/IP/hr | Per-job on-chain ledger (jobId, status, counterparty, USDC amount). RPC-heavy — tighter rate limit. |
-| `GET /v1/digest?days=<1-30>` | 60/IP/hr | New launches + biggest hire-count gainers. Filters: `chain`, `priceMaxUsdc`, `marketplace`. |
+| `GET /v1/digest?days=<1-90>` | 60/IP/hr | New launches + biggest hire-count gainers. Filters: `chain`, `priceMaxUsdc`, `marketplace`. `days` cap extended to 90. New pulse fields: `newAgents`, `churnRate`, `cohortSurvival`, `saturationMap`, `windowStart`, `partial`. |
 | `GET /v1/recentHires?days=<1-30>&limit=<1-50>` | 60/IP/hr | Top offerings by absolute hire-count delta only (gainers). Filters: `chain`, `priceMaxUsdc`, `category`, `marketplace`. |
-| `GET /v1/agent/{address}` | 60/IP/hr | Full agent profile: every offering with descriptions, schemas, prices, per-offering reputation. |
+| `GET /v1/agent/{address}` | 60/IP/hr | Full agent profile: every offering with descriptions, schemas, prices, per-offering `pricePercentile`. Includes `crossPresence` block (V1/V2 per-marketplace footprint summary). |
 | `GET /v1/watches/{id}` | 60/IP/hr | Read-only watch status. Returns alive/expired/paused, expiry, alerts fired, query, filters. **Buyer address and webhook URL are NOT returned** — the public path redacts those. |
 | `GET /v1/categories` | unlimited | Canonical marketplace categories with `offeringCount` per category (computed live from corpus). |
 | `GET /v1/health` | unlimited | Diagnostic. Returns total `corpus.count` plus `corpus.v1Count` / `corpus.v2Count` split, last fetch time, and category-classifier readiness. |
@@ -528,6 +528,85 @@ The plugin caches `acp_categories` and `acp_health` responses in-process for 5 m
   re-checks within the day are effectively free. For bulk reputation
   consumption, hit `GET /v1/agentReputation?agent=<addr>` (free,
   cache-only).
+
+### Hybrid agent search (`POST /v1/searchAgents`)
+
+`/v1/searchAgents` runs a three-leg pipeline:
+
+1. **BM25 (FTS5)** — exact keyword matching via `agent_profiles_fts`. Catches
+   queries with precise terminology.
+2. **Dense (embedding)** — cosine similarity against `agent_profiles.embedding`
+   (Voyage, same model as offering search). Catches synonym and paraphrase
+   intent (e.g. "watching whale wallets" retrieves agents whose offerings say
+   "tracking large on-chain holders").
+3. **RRF fusion + Voyage rerank** — the two lists are merged with
+   Reciprocal Rank Fusion (k=60), then the top-50 candidates are sent to
+   Voyage for rerank, which tightens final ordering.
+
+The `score` field in the response is the post-rerank cosine value (0–1, higher
+is better). It is an opaque ordering signal — sort by it, do not interpret the
+absolute value. The semantic flip from v1.6 (where BM25 score was lower=better)
+is intentional; callers should always sort descending.
+
+`topOfferings` in v1.7 is an array of records `{offeringName, priceUsdc,
+marketplaceVersion}`. For callers using the old string-array shape, a
+`topOfferingNames: string[]` mirror field is also returned.
+
+New fields on each agent hit: `marketplaces` (sorted subset of `["v1","v2"]`),
+`dominantMarketplace` (by offering count; tiebreak by total jobs), `agentScore`
+(cached behavioural score 0–100; nullable for unevaluated agents).
+
+### V1 ↔ V2 cross-presence on `acp_browse_agent` (`GET /v1/agent/{address}`)
+
+Every agent profile response now includes a `crossPresence` block:
+
+```json
+{
+  "crossPresence": {
+    "v1": { "offeringCount": 3, "firstSeenAt": "...", "lastSeenAt": "..." },
+    "v2": { "offeringCount": 2, "firstSeenAt": "...", "lastSeenAt": "..." },
+    "inBoth": true,
+    "dominant": "v1"
+  }
+}
+```
+
+`dominant` is the marketplace with more offerings; tiebreak goes to the one with
+higher total job count. When an agent is single-marketplace, the absent
+marketplace key is `null` and `inBoth` is `false`.
+
+The existing reputation block (completion rate, dispute rate, etc.) remains a
+cross-version aggregate — per-marketplace job-count breakdown is deferred to
+v1.8.
+
+Each offering in the `offerings[]` array also gains a `pricePercentile` field:
+`{value: 0–100, peerN, lowN}` — position within the same `(category ×
+marketplace)` peer group. `lowN: true` (fewer than 5 peers) means the percentile
+is unreliable; `value` will be `null` in that case.
+
+### Marketplace pulse digest extensions on `acp_today` (`GET /v1/digest`)
+
+The `days` cap extends from 30 to 90. Six new fields appear in every response:
+
+| Field | Meaning |
+|---|---|
+| `windowStart` | UTC timestamp marking the start of the requested window. |
+| `partial` | `true` when backing data doesn't fully cover the window (e.g. deploy younger than `days`). |
+| `newAgents.count` / `.agents[]` | Agents whose first offering appeared in the window. Top-10 by `firstSeenAt` desc. |
+| `churnRate.rate` / `.churnedCount` / `.baselineCount` | Fraction of agents active at `windowStart` that now have zero live offerings. |
+| `cohortSurvival[]` | ISO-week buckets for the last 12 weeks. Each entry: `cohortWeek`, `cohortStart`, `cohortSize`, `surviving`, `survivalRate`. `null` when `days < 30`. |
+| `saturationMap[]` | Per-category: `category`, `total`, `saturatedCount`, `saturationPct`. |
+
+**Important:** `saturationMap` is computed globally across the full corpus and is
+NOT scoped to the `marketplace` / `chain` / `priceMaxUsdc` filters you pass. All
+other digest fields respect those filters.
+
+`cohortSurvival` is `null` when `days < 30` (insufficient cohort width for
+meaningful retention buckets). Hard cap at 12 weeks regardless of `days` value.
+
+The digest has an hourly in-memory cache keyed on `(days, marketplace, chain-set,
+priceMaxUsdc)`. Results can be up to 60 minutes stale relative to the indexer —
+acceptable for a marketplace-temperature view.
 
 ### Data freshness
 

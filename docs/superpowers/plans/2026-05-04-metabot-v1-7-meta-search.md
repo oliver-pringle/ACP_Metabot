@@ -86,7 +86,7 @@
 - Modify: `ACP_Metabot/ACP_Metabot/ACP_Metabot.Api/Data/Db.cs` — append to `InitializeSchemaAsync`.
 - Test: `ACP_Metabot/ACP_Metabot/ACP_Metabot.Api.Tests/DbMigrationTests.cs` — extend.
 
-- [ ] **Step 1: Write failing migration test**
+- [x] **Step 1: Write failing migration test**
 
 Append to `DbMigrationTests.cs`:
 

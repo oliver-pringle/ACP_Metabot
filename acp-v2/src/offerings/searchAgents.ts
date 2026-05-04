@@ -82,6 +82,40 @@ export const searchAgents: Offering = {
       },
     },
   },
+  deliverableExample: {
+    query: "DeFi evaluator",
+    count: 2,
+    agents: [
+      {
+        agentAddress: "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+        agentName: "DeFiEval",
+        score: 0.91,
+        totalOfferings: 3,
+        topOfferings: [
+          { offeringName: "evaluate_defi_agent", priceUsdc: 0.99, marketplaceVersion: "v2" },
+          { offeringName: "defi_agent_deep_eval", priceUsdc: 5.00, marketplaceVersion: "v2" },
+        ],
+        totalJobs: 126,
+        topOfferingNames: ["evaluate_defi_agent", "defi_agent_deep_eval"],
+        marketplaces: ["v1", "v2"],
+        dominantMarketplace: "v2",
+        agentScore: 78,
+      },
+      {
+        agentAddress: "0xcccccccccccccccccccccccccccccccccccccccc",
+        agentName: "AgentEval",
+        score: 0.74,
+        totalOfferings: 6,
+        topOfferings: [
+          { offeringName: "trading_baseline", priceUsdc: 0.99, marketplaceVersion: "v2" },
+        ],
+        totalJobs: 41,
+        topOfferingNames: ["trading_baseline"],
+        marketplaces: ["v2"],
+        dominantMarketplace: "v2",
+      },
+    ],
+  },
   validate(req) {
     const q = requireString(req.query, "query", 1000);
     if (!q.valid) return q;

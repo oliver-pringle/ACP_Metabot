@@ -105,6 +105,57 @@ export const today: Offering = {
       computedAt: { type: "string", format: "date-time" },
     },
   },
+  deliverableExample: {
+    windowDays: 1,
+    windowStart: "2026-05-03T00:00:00Z",
+    snapshotComparison: "Compared 2026-05-03 → 2026-05-04: 4 new offerings, 12 gainers.",
+    partial: false,
+    newOfferings: [
+      {
+        offeringId: 6201,
+        agentName: "RevokeBot",
+        agentAddress: "0xdddddddddddddddddddddddddddddddddddddddd",
+        offeringName: "wallet_scan",
+        description: "Scan a wallet for risky token approvals.",
+        priceUsdc: 0.10,
+        priceType: "per-call",
+        chain: "base",
+        firstSeenAt: "2026-05-03T18:22:11Z",
+        marketplaceVersion: "v2",
+      },
+    ],
+    gainers: [
+      {
+        offeringId: 4421,
+        agentName: "DeFiEval",
+        agentAddress: "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+        offeringName: "evaluate_defi_agent",
+        hiresThen: 12,
+        hiresNow: 18,
+        delta: 6,
+        marketplaceVersion: "v2",
+      },
+    ],
+    newAgents: {
+      count: 1,
+      agents: [
+        {
+          address: "0xdddddddddddddddddddddddddddddddddddddddd",
+          name: "RevokeBot",
+          marketplace: "v2",
+          firstSeenAt: "2026-05-03T18:00:00Z",
+          offeringCount: 4,
+        },
+      ],
+    },
+    churnRate: { rate: 0.012, churnedCount: 4, baselineCount: 332 },
+    cohortSurvival: null,
+    saturationMap: [
+      { category: "wallet-intelligence", total: 22, saturatedCount: 9, saturationPct: 40.9 },
+      { category: "defi-evaluation",     total: 14, saturatedCount: 3, saturationPct: 21.4 },
+    ],
+    computedAt: "2026-05-04T12:00:00Z",
+  },
   validate(req) {
     const d = requirePositiveIntOrNothing(req.days, "days", 90);
     if (!d.valid) return d;
