@@ -44,6 +44,23 @@ public class SearchService
     public int CorpusCount => Volatile.Read(ref _corpus)?.Count ?? 0;
 
     /// <summary>
+    /// Returns the pre-tagged category for a single offering, looked up by id
+    /// in the in-memory corpus. Returns null when the corpus hasn't loaded yet
+    /// or the offering isn't present (e.g. recently removed). O(n) scan is fine
+    /// for typical agent portfolio sizes (single digits to low hundreds).
+    /// </summary>
+    public string? GetCategoryForOffering(long offeringId)
+    {
+        var corpus = Volatile.Read(ref _corpus);
+        if (corpus is null) return null;
+        foreach (var (offering, _, category) in corpus)
+        {
+            if (offering.Id == offeringId) return category;
+        }
+        return null;
+    }
+
+    /// <summary>
     /// (categoryName -> active offering count) over the embedded corpus.
     /// Cheap to compute on demand; the corpus already carries each row's
     /// pre-tagged category. Returns an empty dict before the first refresh.

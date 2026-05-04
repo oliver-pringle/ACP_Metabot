@@ -70,6 +70,7 @@ builder.Services.AddSingleton<SaturationCalculator>(_ => new SaturationCalculato
 builder.Services.AddSingleton<PricePercentileCalculator>(_ => new PricePercentileCalculator(
     lowNThreshold: builder.Configuration.GetValue<int?>("PricePercentile:LowNThreshold") ?? 5));
 builder.Services.AddSingleton<SearchService>();
+builder.Services.AddSingleton<CrossPresenceBuilder>();
 builder.Services.AddSingleton<StackComposerService>();
 builder.Services.AddSingleton<WebhookDeliveryService>();
 builder.Services.AddSingleton<WatchService>();
@@ -466,7 +467,9 @@ async Task<IResult> HandleDigest(int? days, string? marketplace,
 }
 
 async Task<IResult> HandleBrowseAgent(string address,
-    OfferingRepository repo, ReputationService reputation)
+    OfferingRepository repo, ReputationService reputation,
+    CrossPresenceBuilder crossPresence, PricePercentileCalculator pricePercentile,
+    SearchService search)
 {
     if (string.IsNullOrWhiteSpace(address))
         return Results.BadRequest(new { error = "agentAddress is required" });
@@ -482,6 +485,7 @@ async Task<IResult> HandleBrowseAgent(string address,
         return Results.NotFound(new { error = "agent not found" });
 
     var rep = reputation.Build(offerings, offeringName: null);
+    var cp = await crossPresence.BuildAsync(addr);
 
     var browseOfferings = offerings
         .OrderByDescending(o => o.UsageCount)
@@ -501,6 +505,9 @@ async Task<IResult> HandleBrowseAgent(string address,
                     // rather than failing the whole browse call.
                 }
             }
+            var category = search.GetCategoryForOffering(o.Id) ?? string.Empty;
+            var mv = o.MarketplaceVersion ?? "v1";
+            var pp = pricePercentile.Compute(o.Id, category, mv, o.PriceUsdc);
             return new AgentBrowseOffering(
                 OfferingId: o.Id,
                 OfferingName: o.OfferingName,
@@ -513,7 +520,8 @@ async Task<IResult> HandleBrowseAgent(string address,
                 FirstSeenAt: o.FirstSeenAt.ToString("O"),
                 LastSeenAt: o.LastSeenAt.ToString("O"),
                 Reputation: reputation.BuildSearchSummary(o),
-                MarketplaceVersion: o.MarketplaceVersion);
+                MarketplaceVersion: mv,
+                PricePercentile: new PricePercentileDto(pp.Value, pp.PeerN, pp.LowN));
         })
         .ToArray();
 
@@ -521,7 +529,8 @@ async Task<IResult> HandleBrowseAgent(string address,
         AgentAddress: addr,
         AgentName: offerings[0].AgentName,
         Reputation: rep,
-        Offerings: browseOfferings);
+        Offerings: browseOfferings,
+        CrossPresence: cp);
 
     return Results.Ok(result);
 }
@@ -532,8 +541,10 @@ app.MapPost("/agentReputation", HandleReputation);
 app.MapGet("/digest", (int? days, string? marketplace, string[]? chain, double? priceMaxUsdc, DigestService svc)
     => HandleDigest(days, marketplace, chain, priceMaxUsdc, svc));
 app.MapGet("/agent/{address}", (string address,
-    OfferingRepository repo, ReputationService reputation)
-    => HandleBrowseAgent(address, repo, reputation));
+    OfferingRepository repo, ReputationService reputation,
+    CrossPresenceBuilder crossPresence, PricePercentileCalculator pricePercentile,
+    SearchService search)
+    => HandleBrowseAgent(address, repo, reputation, crossPresence, pricePercentile, search));
 app.MapGet("/categories", (CategoryService svc) => Results.Ok(new { categories = svc.Categories }));
 
 // Public gateway — same logic, no X-API-Key, IP rate-limited.
@@ -601,8 +612,11 @@ app.MapGet("/v1/digest", (int? days, string? marketplace, string[]? chain, doubl
     => HandleDigest(days, marketplace, chain, priceMaxUsdc, svc))
     .RequireRateLimiting("public-digest");
 app.MapGet("/v1/agent/{address}", (string address,
-    OfferingRepository repo, ReputationService reputation)
-    => HandleBrowseAgent(address, repo, reputation)).RequireRateLimiting("public-browse-agent");
+    OfferingRepository repo, ReputationService reputation,
+    CrossPresenceBuilder crossPresence, PricePercentileCalculator pricePercentile,
+    SearchService search)
+    => HandleBrowseAgent(address, repo, reputation, crossPresence, pricePercentile, search))
+    .RequireRateLimiting("public-browse-agent");
 // Static list — no per-IP limit; CDN-cacheable in front of Caddy if abuse appears.
 // Now includes offeringCount per category (computed from the live corpus
 // so it reflects active, non-tombstoned offerings).
