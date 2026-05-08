@@ -47,6 +47,12 @@ services:
       # ACP_METABOT_DOMAIN matches the var Caddy uses for its certificate;
       # update both together if the public hostname changes.
       - AllowedHosts=${ACP_METABOT_DOMAIN:-localhost};acp-metabot-api;localhost
+      # Cross-bot client to ACP_ChainlinkBot (Chainlink Functions hire). Reaches
+      # the sibling bot over the acp-shared external bridge. The API key is
+      # ACP_ChainlinkBot's own INTERNAL_API_KEY exposed here under a
+      # disambiguated env var so each bot's own INTERNAL_API_KEY stays distinct.
+      - TheChainlinkBot__BaseUrl=http://acp-chainlinkbot-api:5000/
+      - TheChainlinkBot__ApiKey=${THECHAINLINKBOT_API_KEY:-}
     volumes:
       # Bind-mount must be writable by UID 1654 (the .NET 10 `app` user).
       # One-time setup on a fresh host: `mkdir -p data && sudo chown 1654:1654 data`.

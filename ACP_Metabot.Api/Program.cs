@@ -29,6 +29,20 @@ builder.Services.AddSingleton<V2KnownSellersRepository>();
 builder.Services.AddSingleton<MetricsChannel>();
 
 builder.Services.AddHttpClient();
+// Cross-bot HTTP client to ACP_ChainlinkBot. BaseAddress comes from
+// TheChainlinkBot:BaseUrl (default: the acp-shared bridge service name);
+// the THECHAINLINKBOT_API_KEY env var is read by the typed client itself.
+// Empty key + unreachable URL are tolerated at startup — calls fail at
+// runtime when the cross-bot relationship hasn't been provisioned yet.
+builder.Services.AddHttpClient("thechainlinkbot", c =>
+{
+    var baseUrl = builder.Configuration["TheChainlinkBot:BaseUrl"]
+        ?? "http://acp-chainlinkbot-api:5000/";
+    if (!baseUrl.EndsWith("/")) baseUrl += "/";
+    c.BaseAddress = new Uri(baseUrl);
+    c.Timeout = TimeSpan.FromSeconds(15);
+});
+builder.Services.AddSingleton<TheChainlinkBotClient>();
 builder.Services.AddSingleton<AcpOffChainClient>();
 builder.Services.AddSingleton<ChainEventScanner>();
 builder.Services.AddSingleton<ScoreCalculator>();
@@ -273,6 +287,11 @@ app.UseMiddleware<RequestMetricsMiddleware>();
 // Claude Code plugin. Fail-closed: if the key isn't configured, refuse all
 // auth'd requests. Set INTERNAL_API_KEY in the environment for both this
 // container and the sidecar.
+//
+// Exception within /v1/*: /v1/agents/active is an internal cross-bot endpoint
+// (consumed over the acp-shared docker network by ACP_ChainlinkBot to learn
+// which agents to score on-chain). It MUST require X-API-Key — unlike the
+// other /v1/* paths it is never reached from the public Caddy gateway.
 var apiKey = builder.Configuration["INTERNAL_API_KEY"];
 var apiKeyBytes = string.IsNullOrEmpty(apiKey)
     ? Array.Empty<byte>()
@@ -280,8 +299,10 @@ var apiKeyBytes = string.IsNullOrEmpty(apiKey)
 app.Use(async (ctx, next) =>
 {
     var path = ctx.Request.Path;
+    var isInternalV1 = path.StartsWithSegments("/v1/agents/active",
+        StringComparison.OrdinalIgnoreCase);
     if (path.Equals("/health", StringComparison.OrdinalIgnoreCase) ||
-        path.StartsWithSegments("/v1", StringComparison.OrdinalIgnoreCase))
+        (path.StartsWithSegments("/v1", StringComparison.OrdinalIgnoreCase) && !isInternalV1))
     {
         await next();
         return;
@@ -824,6 +845,26 @@ app.MapGet("/v1/agentRecentJobs",
         ChainEventScanner scanner, CancellationToken ct) =>
         HandleAgentRecentJobs(agent, days, limit, scanner, ct))
     .RequireRateLimiting("public-agent-recent-jobs");
+
+// Internal cross-bot endpoint — returns lowercased addresses of agents with at
+// least one non-tombstoned offering seen in the last 30 days. Consumed by
+// ACP_ChainlinkBot (over the acp-shared docker network) to enumerate which
+// agents to score on-chain. Path lives under /v1/* but is special-cased in the
+// X-API-Key middleware above so callers must hold INTERNAL_API_KEY.
+//
+// `windowDays` is the configurable lookback (default 30, clamped 1..365).
+app.MapGet("/v1/agents/active",
+    async (int? windowDays, OfferingRepository repo, CancellationToken ct) =>
+    {
+        var window = windowDays is null ? 30 : Math.Clamp(windowDays.Value, 1, 365);
+        var addrs = await repo.ListActiveAgentAddressesAsync(window, ct);
+        return Results.Ok(new
+        {
+            windowDays = window,
+            count = addrs.Count,
+            agents = addrs
+        });
+    });
 
 app.MapGet("/index/stats", async (OfferingRepository repo, MarketplaceIndexerService idx,
     VoyageEmbeddingProvider emb) =>

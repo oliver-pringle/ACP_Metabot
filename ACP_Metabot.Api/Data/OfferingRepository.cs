@@ -926,6 +926,32 @@ public class OfferingRepository
         return dict;
     }
 
+    /// <summary>
+    /// Distinct agent addresses with at least one non-tombstoned offering seen
+    /// in the last <paramref name="windowDays"/>. Used by cross-bot consumers
+    /// (notably ACP_ChainlinkBot) to know which agents to score on-chain.
+    /// Lowercased, deduplicated, ordered by address for stable output.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ListActiveAgentAddressesAsync(
+        int windowDays, CancellationToken ct = default)
+    {
+        var cutoff = DateTime.UtcNow.AddDays(-windowDays).ToString("O", CultureInfo.InvariantCulture);
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT DISTINCT LOWER(agent_address)
+            FROM offerings
+            WHERE is_removed = 0
+              AND last_seen_at >= $cutoff
+            ORDER BY 1;";
+        cmd.Parameters.AddWithValue("$cutoff", cutoff);
+        var result = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            result.Add(reader.GetString(0));
+        return result;
+    }
+
     // ── Digest helpers (v1.7) ─────────────────────────────────────────────────
 
     /// <summary>
