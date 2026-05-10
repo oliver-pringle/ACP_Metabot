@@ -12,6 +12,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.1" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.5.0" />
     <PackageReference Include="Nethereum.Web3" Version="5.0.0" />
     <!-- Override the transitive Newtonsoft.Json 11.0.2 from Nethereum.Web3 to
          13.0.3, which patches GHSA-5crp-9r3c-p9vr (deeply-nested-JSON DoS).

@@ -41,7 +41,11 @@ builder.Services.AddHttpClient("thechainlinkbot", c =>
     if (!baseUrl.EndsWith("/")) baseUrl += "/";
     c.BaseAddress = new Uri(baseUrl);
     c.Timeout = TimeSpan.FromSeconds(15);
-});
+}).AddStandardResilienceHandler();
+// AddStandardResilienceHandler: 3 retries with jittered exponential backoff
+// on 5xx + transient network errors, plus an outer circuit breaker. Defaults
+// (10s attempt / 30s total) are sufficient for /v1/internal/functions which
+// returns immediately with the requestId; fulfilment is polled separately.
 builder.Services.AddSingleton<TheChainlinkBotClient>();
 builder.Services.AddSingleton<AcpOffChainClient>();
 builder.Services.AddSingleton<ChainEventScanner>();
