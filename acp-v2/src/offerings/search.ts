@@ -38,7 +38,7 @@ export const search: Offering = {
       },
       chain: {
         type: "array",
-        items: { type: "string" },
+        items: { type: "string", description: "Chain id (e.g. base, base-sepolia, ethereum)." },
         description: "Optional. Restrict to one or more chain ids (e.g. [\"base\",\"base-sepolia\"]). Case-insensitive; up to 8 entries."
       },
       minReputation: {
@@ -56,51 +56,59 @@ export const search: Offering = {
     },
     required: ["query"]
   },
+  requirementExample: {
+    query: "agent that does wallet intelligence",
+    limit: 5,
+    minReputation: 50,
+  },
+  slaMinutes: 5,
   deliverableSchema: {
     type: "object",
     required: ["query", "count", "results"],
     properties: {
-      query: { type: "string" },
-      count: { type: "integer" },
+      query: { type: "string", description: "Echo of the input query." },
+      count: { type: "integer", description: "Number of result entries returned." },
       bestMatch: {
         type: "object",
         nullable: true,
+        description: "Top-ranked result when its score exceeds 0.8, otherwise null.",
         properties: {
-          agentAddress: { type: "string" },
-          offeringName: { type: "string" },
-          score: { type: "number" },
+          agentAddress: { type: "string", description: "Lowercased 0x-prefixed wallet of the seller." },
+          offeringName: { type: "string", description: "Marketplace name of the matched offering." },
+          score: { type: "number", description: "Hybrid relevance score 0-1." },
         },
       },
       results: {
         type: "array",
+        description: "Ranked offering matches (highest score first).",
         items: {
           type: "object",
           required: ["offeringId", "agentName", "agentAddress", "offeringName", "description", "priceUsdc", "priceType", "chain", "score"],
           properties: {
-            offeringId: { type: "integer" },
-            agentName: { type: "string" },
-            agentAddress: { type: "string" },
-            offeringName: { type: "string" },
-            description: { type: "string" },
-            priceUsdc: { type: "number" },
-            priceType: { type: "string" },
-            chain: { type: "string" },
-            score: { type: "number" },
+            offeringId: { type: "integer", description: "Internal numeric id of the offering in the index." },
+            agentName: { type: "string", description: "Marketplace display name of the agent." },
+            agentAddress: { type: "string", description: "Lowercased 0x-prefixed wallet of the seller." },
+            offeringName: { type: "string", description: "Marketplace name of the offering." },
+            description: { type: "string", description: "Free-text description as registered on-chain." },
+            priceUsdc: { type: "number", description: "Per-call USDC price." },
+            priceType: { type: "string", description: "Pricing model (e.g. per-call, subscription)." },
+            chain: { type: "string", description: "Chain id where the offering is registered." },
+            score: { type: "number", description: "Hybrid relevance score 0-1." },
             saturation: {
               type: "object",
               description: "Per-category near-duplicate saturation. nearDuplicateCount = offerings with cosine similarity ≥ threshold in the same category; categorySize = total offerings in category.",
               properties: {
-                nearDuplicateCount: { type: "integer" },
-                categorySize: { type: "integer" },
+                nearDuplicateCount: { type: "integer", description: "Offerings with similarity ≥ threshold in the same category." },
+                categorySize: { type: "integer", description: "Total offerings in the category." },
               },
             },
             pricePercentile: {
               type: "object",
               description: "Price position within the same category × marketplace cohort. value = percentile 0-100 (null when peerN < lowNThreshold); lowN = true when fewer than 5 peers exist.",
               properties: {
-                value: { type: "number", nullable: true },
-                peerN: { type: "integer" },
-                lowN: { type: "boolean" },
+                value: { type: "number", nullable: true, description: "Percentile rank 0-100, null when peer set is too small." },
+                peerN: { type: "integer", description: "Number of peer offerings used to compute the percentile." },
+                lowN: { type: "boolean", description: "True when fewer than 5 peers exist." },
               },
             },
           },

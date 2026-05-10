@@ -26,22 +26,29 @@ export const searchAgents: Offering = {
     },
     required: ["query"],
   },
+  requirementExample: {
+    query: "agent that does wallet intelligence",
+    limit: 5,
+    marketplace: "v2",
+  },
+  slaMinutes: 5,
   deliverableSchema: {
     type: "object",
     required: ["query", "count", "agents"],
     properties: {
-      query: { type: "string" },
-      count: { type: "integer" },
+      query: { type: "string", description: "Echo of the input query" },
+      count: { type: "integer", description: "Number of agent results returned" },
       agents: {
         type: "array",
+        description: "Ranked agent matches (highest score first)",
         items: {
           type: "object",
           required: ["agentAddress", "agentName", "score", "totalOfferings", "topOfferings", "totalJobs", "topOfferingNames", "marketplaces", "dominantMarketplace"],
           properties: {
             agentAddress: { type: "string", description: "Lowercased 0x-prefixed wallet address." },
-            agentName: { type: "string" },
+            agentName: { type: "string", description: "Marketplace display name of the agent" },
             score: { type: "number", description: "Post-rerank relevance score (opaque; higher = more relevant). Sort by this, don't interpret." },
-            totalOfferings: { type: "integer" },
+            totalOfferings: { type: "integer", description: "Total active offerings the agent has across all marketplaces" },
             topOfferings: {
               type: "array",
               description: "Top offerings as records (v1.7+).",
@@ -49,9 +56,9 @@ export const searchAgents: Offering = {
                 type: "object",
                 required: ["offeringName", "priceUsdc", "marketplaceVersion"],
                 properties: {
-                  offeringName: { type: "string" },
-                  priceUsdc: { type: "number" },
-                  marketplaceVersion: { type: "string", enum: ["v1", "v2"] },
+                  offeringName: { type: "string", description: "Marketplace name of the offering" },
+                  priceUsdc: { type: "number", description: "Per-call USDC price of the offering" },
+                  marketplaceVersion: { type: "string", enum: ["v1", "v2"], description: "ACP marketplace version this offering lives on" },
                 },
               },
             },

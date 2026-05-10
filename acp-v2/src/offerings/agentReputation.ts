@@ -16,6 +16,10 @@ export const agentReputation: Offering = {
     },
     required: ["agentAddress"],
   },
+  requirementExample: {
+    agentAddress: "0x693a237221e760bC7ff4968B74e25dCA17234633",
+  },
+  slaMinutes: 5,
   deliverableSchema: {
     type: "object",
     required: [
@@ -49,11 +53,11 @@ export const agentReputation: Offering = {
         type: "object",
         required: ["totalJobs", "completed", "rejected", "expired", "completedLast30d"],
         properties: {
-          totalJobs:        { type: "integer" },
-          completed:        { type: "integer" },
-          rejected:         { type: "integer" },
-          expired:          { type: "integer" },
-          completedLast30d: { type: "integer" },
+          totalJobs:        { type: "integer", description: "Total on-chain jobs observed for the agent within the scoring window" },
+          completed:        { type: "integer", description: "Number of jobs that reached JobCompleted on-chain" },
+          rejected:         { type: "integer", description: "Number of jobs ended via JobRejected" },
+          expired:          { type: "integer", description: "Number of jobs that timed out via JobExpired" },
+          completedLast30d: { type: "integer", description: "Subset of completed jobs that fall within the trailing 30 days" },
           lastActiveAt:     { type: "string", format: "date-time", description: "Optional. ISO-8601 UTC of last on-chain JobSubmitted, or off-chain lastActiveAt if available." },
         },
       },
@@ -74,7 +78,7 @@ export const agentReputation: Offering = {
           required: ["date", "agentScore"],
           properties: {
             date:       { type: "string", description: "YYYY-MM-DD UTC." },
-            agentScore: { type: "integer", minimum: 0, maximum: 100 },
+            agentScore: { type: "integer", minimum: 0, maximum: 100, description: "Composite reputation score for this day" },
             subScores:  { description: "Per-day sub-score breakdown when available." },
           },
         },
@@ -89,7 +93,7 @@ export const agentReputation: Offering = {
           score:            { type: "integer", minimum: 0, maximum: 100, description: "0-100 sub-score." },
           percentile:       { type: "number", description: "Position within the corpus, 0-100, 1dp." },
           evidence:         { type: "string", description: "Human-readable derivation of the score." },
-          insufficientData: { type: "boolean" },
+          insufficientData: { type: "boolean", description: "True when this sub-score lacks enough on-chain evidence to be meaningful" },
         },
       },
     },

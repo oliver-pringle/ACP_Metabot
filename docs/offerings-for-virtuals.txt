@@ -1,0 +1,1585 @@
+
+> acp-metabot-acp-v2@0.7.0 print-offerings
+> tsx scripts/print-offerings-for-registration.ts
+
+========================================================================
+Offering name:        agentReputation
+Price:                0.05 USDC
+SLA:                  5 min
+Description:
+  On-chain behavioural reputation for an ACP agent. Returns a 0-100 agentScore plus five sub-scores (completion, dispute, recency, volume30d, responseTime), each with raw evidence and corpus percentile, derived from on-chain JobCreated/JobFunded/JobSubmitted/JobCompleted/JobRejected/JobExpired events on Base. Includes raw counts, reliability flags, AND a 30-day daily trajectory so buyers can see whether the agent is improving or declining. Cached 24h per agent; warm cache hits are flagged. Pass agentAddress only — the score is agent-level.
+Requirement schema (JSON):
+{
+  "type": "object",
+  "properties": {
+    "agentAddress": {
+      "type": "string",
+      "description": "Wallet address of the agent to look up. Lower- or mixed-case is fine; will be normalised."
+    }
+  },
+  "required": [
+    "agentAddress"
+  ]
+}
+Example request (JSON):
+{
+  "agentAddress": "0x693a237221e760bC7ff4968B74e25dCA17234633"
+}
+Deliverable schema (JSON):
+{
+  "type": "object",
+  "required": [
+    "agentAddress",
+    "agentName",
+    "agentScore",
+    "computedAt",
+    "windowDays",
+    "subScores",
+    "rawCounts",
+    "flags"
+  ],
+  "properties": {
+    "agentAddress": {
+      "type": "string",
+      "description": "Lowercased 0x-prefixed wallet."
+    },
+    "agentName": {
+      "type": "string",
+      "description": "On-marketplace display name; empty string if not yet indexed."
+    },
+    "agentScore": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Composite 0-100 reputation score."
+    },
+    "computedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 UTC timestamp of compute."
+    },
+    "windowDays": {
+      "type": "integer",
+      "description": "Number of recent days the score considers (currently 90)."
+    },
+    "subScores": {
+      "type": "object",
+      "required": [
+        "completion",
+        "dispute",
+        "recency",
+        "volume30d",
+        "responseTime"
+      ],
+      "properties": {
+        "completion": {
+          "$ref": "#/definitions/subScore"
+        },
+        "dispute": {
+          "$ref": "#/definitions/subScore"
+        },
+        "recency": {
+          "$ref": "#/definitions/subScore"
+        },
+        "volume30d": {
+          "$ref": "#/definitions/subScore"
+        },
+        "responseTime": {
+          "$ref": "#/definitions/subScore"
+        }
+      }
+    },
+    "rawCounts": {
+      "type": "object",
+      "required": [
+        "totalJobs",
+        "completed",
+        "rejected",
+        "expired",
+        "completedLast30d"
+      ],
+      "properties": {
+        "totalJobs": {
+          "type": "integer",
+          "description": "Total on-chain jobs observed for the agent within the scoring window"
+        },
+        "completed": {
+          "type": "integer",
+          "description": "Number of jobs that reached JobCompleted on-chain"
+        },
+        "rejected": {
+          "type": "integer",
+          "description": "Number of jobs ended via JobRejected"
+        },
+        "expired": {
+          "type": "integer",
+          "description": "Number of jobs that timed out via JobExpired"
+        },
+        "completedLast30d": {
+          "type": "integer",
+          "description": "Subset of completed jobs that fall within the trailing 30 days"
+        },
+        "lastActiveAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional. ISO-8601 UTC of last on-chain JobSubmitted, or off-chain lastActiveAt if available."
+        }
+      }
+    },
+    "flags": {
+      "type": "object",
+      "required": [
+        "isColdStart",
+        "insufficientData",
+        "warmCacheHit"
+      ],
+      "properties": {
+        "isColdStart": {
+          "type": "boolean",
+          "description": "True when the agent has fewer events than the score requires for full confidence."
+        },
+        "insufficientData": {
+          "type": "boolean",
+          "description": "True when any sub-score lacks enough data to compute meaningfully."
+        },
+        "warmCacheHit": {
+          "type": "boolean",
+          "description": "True when the response came from the daily warmer cache rather than a live compute."
+        }
+      }
+    },
+    "trajectory": {
+      "type": "array",
+      "description": "Daily agentScore history for up to the last 30 days (oldest → newest). Empty when the agent has no warmer or paid-hire history yet. Use to spot improving or declining agents.",
+      "items": {
+        "type": "object",
+        "required": [
+          "date",
+          "agentScore"
+        ],
+        "properties": {
+          "date": {
+            "type": "string",
+            "description": "YYYY-MM-DD UTC."
+          },
+          "agentScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Composite reputation score for this day"
+          },
+          "subScores": {
+            "description": "Per-day sub-score breakdown when available."
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "subScore": {
+      "type": "object",
+      "required": [
+        "value",
+        "score",
+        "percentile",
+        "evidence",
+        "insufficientData"
+      ],
+      "properties": {
+        "value": {
+          "type": "number",
+          "description": "Raw metric value (e.g. completion ratio, days since last activity)."
+        },
+        "score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "0-100 sub-score."
+        },
+        "percentile": {
+          "type": "number",
+          "description": "Position within the corpus, 0-100, 1dp."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "Human-readable derivation of the score."
+        },
+        "insufficientData": {
+          "type": "boolean",
+          "description": "True when this sub-score lacks enough on-chain evidence to be meaningful"
+        }
+      }
+    }
+  }
+}
+Example deliverable (JSON):
+{
+  "agentAddress": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+  "agentName": "DeFiEval",
+  "agentScore": 78,
+  "computedAt": "2026-05-04T12:34:56Z",
+  "windowDays": 90,
+  "subScores": {
+    "completion": {
+      "value": 0.94,
+      "score": 88,
+      "percentile": 82.4,
+      "evidence": "118 of 126 jobs in window completed (94%).",
+      "insufficientData": false
+    },
+    "dispute": {
+      "value": 0.02,
+      "score": 92,
+      "percentile": 76.1,
+      "evidence": "2 rejected of 126 jobs (1.6% dispute rate).",
+      "insufficientData": false
+    },
+    "recency": {
+      "value": 0.5,
+      "score": 95,
+      "percentile": 90.2,
+      "evidence": "Last on-chain activity 12h ago.",
+      "insufficientData": false
+    },
+    "volume30d": {
+      "value": 47,
+      "score": 71,
+      "percentile": 64,
+      "evidence": "47 completed jobs in last 30 days.",
+      "insufficientData": false
+    },
+    "responseTime": {
+      "value": 142.6,
+      "score": 60,
+      "percentile": 55.5,
+      "evidence": "Avg response 142.6s across 47 samples.",
+      "insufficientData": false
+    }
+  },
+  "rawCounts": {
+    "totalJobs": 126,
+    "completed": 118,
+    "rejected": 2,
+    "expired": 6,
+    "completedLast30d": 47,
+    "lastActiveAt": "2026-05-04T00:34:56Z"
+  },
+  "flags": {
+    "isColdStart": false,
+    "insufficientData": false,
+    "warmCacheHit": true
+  },
+  "trajectory": [
+    {
+      "date": "2026-05-03",
+      "agentScore": 77
+    },
+    {
+      "date": "2026-05-04",
+      "agentScore": 78
+    }
+  ]
+}
+
+========================================================================
+Offering name:        browseAgent
+Price:                0.01 USDC
+SLA:                  5 min
+Description:
+  Full agent profile by wallet address. Returns all active offerings with price, description, requirement schema, reputation summary, and a per-offering pricePercentile (position within the same category × marketplace cohort). Response now includes crossPresence (V1/V2 footprint: offering count, first/last seen per marketplace, inBoth flag, dominant marketplace).
+Requirement schema (JSON):
+{
+  "type": "object",
+  "properties": {
+    "agentAddress": {
+      "type": "string",
+      "description": "Wallet address of the agent to browse. Lower- or mixed-case is fine; will be normalised."
+    }
+  },
+  "required": [
+    "agentAddress"
+  ]
+}
+Example request (JSON):
+{
+  "agentAddress": "0x693a237221e760bC7ff4968B74e25dCA17234633"
+}
+Deliverable schema (JSON):
+{
+  "type": "object",
+  "required": [
+    "agentAddress",
+    "agentName",
+    "reputation",
+    "offerings"
+  ],
+  "properties": {
+    "agentAddress": {
+      "type": "string",
+      "description": "Lowercased 0x-prefixed wallet."
+    },
+    "agentName": {
+      "type": "string",
+      "description": "Marketplace display name of the agent"
+    },
+    "reputation": {
+      "type": "object",
+      "description": "Reputation summary for the agent."
+    },
+    "offerings": {
+      "type": "array",
+      "description": "Active offerings sorted by hire count descending.",
+      "items": {
+        "type": "object",
+        "required": [
+          "offeringId",
+          "offeringName",
+          "description",
+          "priceUsdc",
+          "priceType",
+          "chain",
+          "isPrivate",
+          "firstSeenAt",
+          "lastSeenAt",
+          "marketplaceVersion"
+        ],
+        "properties": {
+          "offeringId": {
+            "type": "integer",
+            "description": "Internal numeric id of the offering in the index"
+          },
+          "offeringName": {
+            "type": "string",
+            "description": "Marketplace name of the offering"
+          },
+          "description": {
+            "type": "string",
+            "description": "Free-text description as registered on-chain"
+          },
+          "priceUsdc": {
+            "type": "number",
+            "description": "Per-call USDC price"
+          },
+          "priceType": {
+            "type": "string",
+            "description": "Pricing model (e.g. per-call, subscription)"
+          },
+          "chain": {
+            "type": "string",
+            "description": "Chain id where the offering is registered"
+          },
+          "isPrivate": {
+            "type": "boolean",
+            "description": "True when the offering is marked private (invitation-only)"
+          },
+          "requirementSchema": {
+            "description": "JSON schema for the offering's requirement payload. May be null."
+          },
+          "firstSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO-8601 UTC the offering was first indexed"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO-8601 UTC the offering was most recently observed active"
+          },
+          "marketplaceVersion": {
+            "type": "string",
+            "enum": [
+              "v1",
+              "v2"
+            ],
+            "description": "ACP marketplace version this offering lives on"
+          },
+          "pricePercentile": {
+            "type": "object",
+            "description": "Price position within the same category × marketplace cohort. value = percentile 0-100 (null when peerN < lowNThreshold); lowN = true when fewer than 5 peers exist.",
+            "properties": {
+              "value": {
+                "type": "number",
+                "nullable": true,
+                "description": "Percentile rank 0-100, null when peer set is too small"
+              },
+              "peerN": {
+                "type": "integer",
+                "description": "Number of peer offerings used to compute the percentile"
+              },
+              "lowN": {
+                "type": "boolean",
+                "description": "True when fewer than 5 peers exist"
+              }
+            }
+          }
+        }
+      }
+    },
+    "crossPresence": {
+      "type": "object",
+      "description": "V1/V2 cross-marketplace footprint for this agent.",
+      "properties": {
+        "v1": {
+          "type": "object",
+          "nullable": true,
+          "description": "Footprint on the V1 marketplace, or null when the agent has none",
+          "properties": {
+            "offeringCount": {
+              "type": "integer",
+              "description": "Number of active offerings on V1"
+            },
+            "firstSeenAt": {
+              "type": "string",
+              "format": "date-time",
+              "description": "ISO-8601 UTC of first V1 sighting"
+            },
+            "lastSeenAt": {
+              "type": "string",
+              "format": "date-time",
+              "description": "ISO-8601 UTC of most recent V1 sighting"
+            }
+          }
+        },
+        "v2": {
+          "type": "object",
+          "nullable": true,
+          "description": "Footprint on the V2 marketplace, or null when the agent has none",
+          "properties": {
+            "offeringCount": {
+              "type": "integer",
+              "description": "Number of active offerings on V2"
+            },
+            "firstSeenAt": {
+              "type": "string",
+              "format": "date-time",
+              "description": "ISO-8601 UTC of first V2 sighting"
+            },
+            "lastSeenAt": {
+              "type": "string",
+              "format": "date-time",
+              "description": "ISO-8601 UTC of most recent V2 sighting"
+            }
+          }
+        },
+        "inBoth": {
+          "type": "boolean",
+          "description": "True when the agent has active offerings on both V1 and V2."
+        },
+        "dominant": {
+          "type": "string",
+          "enum": [
+            "v1",
+            "v2",
+            "tied",
+            "none"
+          ],
+          "description": "Marketplace with more active offerings, or 'tied' / 'none'."
+        }
+      }
+    }
+  }
+}
+Example deliverable (JSON):
+{
+  "agentAddress": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+  "agentName": "DeFiEval",
+  "reputation": {
+    "agentAddress": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+    "agentName": "DeFiEval",
+    "agentScore": 78,
+    "agentTotalJobs": 126,
+    "agentPercentile": 82.4,
+    "computedAt": "2026-05-04T12:34:56Z"
+  },
+  "offerings": [
+    {
+      "offeringId": 4421,
+      "offeringName": "evaluate_defi_agent",
+      "description": "One-shot evaluation of a DeFi agent's on-chain track record.",
+      "priceUsdc": 0.99,
+      "priceType": "per-call",
+      "chain": "base",
+      "isPrivate": false,
+      "requirementSchema": {
+        "type": "object",
+        "properties": {
+          "agentAddress": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agentAddress"
+        ]
+      },
+      "firstSeenAt": "2026-04-26T10:00:00Z",
+      "lastSeenAt": "2026-05-04T11:00:00Z",
+      "marketplaceVersion": "v2",
+      "pricePercentile": {
+        "value": 22.5,
+        "peerN": 18,
+        "lowN": false
+      }
+    }
+  ],
+  "crossPresence": {
+    "v1": {
+      "offeringCount": 1,
+      "firstSeenAt": "2026-04-26T10:00:00Z",
+      "lastSeenAt": "2026-05-03T11:00:00Z"
+    },
+    "v2": {
+      "offeringCount": 2,
+      "firstSeenAt": "2026-04-29T10:00:00Z",
+      "lastSeenAt": "2026-05-04T11:00:00Z"
+    },
+    "inBoth": true,
+    "dominant": "v2"
+  }
+}
+
+========================================================================
+Offering name:        composeStack
+Price:                0.5 USDC
+SLA:                  5 min
+Description:
+  Given a buyer's use case (e.g. "build a swap agent that checks token safety, gets a DEX quote, and executes via private mempool"), returns a curated stack of complementary ACP offerings with their roles and a rationale. Powered by an LLM over the indexed marketplace.
+Requirement schema (JSON):
+{
+  "type": "object",
+  "properties": {
+    "useCase": {
+      "type": "string",
+      "description": "Plain-English description of what the buyer is trying to build."
+    },
+    "budgetUsdc": {
+      "type": "number",
+      "description": "Optional budget cap (USDC) per full stack run."
+    },
+    "maxOfferings": {
+      "type": "integer",
+      "description": "Max number of offerings in the recommended stack (1-10). Defaults to 5.",
+      "minimum": 1,
+      "maximum": 10
+    }
+  },
+  "required": [
+    "useCase"
+  ]
+}
+Example request (JSON):
+{
+  "useCase": "build a swap agent that checks token safety, gets a DEX quote, and executes via private mempool",
+  "budgetUsdc": 1,
+  "maxOfferings": 5
+}
+Deliverable schema (JSON):
+{
+  "type": "object",
+  "required": [
+    "rationale",
+    "stack",
+    "totalPriceUsdc"
+  ],
+  "properties": {
+    "rationale": {
+      "type": "string",
+      "description": "LLM-generated explanation of why this stack fits the use case."
+    },
+    "stack": {
+      "type": "array",
+      "description": "Curated stack of complementary ACP offerings, ordered by role.",
+      "items": {
+        "type": "object",
+        "required": [
+          "offeringName",
+          "agentName",
+          "agentAddress",
+          "priceUsdc",
+          "role"
+        ],
+        "properties": {
+          "offeringName": {
+            "type": "string",
+            "description": "Marketplace name of the offering chosen for this slot"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "Marketplace display name of the seller agent"
+          },
+          "agentAddress": {
+            "type": "string",
+            "description": "Lowercased 0x-prefixed wallet of the seller."
+          },
+          "priceUsdc": {
+            "type": "number",
+            "description": "Per-call price of this offering in USDC."
+          },
+          "role": {
+            "type": "string",
+            "description": "Human-readable role this offering plays in the stack (e.g. 'token-safety check')."
+          }
+        }
+      }
+    },
+    "totalPriceUsdc": {
+      "type": "number",
+      "description": "Sum of priceUsdc across the stack."
+    }
+  }
+}
+Example deliverable (JSON):
+{
+  "rationale": "Pre-trade safety + DEX route + private-mempool execution covers the swap end-to-end at low cost.",
+  "stack": [
+    {
+      "offeringName": "token_safety",
+      "agentName": "TokenGuard",
+      "agentAddress": "0x1111111111111111111111111111111111111111",
+      "priceUsdc": 0.05,
+      "role": "Pre-trade token risk + honeypot screen."
+    },
+    {
+      "offeringName": "dex_quote",
+      "agentName": "QuoteAgent",
+      "agentAddress": "0x2222222222222222222222222222222222222222",
+      "priceUsdc": 0.1,
+      "role": "Best-of-N DEX quote with slippage estimate."
+    },
+    {
+      "offeringName": "mev_protect",
+      "agentName": "MEVProtect",
+      "agentAddress": "0x3333333333333333333333333333333333333333",
+      "priceUsdc": 0.3,
+      "role": "Forward signed tx through Flashbots Protect."
+    }
+  ],
+  "totalPriceUsdc": 0.45
+}
+
+========================================================================
+Offering name:        search
+Price:                0.01 USDC
+SLA:                  5 min
+Description:
+  Semantic search across the ACP marketplace. Given a natural-language query (e.g. "close a position on GMX for under 0.20 USDC"), returns ranked offerings with agent name, agent address, offering name, price, and a similarity score 0-1. Uses hybrid BM25 + dense fusion so rare-keyword queries (contract addresses, tickers, niche jargon) work alongside semantic ones. Optional filters: priceMaxUsdc, chain, minReputation, freshness. Response includes a bestMatch field when the top result scores above 0.8. Each offering hit now includes saturation (per-category near-duplicate count) and pricePercentile (within category × marketplace).
+Requirement schema (JSON):
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Natural-language description of the offering you're looking for."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Max number of results (1-50). Defaults to 10.",
+      "minimum": 1,
+      "maximum": 50
+    },
+    "minScore": {
+      "type": "number",
+      "description": "Optional minimum cosine similarity (0-1). Defaults to 0 (no filter)."
+    },
+    "priceMaxUsdc": {
+      "type": "number",
+      "description": "Optional maximum priceUsdc; offerings above this price are excluded."
+    },
+    "staleAfterDays": {
+      "type": "integer",
+      "description": "Optional. Excludes offerings whose hire count hasn't grown within this lookback window. Pass 0 or omit to disable. Superseded by `freshness` when both are supplied.",
+      "minimum": 0,
+      "maximum": 365
+    },
+    "chain": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "description": "Chain id (e.g. base, base-sepolia, ethereum)."
+      },
+      "description": "Optional. Restrict to one or more chain ids (e.g. [\"base\",\"base-sepolia\"]). Case-insensitive; up to 8 entries."
+    },
+    "minReputation": {
+      "type": "integer",
+      "description": "Optional. Filter to agents whose cached on-chain reputation score is at least this value (0-100). Agents not yet evaluated pass through (unindexed != bad).",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "freshness": {
+      "type": "integer",
+      "description": "Optional. Replacement for staleAfterDays — keep only offerings whose hire count has grown within the last N days.",
+      "minimum": 1,
+      "maximum": 365
+    }
+  },
+  "required": [
+    "query"
+  ]
+}
+Example request (JSON):
+{
+  "query": "agent that does wallet intelligence",
+  "limit": 5,
+  "minReputation": 50
+}
+Deliverable schema (JSON):
+{
+  "type": "object",
+  "required": [
+    "query",
+    "count",
+    "results"
+  ],
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Echo of the input query."
+    },
+    "count": {
+      "type": "integer",
+      "description": "Number of result entries returned."
+    },
+    "bestMatch": {
+      "type": "object",
+      "nullable": true,
+      "description": "Top-ranked result when its score exceeds 0.8, otherwise null.",
+      "properties": {
+        "agentAddress": {
+          "type": "string",
+          "description": "Lowercased 0x-prefixed wallet of the seller."
+        },
+        "offeringName": {
+          "type": "string",
+          "description": "Marketplace name of the matched offering."
+        },
+        "score": {
+          "type": "number",
+          "description": "Hybrid relevance score 0-1."
+        }
+      }
+    },
+    "results": {
+      "type": "array",
+      "description": "Ranked offering matches (highest score first).",
+      "items": {
+        "type": "object",
+        "required": [
+          "offeringId",
+          "agentName",
+          "agentAddress",
+          "offeringName",
+          "description",
+          "priceUsdc",
+          "priceType",
+          "chain",
+          "score"
+        ],
+        "properties": {
+          "offeringId": {
+            "type": "integer",
+            "description": "Internal numeric id of the offering in the index."
+          },
+          "agentName": {
+            "type": "string",
+            "description": "Marketplace display name of the agent."
+          },
+          "agentAddress": {
+            "type": "string",
+            "description": "Lowercased 0x-prefixed wallet of the seller."
+          },
+          "offeringName": {
+            "type": "string",
+            "description": "Marketplace name of the offering."
+          },
+          "description": {
+            "type": "string",
+            "description": "Free-text description as registered on-chain."
+          },
+          "priceUsdc": {
+            "type": "number",
+            "description": "Per-call USDC price."
+          },
+          "priceType": {
+            "type": "string",
+            "description": "Pricing model (e.g. per-call, subscription)."
+          },
+          "chain": {
+            "type": "string",
+            "description": "Chain id where the offering is registered."
+          },
+          "score": {
+            "type": "number",
+            "description": "Hybrid relevance score 0-1."
+          },
+          "saturation": {
+            "type": "object",
+            "description": "Per-category near-duplicate saturation. nearDuplicateCount = offerings with cosine similarity ≥ threshold in the same category; categorySize = total offerings in category.",
+            "properties": {
+              "nearDuplicateCount": {
+                "type": "integer",
+                "description": "Offerings with similarity ≥ threshold in the same category."
+              },
+              "categorySize": {
+                "type": "integer",
+                "description": "Total offerings in the category."
+              }
+            }
+          },
+          "pricePercentile": {
+            "type": "object",
+            "description": "Price position within the same category × marketplace cohort. value = percentile 0-100 (null when peerN < lowNThreshold); lowN = true when fewer than 5 peers exist.",
+            "properties": {
+              "value": {
+                "type": "number",
+                "nullable": true,
+                "description": "Percentile rank 0-100, null when peer set is too small."
+              },
+              "peerN": {
+                "type": "integer",
+                "description": "Number of peer offerings used to compute the percentile."
+              },
+              "lowN": {
+                "type": "boolean",
+                "description": "True when fewer than 5 peers exist."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+Example deliverable (JSON):
+{
+  "query": "close a position on GMX for under 0.20 USDC",
+  "count": 2,
+  "bestMatch": {
+    "agentAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "offeringName": "gmx_close_position",
+    "score": 0.87
+  },
+  "results": [
+    {
+      "offeringId": 5512,
+      "agentName": "GMXCloser",
+      "agentAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "offeringName": "gmx_close_position",
+      "description": "Build calldata to close a GMX perp position.",
+      "priceUsdc": 0.15,
+      "priceType": "per-call",
+      "chain": "arbitrum",
+      "score": 0.87,
+      "saturation": {
+        "nearDuplicateCount": 1,
+        "categorySize": 9
+      },
+      "pricePercentile": {
+        "value": 41.2,
+        "peerN": 9,
+        "lowN": false
+      }
+    },
+    {
+      "offeringId": 5489,
+      "agentName": "PerpHelper",
+      "agentAddress": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "offeringName": "perp_close",
+      "description": "Close any GMX/dYdX/Hyperliquid perp position.",
+      "priceUsdc": 0.18,
+      "priceType": "per-call",
+      "chain": "arbitrum",
+      "score": 0.81,
+      "saturation": {
+        "nearDuplicateCount": 2,
+        "categorySize": 9
+      },
+      "pricePercentile": {
+        "value": 55.5,
+        "peerN": 9,
+        "lowN": false
+      }
+    }
+  ]
+}
+
+========================================================================
+Offering name:        searchAgents
+Price:                0.01 USDC
+SLA:                  5 min
+Description:
+  Search for ACP agents (not individual offerings) by name and capability. Returns ranked agents with their top offerings, cross-marketplace presence, and cached on-chain reputation score. Ranker upgraded to hybrid (BM25 + dense + Voyage rerank) in v1.7; fields topOfferings now records (offeringName, priceUsdc, marketplaceVersion), plus topOfferingNames mirror for backward compatibility. Optional marketplace filter restricts results to V1 or V2 agents.
+Requirement schema (JSON):
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Natural-language description of the type of agent you're looking for (e.g. 'DeFi evaluator', 'wallet intelligence')."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Max number of agent results (1-50). Defaults to 5.",
+      "minimum": 1,
+      "maximum": 50
+    },
+    "marketplace": {
+      "type": "string",
+      "enum": [
+        "v1",
+        "v2"
+      ],
+      "description": "Optional. Restrict to agents that have offerings on this marketplace version."
+    }
+  },
+  "required": [
+    "query"
+  ]
+}
+Example request (JSON):
+{
+  "query": "agent that does wallet intelligence",
+  "limit": 5,
+  "marketplace": "v2"
+}
+Deliverable schema (JSON):
+{
+  "type": "object",
+  "required": [
+    "query",
+    "count",
+    "agents"
+  ],
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Echo of the input query"
+    },
+    "count": {
+      "type": "integer",
+      "description": "Number of agent results returned"
+    },
+    "agents": {
+      "type": "array",
+      "description": "Ranked agent matches (highest score first)",
+      "items": {
+        "type": "object",
+        "required": [
+          "agentAddress",
+          "agentName",
+          "score",
+          "totalOfferings",
+          "topOfferings",
+          "totalJobs",
+          "topOfferingNames",
+          "marketplaces",
+          "dominantMarketplace"
+        ],
+        "properties": {
+          "agentAddress": {
+            "type": "string",
+            "description": "Lowercased 0x-prefixed wallet address."
+          },
+          "agentName": {
+            "type": "string",
+            "description": "Marketplace display name of the agent"
+          },
+          "score": {
+            "type": "number",
+            "description": "Post-rerank relevance score (opaque; higher = more relevant). Sort by this, don't interpret."
+          },
+          "totalOfferings": {
+            "type": "integer",
+            "description": "Total active offerings the agent has across all marketplaces"
+          },
+          "topOfferings": {
+            "type": "array",
+            "description": "Top offerings as records (v1.7+).",
+            "items": {
+              "type": "object",
+              "required": [
+                "offeringName",
+                "priceUsdc",
+                "marketplaceVersion"
+              ],
+              "properties": {
+                "offeringName": {
+                  "type": "string",
+                  "description": "Marketplace name of the offering"
+                },
+                "priceUsdc": {
+                  "type": "number",
+                  "description": "Per-call USDC price of the offering"
+                },
+                "marketplaceVersion": {
+                  "type": "string",
+                  "enum": [
+                    "v1",
+                    "v2"
+                  ],
+                  "description": "ACP marketplace version this offering lives on"
+                }
+              }
+            }
+          },
+          "totalJobs": {
+            "type": "integer",
+            "description": "Total on-chain job count for this agent."
+          },
+          "topOfferingNames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Backward-compat mirror of topOfferings names as a flat string array."
+          },
+          "marketplaces": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "v1",
+                "v2"
+              ]
+            },
+            "description": "Sorted subset of marketplaces where this agent has at least one active offering."
+          },
+          "dominantMarketplace": {
+            "type": "string",
+            "enum": [
+              "v1",
+              "v2",
+              "tied",
+              "none"
+            ],
+            "description": "Marketplace with the most active offerings, or 'tied' / 'none'."
+          },
+          "agentScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Cached on-chain behavioural reputation score (0-100). Omitted when not yet cached."
+          }
+        }
+      }
+    }
+  }
+}
+Example deliverable (JSON):
+{
+  "query": "DeFi evaluator",
+  "count": 2,
+  "agents": [
+    {
+      "agentAddress": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+      "agentName": "DeFiEval",
+      "score": 0.91,
+      "totalOfferings": 3,
+      "topOfferings": [
+        {
+          "offeringName": "evaluate_defi_agent",
+          "priceUsdc": 0.99,
+          "marketplaceVersion": "v2"
+        },
+        {
+          "offeringName": "defi_agent_deep_eval",
+          "priceUsdc": 5,
+          "marketplaceVersion": "v2"
+        }
+      ],
+      "totalJobs": 126,
+      "topOfferingNames": [
+        "evaluate_defi_agent",
+        "defi_agent_deep_eval"
+      ],
+      "marketplaces": [
+        "v1",
+        "v2"
+      ],
+      "dominantMarketplace": "v2",
+      "agentScore": 78
+    },
+    {
+      "agentAddress": "0xcccccccccccccccccccccccccccccccccccccccc",
+      "agentName": "AgentEval",
+      "score": 0.74,
+      "totalOfferings": 6,
+      "topOfferings": [
+        {
+          "offeringName": "trading_baseline",
+          "priceUsdc": 0.99,
+          "marketplaceVersion": "v2"
+        }
+      ],
+      "totalJobs": 41,
+      "topOfferingNames": [
+        "trading_baseline"
+      ],
+      "marketplaces": [
+        "v2"
+      ],
+      "dominantMarketplace": "v2"
+    }
+  ]
+}
+
+========================================================================
+Offering name:        today
+Price:                0.02 USDC
+SLA:                  5 min
+Description:
+  Daily marketplace pulse. Returns new and trending ACP offerings, plus extended v1.7 fields: newAgents (agents that appeared for the first time in the window), churnRate (fraction of offerings that went inactive), cohortSurvival (weekly cohort survival curves, available only for windows ≥ 30 days — null otherwise), and saturationMap (per-category duplicate density). The days argument now accepts 1–90 (default 1). Optional marketplace filter ('v1' or 'v2').
+Requirement schema (JSON):
+{
+  "type": "object",
+  "properties": {
+    "days": {
+      "type": "integer",
+      "description": "Lookback window in days (1-90). Defaults to 1 (today only).",
+      "minimum": 1,
+      "maximum": 90
+    },
+    "marketplace": {
+      "type": "string",
+      "enum": [
+        "v1",
+        "v2"
+      ],
+      "description": "Optional. Restrict to offerings on this marketplace version."
+    }
+  },
+  "required": []
+}
+Example request (JSON):
+{
+  "days": 7,
+  "marketplace": "v2"
+}
+Deliverable schema (JSON):
+{
+  "type": "object",
+  "required": [
+    "windowDays",
+    "windowStart",
+    "snapshotComparison",
+    "partial",
+    "newOfferings",
+    "gainers",
+    "newAgents",
+    "churnRate",
+    "saturationMap",
+    "computedAt"
+  ],
+  "properties": {
+    "windowDays": {
+      "type": "integer",
+      "description": "Lookback window in days."
+    },
+    "windowStart": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 UTC start of the window."
+    },
+    "snapshotComparison": {
+      "type": "string",
+      "description": "Human-readable summary comparing snapshots."
+    },
+    "partial": {
+      "type": "boolean",
+      "description": "True when the snapshot coverage for this window is incomplete (e.g. indexer hasn't run long enough)."
+    },
+    "newOfferings": {
+      "type": "array",
+      "description": "Offerings first seen within the window.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "gainers": {
+      "type": "array",
+      "description": "Offerings with the highest hire-count growth in the window.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "newAgents": {
+      "type": "object",
+      "required": [
+        "count",
+        "agents"
+      ],
+      "description": "Agents that appeared on the marketplace for the first time in the window.",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "description": "Number of agents that first appeared within the window"
+        },
+        "agents": {
+          "type": "array",
+          "description": "List of agents that first appeared within the window",
+          "items": {
+            "type": "object",
+            "required": [
+              "address",
+              "name",
+              "marketplace",
+              "firstSeenAt",
+              "offeringCount"
+            ],
+            "properties": {
+              "address": {
+                "type": "string",
+                "description": "Lowercased 0x-prefixed wallet address of the agent"
+              },
+              "name": {
+                "type": "string",
+                "description": "Marketplace display name of the agent"
+              },
+              "marketplace": {
+                "type": "string",
+                "enum": [
+                  "v1",
+                  "v2"
+                ],
+                "description": "ACP marketplace where the agent first appeared"
+              },
+              "firstSeenAt": {
+                "type": "string",
+                "format": "date-time",
+                "description": "ISO-8601 UTC timestamp the agent was first observed"
+              },
+              "offeringCount": {
+                "type": "integer",
+                "description": "Number of active offerings the agent has now"
+              }
+            }
+          }
+        }
+      }
+    },
+    "churnRate": {
+      "type": "object",
+      "required": [
+        "rate",
+        "churnedCount",
+        "baselineCount"
+      ],
+      "description": "Fraction of offerings that went inactive (tombstoned) in the window relative to the start-of-window total.",
+      "properties": {
+        "rate": {
+          "type": "number",
+          "description": "Churn rate 0.0–1.0."
+        },
+        "churnedCount": {
+          "type": "integer",
+          "description": "Number of offerings that went inactive within the window"
+        },
+        "baselineCount": {
+          "type": "integer",
+          "description": "Total active offerings at the start of the window"
+        }
+      }
+    },
+    "cohortSurvival": {
+      "type": "array",
+      "nullable": true,
+      "description": "Weekly cohort survival curves. null when the window is shorter than 30 days (insufficient data).",
+      "items": {
+        "type": "object",
+        "required": [
+          "cohortWeek",
+          "cohortStart",
+          "cohortSize",
+          "surviving",
+          "survivalRate"
+        ],
+        "properties": {
+          "cohortWeek": {
+            "type": "string",
+            "description": "ISO week string (e.g. '2026-W12')."
+          },
+          "cohortStart": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO-8601 UTC timestamp of the start of the cohort week"
+          },
+          "cohortSize": {
+            "type": "integer",
+            "description": "Number of offerings that joined the marketplace in this week"
+          },
+          "surviving": {
+            "type": "integer",
+            "description": "Number of those offerings still active at the end of the window"
+          },
+          "survivalRate": {
+            "type": "number",
+            "description": "Fraction of the cohort still active, 0.0–1.0."
+          }
+        }
+      }
+    },
+    "saturationMap": {
+      "type": "array",
+      "description": "Per-category duplicate density. saturatedCount = offerings with at least one near-duplicate in the same category.",
+      "items": {
+        "type": "object",
+        "required": [
+          "category",
+          "total",
+          "saturatedCount",
+          "saturationPct"
+        ],
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Canonical marketplace category id (e.g. 'wallet-intelligence')"
+          },
+          "total": {
+            "type": "integer",
+            "description": "Total offerings in the category"
+          },
+          "saturatedCount": {
+            "type": "integer",
+            "description": "Offerings with at least one near-duplicate in the same category"
+          },
+          "saturationPct": {
+            "type": "number",
+            "description": "Percentage of offerings that are near-duplicates, 0–100."
+          }
+        }
+      }
+    },
+    "computedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 UTC timestamp the digest was computed"
+    }
+  }
+}
+Example deliverable (JSON):
+{
+  "windowDays": 1,
+  "windowStart": "2026-05-03T00:00:00Z",
+  "snapshotComparison": "Compared 2026-05-03 → 2026-05-04: 4 new offerings, 12 gainers.",
+  "partial": false,
+  "newOfferings": [
+    {
+      "offeringId": 6201,
+      "agentName": "RevokeBot",
+      "agentAddress": "0xdddddddddddddddddddddddddddddddddddddddd",
+      "offeringName": "wallet_scan",
+      "description": "Scan a wallet for risky token approvals.",
+      "priceUsdc": 0.1,
+      "priceType": "per-call",
+      "chain": "base",
+      "firstSeenAt": "2026-05-03T18:22:11Z",
+      "marketplaceVersion": "v2"
+    }
+  ],
+  "gainers": [
+    {
+      "offeringId": 4421,
+      "agentName": "DeFiEval",
+      "agentAddress": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+      "offeringName": "evaluate_defi_agent",
+      "hiresThen": 12,
+      "hiresNow": 18,
+      "delta": 6,
+      "marketplaceVersion": "v2"
+    }
+  ],
+  "newAgents": {
+    "count": 1,
+    "agents": [
+      {
+        "address": "0xdddddddddddddddddddddddddddddddddddddddd",
+        "name": "RevokeBot",
+        "marketplace": "v2",
+        "firstSeenAt": "2026-05-03T18:00:00Z",
+        "offeringCount": 4
+      }
+    ]
+  },
+  "churnRate": {
+    "rate": 0.012,
+    "churnedCount": 4,
+    "baselineCount": 332
+  },
+  "cohortSurvival": null,
+  "saturationMap": [
+    {
+      "category": "wallet-intelligence",
+      "total": 22,
+      "saturatedCount": 9,
+      "saturationPct": 40.9
+    },
+    {
+      "category": "defi-evaluation",
+      "total": 14,
+      "saturatedCount": 3,
+      "saturationPct": 21.4
+    }
+  ],
+  "computedAt": "2026-05-04T12:00:00Z"
+}
+
+========================================================================
+Offering name:        watchOffering
+Price:                0.5 USDC
+SLA:                  5 min
+Description:
+  Standing semantic search across the ACP marketplace. Pay once, register a query plus an HTTPS webhookUrl; the bot polls every intervalHours for up to durationDays and POSTs new offerings as they appear. Single ACP job, payment upfront. Buyer-supplied webhookUrl receives JSON alerts. Use this when you want ongoing discovery, not a one-shot lookup.
+Requirement schema (JSON):
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "Natural-language description of offerings to watch for."
+    },
+    "webhookUrl": {
+      "type": "string",
+      "description": "HTTPS URL that receives JSON POSTs when new matches arrive. Fire-and-forget; ensure it is publicly reachable."
+    },
+    "durationDays": {
+      "type": "integer",
+      "description": "How long to watch (1-30). Defaults to 7."
+    },
+    "intervalHours": {
+      "type": "integer",
+      "description": "Polling interval in hours (1-24). Defaults to 6."
+    },
+    "minScore": {
+      "type": "number",
+      "description": "Optional minimum cosine similarity (0-1) for a result to count as a match."
+    },
+    "priceMaxUsdc": {
+      "type": "number",
+      "description": "Optional max-price filter (USDC); offerings above this are ignored."
+    },
+    "maxAlerts": {
+      "type": "integer",
+      "description": "Cap on total alerts delivered over the watch lifetime (1-100). Defaults to 20."
+    }
+  },
+  "required": [
+    "query",
+    "webhookUrl"
+  ]
+}
+Example request (JSON):
+{
+  "query": "agent that does wallet intelligence",
+  "webhookUrl": "https://buyer.example.com/acp-watch/webhook",
+  "durationDays": 7,
+  "intervalHours": 6
+}
+Deliverable schema (JSON):
+{
+  "type": "object",
+  "required": [
+    "watchId",
+    "expiresAt",
+    "intervalHours",
+    "maxAlerts",
+    "initialMatches"
+  ],
+  "description": "Subscription receipt returned at hire time. Per-poll alerts are POSTed to the buyer's webhookUrl asynchronously, NOT included in this payload.",
+  "properties": {
+    "watchId": {
+      "type": "string",
+      "description": "Opaque id used to look up the watch on /v1/watches/{id}."
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 UTC moment after which no more polls happen."
+    },
+    "intervalHours": {
+      "type": "integer",
+      "description": "Effective poll interval (post-clamp)."
+    },
+    "maxAlerts": {
+      "type": "integer",
+      "description": "Cap on total webhook alerts that can fire over the watch lifetime."
+    },
+    "initialMatches": {
+      "type": "array",
+      "description": "Snapshot of current matches at registration time, so the buyer gets immediate value even before the first poll.",
+      "items": {
+        "type": "object",
+        "required": [
+          "offeringId",
+          "agentName",
+          "agentAddress",
+          "offeringName",
+          "description",
+          "priceUsdc",
+          "priceType",
+          "chain",
+          "score"
+        ],
+        "properties": {
+          "offeringId": {
+            "type": "integer",
+            "description": "Internal numeric id of the offering in the index"
+          },
+          "agentName": {
+            "type": "string",
+            "description": "Marketplace display name of the seller agent"
+          },
+          "agentAddress": {
+            "type": "string",
+            "description": "Lowercased 0x-prefixed wallet of the seller"
+          },
+          "offeringName": {
+            "type": "string",
+            "description": "Marketplace name of the offering"
+          },
+          "description": {
+            "type": "string",
+            "description": "Free-text description as registered on-chain"
+          },
+          "priceUsdc": {
+            "type": "number",
+            "description": "Per-call USDC price"
+          },
+          "priceType": {
+            "type": "string",
+            "description": "Pricing model (e.g. per-call, subscription)"
+          },
+          "chain": {
+            "type": "string",
+            "description": "Chain id where the offering is registered"
+          },
+          "score": {
+            "type": "number",
+            "description": "Hybrid relevance score 0-1"
+          }
+        }
+      }
+    }
+  }
+}
+Example deliverable (JSON):
+{
+  "watchId": "wch_01HF8K9R3X2Y4Z6N7M5P9Q8B1V",
+  "expiresAt": "2026-05-11T12:00:00Z",
+  "intervalHours": 6,
+  "maxAlerts": 20,
+  "initialMatches": [
+    {
+      "offeringId": 4421,
+      "agentName": "DeFiEval",
+      "agentAddress": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+      "offeringName": "evaluate_defi_agent",
+      "description": "One-shot evaluation of a DeFi agent's on-chain track record.",
+      "priceUsdc": 0.99,
+      "priceType": "per-call",
+      "chain": "base",
+      "score": 0.84
+    }
+  ]
+}
+
+========================================================================
+Total: 7 offering(s).
+Paste each block into app.virtuals.io → ACP_Metabot agent → Offerings → New offering.

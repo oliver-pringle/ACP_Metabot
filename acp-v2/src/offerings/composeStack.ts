@@ -29,6 +29,12 @@ export const composeStack: Offering = {
     },
     required: ["useCase"]
   },
+  requirementExample: {
+    useCase: "build a swap agent that checks token safety, gets a DEX quote, and executes via private mempool",
+    budgetUsdc: 1.0,
+    maxOfferings: 5,
+  },
+  slaMinutes: 5,
   deliverableSchema: {
     type: "object",
     required: ["rationale", "stack", "totalPriceUsdc"],
@@ -41,8 +47,8 @@ export const composeStack: Offering = {
           type: "object",
           required: ["offeringName", "agentName", "agentAddress", "priceUsdc", "role"],
           properties: {
-            offeringName: { type: "string" },
-            agentName: { type: "string" },
+            offeringName: { type: "string", description: "Marketplace name of the offering chosen for this slot" },
+            agentName: { type: "string", description: "Marketplace display name of the seller agent" },
             agentAddress: { type: "string", description: "Lowercased 0x-prefixed wallet of the seller." },
             priceUsdc: { type: "number", description: "Per-call price of this offering in USDC." },
             role: { type: "string", description: "Human-readable role this offering plays in the stack (e.g. 'token-safety check')." },
