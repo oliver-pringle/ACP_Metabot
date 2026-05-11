@@ -913,6 +913,52 @@ app.MapGet("/v1/agent/{address}/resources",
         });
     }).RequireRateLimiting("public-marketplace-resources");
 
+// Per-agent reputation feed lookup (v1.6 #1 v0.1+v0.2). Returns the on-chain
+// AggregatorV3 contract address ChainlinkBot deployed for this agent — the
+// same shape DeFi protocols use to read Chainlink price feeds. Public, so
+// buyer-side code can discover the feed address without going through the
+// operator-only /feeds/published endpoint. 404 when the agent hasn't been
+// published to the on-chain feed yet (i.e. not in reputation_feeds, or
+// publisher worker recorded an error row with empty aggregator_address).
+app.MapGet("/v1/agent/{address}/feed-address",
+    async (string address, ReputationFeedRepository repo) =>
+    {
+        if (string.IsNullOrWhiteSpace(address))
+            return Results.BadRequest(new { error = "invalid_address", message = "agentAddress is required" });
+        var addr = address.Trim().ToLowerInvariant();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+            return Results.BadRequest(new { error = "invalid_address", message = "must be 0x followed by 40 hex chars" });
+
+        var row = await repo.GetAsync(addr);
+        if (row is null || string.IsNullOrEmpty(row.AggregatorAddress))
+            return Results.NotFound(new
+            {
+                error = "no_feed",
+                agentAddress = addr,
+                hint = "This agent hasn't been published as an on-chain reputation feed yet. Top-N agents by cached score get a feed when the daily ReputationFeedPublisherWorker runs. Subscribe via /v1/watches/* (not implemented for feeds yet) or check back after the next daily run."
+            });
+
+        return Results.Ok(new
+        {
+            agentAddress      = row.AgentAddress,
+            // Base mainnet — ChainlinkBot deploys feeds on chain 8453 only.
+            // If feeds are ever multi-chain, source this from config.
+            chainId           = 8453,
+            aggregatorAddress = row.AggregatorAddress,
+            methodologyHash   = row.MethodologyHash,
+            decimals          = row.Decimals,
+            latestScore       = row.LatestScore,
+            deployedAt        = row.DeployedAt.ToString("O"),
+            firstSeenAt       = row.FirstSeenAt.ToString("O"),
+            lastPushedRound   = row.LastPushedRound,
+            lastPushedAt      = row.LastPushedAt?.ToString("O"),
+            // Convenience: a Basescan link to the deployed aggregator so the
+            // caller can verify the contract by eye / wire up their reader.
+            explorerUrl       = $"https://basescan.org/address/{row.AggregatorAddress}",
+            notes             = "Reads conform to Chainlink AggregatorV3Interface (decimals=8, range 0..100*1e8). See ACP_ChainlinkBot/docs/REPUTATION_FEEDS.md."
+        });
+    }).RequireRateLimiting("public-marketplace-resources");
+
 // Cross-agent Resource search. LIKE-based match on name + description +
 // agent_name. v1 is fine at the current ~500-row scale; v1.1 may upgrade
 // to FTS5 + a new agent_resources_fts virtual table.
