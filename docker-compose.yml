@@ -17,6 +17,14 @@ services:
       - Indexer__IntervalSeconds=120
       - Embeddings__Provider=voyage
       - Embeddings__Model=voyage-finance-2
+      # OPTIONAL fallback embedding provider. When enabled, ChainedEmbeddingProvider
+      # tries Voyage first; on transient failure (rate limit / network / 5xx)
+      # it falls back to Cohere embed-english-v3.0 (same 1024 dim). Search-path
+      # query embedding still goes through Voyage only. See acp-v2 plan /
+      # CohereEmbeddingProvider.cs for the cross-model search caveat.
+      - Embeddings__Fallback__Enabled=${EMBEDDINGS_FALLBACK_ENABLED:-false}
+      - Embeddings__Fallback__Model=${EMBEDDINGS_FALLBACK_MODEL:-embed-english-v3.0}
+      - COHERE_API_KEY=${COHERE_API_KEY:-}
       - Indexer__EmbeddingConcurrency=64
       - Claude__Model=claude-sonnet-4-6
       # Required — supply at deploy time
@@ -47,6 +55,38 @@ services:
       # ACP_METABOT_DOMAIN matches the var Caddy uses for its certificate;
       # update both together if the public hostname changes.
       - AllowedHosts=${ACP_METABOT_DOMAIN:-localhost};acp-metabot-api;localhost
+      # Cross-bot client to ACP_ChainlinkBot (Chainlink Functions hire +
+      # reputation-as-feed publisher). Reaches the sibling bot over the
+      # acp-shared external bridge. The API key is ACP_ChainlinkBot's own
+      # INTERNAL_API_KEY exposed here under a disambiguated env var so each
+      # bot's own INTERNAL_API_KEY stays distinct.
+      - TheChainlinkBot__BaseUrl=http://acp-chainlinkbot-api:5000/
+      - TheChainlinkBot__ApiKey=${THECHAINLINKBOT_API_KEY:-}
+      # v1.6 #1 v0.1 reputation-as-Chainlink-feed publisher. Default OFF.
+      # Enable by setting FEEDS_ENABLED=true in the root .env AND ensuring
+      # ChainlinkBot is reachable on the acp-shared bridge. Picks top-N
+      # cached-reputation agents daily at FEEDS_HOUR_UTC and asks ChainlinkBot
+      # to deploy (or fetch) an AggregatorV3 feed per agent. Idempotent.
+      - Feeds__Enabled=${FEEDS_ENABLED:-false}
+      - Feeds__HourUtc=${FEEDS_HOUR_UTC:-5}
+      - Feeds__TopN=${FEEDS_TOP_N:-50}
+      - Feeds__MinScore=${FEEDS_MIN_SCORE:-50}
+      - Feeds__BatchSize=${FEEDS_BATCH_SIZE:-5}
+      # v1.6 #1 v0.2 — hourly sync worker that polls ChainlinkBot's
+      # /v1/feed/{agent}/score for each published feed and refreshes Metabot's
+      # reputation_feeds.last_pushed_round + last_pushed_at columns. Mirror of
+      # ChainlinkBot's ScoringPushWorker activity. Default OFF; enable AFTER
+      # v0.1 publish has deployed feeds.
+      - Feeds__Sync__Enabled=${FEEDS_SYNC_ENABLED:-false}
+      - Feeds__Sync__IntervalMinutes=${FEEDS_SYNC_INTERVAL_MINUTES:-60}
+      - Feeds__Sync__BatchSize=${FEEDS_SYNC_BATCH_SIZE:-5}
+      - Feeds__Sync__MaxAgents=${FEEDS_SYNC_MAX_AGENTS:-500}
+      # M8 self-watch — Metabot pulls its OWN reputation from ChainlinkBot
+      # on every sync tick and warns loudly if it drops below the threshold.
+      # Set OwnAgentAddress to the Privy smart-account address of TheMetaBot
+      # on app.virtuals.io. Unset → self-watch disabled.
+      - Feeds__Sync__OwnAgentAddress=${FEEDS_SYNC_OWN_ADDRESS:-}
+      - Feeds__Sync__OwnScoreThreshold=${FEEDS_SYNC_OWN_THRESHOLD:-30}
     volumes:
       # Bind-mount must be writable by UID 1654 (the .NET 10 `app` user).
       # One-time setup on a fresh host: `mkdir -p data && sudo chown 1654:1654 data`.

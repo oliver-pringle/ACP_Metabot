@@ -7,6 +7,7 @@ import { route } from "./router.js";
 import { priceForAssetToken } from "./pricing.js";
 import { toDeliverable } from "./deliverable.js";
 import { listOfferings, getOffering } from "./offerings/registry.js";
+import { listResources } from "./resources.js";
 
 type PendingJob = {
   offeringName: string;
@@ -20,6 +21,7 @@ async function main() {
   console.log(`[seller] chain=${env.chain} wallet=${env.walletAddress}`);
   console.log(`[seller] api=${env.apiUrl}`);
   console.log(`[seller] offerings registered (in code): ${listOfferings().join(", ")}`);
+  console.log(`[seller] resources registered (in code): ${listResources().join(", ") || "(none)"}`);
 
   const provider = await createProvider(env);
   const agent = await AcpAgent.create({ provider });

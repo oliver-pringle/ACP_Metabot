@@ -13,10 +13,13 @@ function main() {
     console.log("=".repeat(72));
     console.log(`Offering name:        ${offering.name}`);
     console.log(`Price:                ${price.amount} ${price.token}`);
+    console.log(`SLA:                  ${offering.slaMinutes} min`);
     console.log(`Description:`);
     console.log(`  ${offering.description}`);
     console.log(`Requirement schema (JSON):`);
     console.log(JSON.stringify(offering.requirementSchema, null, 2));
+    console.log(`Example request (JSON):`);
+    console.log(JSON.stringify(offering.requirementExample, null, 2));
     console.log(`Deliverable schema (JSON):`);
     console.log(JSON.stringify(offering.deliverableSchema, null, 2));
     console.log(`Example deliverable (JSON):`);

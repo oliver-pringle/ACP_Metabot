@@ -26,14 +26,76 @@ builder.Services.AddSingleton<AgentReputationHistoryRepository>();
 builder.Services.AddSingleton<LifetimeSnapshotRepository>();
 builder.Services.AddSingleton<RequestMetricsRepository>();
 builder.Services.AddSingleton<V2KnownSellersRepository>();
+builder.Services.AddSingleton<AgentResourcesRepository>();
+builder.Services.AddSingleton<ReputationFeedRepository>();
 builder.Services.AddSingleton<MetricsChannel>();
 
 builder.Services.AddHttpClient();
+// M1 — Resilient HttpClients for both embedding providers. Standard handler
+// gives us retries with exponential backoff + jitter, circuit breaker, and
+// per-attempt + total-request timeouts. AttemptTimeout bumped to 60s
+// because embedding requests for large batches legitimately take 20-40s;
+// the default 10s would shred well-behaved upstream into spurious retries.
+// SamplingDuration must be >= 2x AttemptTimeout (library validation rule).
+builder.Services.AddHttpClient(nameof(VoyageEmbeddingProvider))
+    .AddStandardResilienceHandler(o =>
+    {
+        o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(60);
+        o.TotalRequestTimeout.Timeout = TimeSpan.FromMinutes(3);
+        o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(120);
+        o.Retry.MaxRetryAttempts = 3;
+    });
+builder.Services.AddHttpClient(nameof(CohereEmbeddingProvider))
+    .AddStandardResilienceHandler(o =>
+    {
+        o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(60);
+        o.TotalRequestTimeout.Timeout = TimeSpan.FromMinutes(3);
+        o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(120);
+        o.Retry.MaxRetryAttempts = 3;
+    });
+// Cross-bot HTTP client to ACP_ChainlinkBot. BaseAddress comes from
+// TheChainlinkBot:BaseUrl (default: the acp-shared bridge service name);
+// the THECHAINLINKBOT_API_KEY env var is read by the typed client itself.
+// Empty key + unreachable URL are tolerated at startup — calls fail at
+// runtime when the cross-bot relationship hasn't been provisioned yet.
+builder.Services.AddHttpClient("thechainlinkbot", c =>
+{
+    var baseUrl = builder.Configuration["TheChainlinkBot:BaseUrl"]
+        ?? "http://acp-chainlinkbot-api:5000/";
+    if (!baseUrl.EndsWith("/")) baseUrl += "/";
+    c.BaseAddress = new Uri(baseUrl);
+    c.Timeout = TimeSpan.FromSeconds(15);
+}).AddStandardResilienceHandler();
+// AddStandardResilienceHandler: 3 retries with jittered exponential backoff
+// on 5xx + transient network errors, plus an outer circuit breaker. Defaults
+// (10s attempt / 30s total) are sufficient for /v1/internal/functions which
+// returns immediately with the requestId; fulfilment is polled separately.
+builder.Services.AddSingleton<TheChainlinkBotClient>();
+builder.Services.AddSingleton<ITheChainlinkBotClient>(sp => sp.GetRequiredService<TheChainlinkBotClient>());
 builder.Services.AddSingleton<AcpOffChainClient>();
 builder.Services.AddSingleton<ChainEventScanner>();
 builder.Services.AddSingleton<ScoreCalculator>();
 builder.Services.AddSingleton<VoyageEmbeddingProvider>();
-builder.Services.AddSingleton<IEmbeddingProvider>(sp => sp.GetRequiredService<VoyageEmbeddingProvider>());
+// Optional Cohere fallback (1024 dim, matches voyage-finance-2). Wired in
+// only when Embeddings:Fallback:Enabled=true so deployments without a
+// COHERE_API_KEY don't crash on boot. See CohereEmbeddingProvider.cs.
+var embeddingFallbackEnabled =
+    builder.Configuration.GetValue<bool?>("Embeddings:Fallback:Enabled") ?? false;
+if (embeddingFallbackEnabled)
+{
+    builder.Services.AddSingleton<CohereEmbeddingProvider>();
+}
+builder.Services.AddSingleton<IEmbeddingProvider>(sp =>
+{
+    var providers = new List<IEmbeddingProvider>
+    {
+        sp.GetRequiredService<VoyageEmbeddingProvider>()
+    };
+    if (sp.GetService<CohereEmbeddingProvider>() is { } cohere) providers.Add(cohere);
+    if (providers.Count == 1) return providers[0];
+    return new ChainedEmbeddingProvider(
+        providers, sp.GetRequiredService<ILogger<ChainedEmbeddingProvider>>());
+});
 builder.Services.AddSingleton<VoyageRerankProvider>();
 builder.Services.AddSingleton<IRerankProvider, VoyageRerankAdapter>();
 builder.Services.AddSingleton<IClaudeClient, ClaudeApiClient>();
@@ -99,6 +161,11 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ReputationWarmerSe
 builder.Services.AddSingleton<MetricsWriterService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MetricsWriterService>());
 builder.Services.AddHostedService<AgentProfileEmbedderService>();
+builder.Services.AddHostedService<BackupWorker>();
+builder.Services.AddSingleton<ReputationFeedPublisherWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ReputationFeedPublisherWorker>());
+builder.Services.AddSingleton<ReputationFeedSyncWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ReputationFeedSyncWorker>());
 
 builder.Services.AddOpenApi();
 
@@ -246,6 +313,34 @@ builder.Services.AddRateLimiter(options =>
                 Window = TimeSpan.FromHours(1),
                 QueueLimit = 0
             }));
+
+    // ACP v2 Resources — public free metadata endpoints buyer / orchestrator
+    // agents call BEFORE hiring an offering. All three current handlers are
+    // cheap (in-memory reads or static), but they're explicitly designed to
+    // be called frequently (one call per buyer per hire-decision), so the
+    // limit is generous — 120/IP/hr.
+    options.AddPolicy("public-resources", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 120,
+                Window = TimeSpan.FromHours(1),
+                QueueLimit = 0
+            }));
+
+    // R7-IDEA-C: cross-agent Resource discovery. Per-agent reads are cheap
+    // single-table queries; cross-agent search is a LIKE on at most a few
+    // hundred rows in v1. Both well below the budget for a 120/IP/hr cap.
+    options.AddPolicy("public-marketplace-resources", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 120,
+                Window = TimeSpan.FromHours(1),
+                QueueLimit = 0
+            }));
 });
 
 var app = builder.Build();
@@ -273,6 +368,11 @@ app.UseMiddleware<RequestMetricsMiddleware>();
 // Claude Code plugin. Fail-closed: if the key isn't configured, refuse all
 // auth'd requests. Set INTERNAL_API_KEY in the environment for both this
 // container and the sidecar.
+//
+// Exception within /v1/*: /v1/agents/active is an internal cross-bot endpoint
+// (consumed over the acp-shared docker network by ACP_ChainlinkBot to learn
+// which agents to score on-chain). It MUST require X-API-Key — unlike the
+// other /v1/* paths it is never reached from the public Caddy gateway.
 var apiKey = builder.Configuration["INTERNAL_API_KEY"];
 var apiKeyBytes = string.IsNullOrEmpty(apiKey)
     ? Array.Empty<byte>()
@@ -280,8 +380,10 @@ var apiKeyBytes = string.IsNullOrEmpty(apiKey)
 app.Use(async (ctx, next) =>
 {
     var path = ctx.Request.Path;
+    var isInternalV1 = path.StartsWithSegments("/v1/agents/active",
+        StringComparison.OrdinalIgnoreCase);
     if (path.Equals("/health", StringComparison.OrdinalIgnoreCase) ||
-        path.StartsWithSegments("/v1", StringComparison.OrdinalIgnoreCase))
+        (path.StartsWithSegments("/v1", StringComparison.OrdinalIgnoreCase) && !isInternalV1))
     {
         await next();
         return;
@@ -667,6 +769,252 @@ app.MapGet("/v1/health", (SearchService search, MarketplaceIndexerService idx, C
     });
 });
 
+// ACP v2 Resources — public, free, parameterised endpoints that buyer /
+// orchestrator agents (Butler etc.) call BEFORE paying for an offering.
+// Mirrored 1:1 with acp-v2/src/resources.ts; run `npm run print-resources`
+// in acp-v2/ and paste each block into app.virtuals.io's Resources tab.
+//
+// /v1/* already bypasses the X-API-Key middleware, so no extra wiring is
+// needed for these to stay public. Rate-limited via the public-resources
+// policy (120/IP/hr — Resources are explicitly designed to be called
+// frequently as pre-hire introspection).
+//
+// Add new Resources here in lockstep with new entries in resources.ts.
+app.MapGet("/v1/resources/searchStatus", (SearchService search, MarketplaceIndexerService idx) =>
+{
+    var byMarketplace = search.CorpusByMarketplace();
+    var refreshedAt = search.CorpusRefreshedAtUtc == default
+        ? (string?)null
+        : search.CorpusRefreshedAtUtc.ToString("O");
+    return Results.Ok(new
+    {
+        corpus = new
+        {
+            total = search.CorpusCount,
+            v1Count = byMarketplace.TryGetValue("v1", out var v1) ? v1 : 0,
+            v2Count = byMarketplace.TryGetValue("v2", out var v2) ? v2 : 0,
+            refreshedAt
+        },
+        indexer = new
+        {
+            lastFetchAt = idx.LastFetchAt?.ToString("O"),
+            lastFetchCount = idx.LastFetchCount
+        },
+        time = DateTime.UtcNow.ToString("O")
+    });
+}).RequireRateLimiting("public-resources");
+
+// Capabilities — TheMetaBot's offerings list. Kept in lockstep with
+// acp-v2/src/offerings/registry.ts and acp-v2/src/pricing.ts. Buyers
+// hitting this Resource see name + 1-line description + USDC price +
+// SLA, enough to decide whether to hire without paying for `browseAgent`.
+// When you add/remove/reprice an offering, update BOTH this list AND the
+// TS registry — docs-lockstep rule from CLAUDE.md applies.
+app.MapGet("/v1/resources/capabilities", () =>
+{
+    return Results.Ok(new
+    {
+        agent = "TheMetaBot",
+        offerings = new object[]
+        {
+            new { name = "search",           priceUsdc = 0.01, slaMinutes = 5, description = "Semantic search across every offering in the V1 + V2 ACP marketplaces. Returns ranked matches with prices, reputation, and marketplace URLs." },
+            new { name = "searchAgents",     priceUsdc = 0.01, slaMinutes = 5, description = "Search for AGENTS (not offerings) by name + bio + aggregated offering descriptions. Returns ranked sellers with their offering portfolio." },
+            new { name = "browseAgent",      priceUsdc = 0.01, slaMinutes = 5, description = "Full profile for a single agent by wallet address: reputation summary plus every offering with description, schema, price, hires, and percentile." },
+            new { name = "today",            priceUsdc = 0.02, slaMinutes = 5, description = "Daily digest of new offerings and biggest hire-count gainers across the marketplace; configurable lookback window." },
+            new { name = "composeStack",     priceUsdc = 0.50, slaMinutes = 5, description = "LLM-curated multi-agent stack for a stated use case: an ordered list of complementary offerings plus rationale. More expensive — runs Claude over top-K candidates." },
+            new { name = "watchOffering",    priceUsdc = 0.50, slaMinutes = 5, description = "Subscribe to webhook alerts when new offerings match a query. Polls on a configurable cadence over the watch window." },
+            new { name = "agentReputation",  priceUsdc = 0.05, slaMinutes = 5, description = "Live computed reputation for an agent address: composite 0-100 score with on-chain behavioural signals (90-day window)." }
+        },
+        notes = "Prices in USDC, slaMinutes is the wall-clock window from hire to deliverable. Full requirement and deliverable schemas live on each offering's marketplace card."
+    });
+}).RequireRateLimiting("public-resources");
+
+// Chain coverage — distinguishes WHERE TheMetaBot accepts hires (operatedOn)
+// from WHICH chains its indexer covers (indexed). Static answer: TheMetaBot's
+// indexer pulls V1 (Base mainnet only) + V2 (Base mainnet + Base Sepolia)
+// from the upstream ACP API.
+app.MapGet("/v1/resources/chainCoverage", () =>
+{
+    return Results.Ok(new
+    {
+        operatedOn = new object[]
+        {
+            new { chainId = 8453, name = "Base mainnet", role = "TheMetaBot accepts hires here." }
+        },
+        indexed = new object[]
+        {
+            new { chainId = 8453,  name = "Base mainnet", marketplaceVersions = new[] { "v1", "v2" } },
+            new { chainId = 84532, name = "Base Sepolia", marketplaceVersions = new[] { "v2" } }
+        },
+        notes = "search / searchAgents / today / composeStack / browseAgent default to spanning both V1 + V2. Use the marketplace filter to restrict to one."
+    });
+}).RequireRateLimiting("public-resources");
+
+// R7-IDEA-C: cross-agent ACP v2 Resource index. AcpV2MarketplaceSource
+// persists each indexed agent's `resources` array into agent_resources as
+// a side-effect of its per-wallet fetch (see Services/MarketplaceSource/
+// AcpV2MarketplaceSource.cs). These endpoints expose that index so the
+// acp-find MCP server can surface Resources marketplace-wide.
+//
+// Path namespace note: Metabot's OWN Resources (registered via R7-IDEA-A)
+// live at /v1/resources/<name>. THIS surface — for OTHER agents' Resources
+// indexed from upstream — lives under /v1/agent/{address}/resources +
+// /v1/marketplace/resources/search to avoid name collision.
+
+// Per-agent Resource list. Single-table query keyed on agent_address.
+// Returns 200 with empty list when the agent has no indexed Resources
+// (instead of 404) so a buyer agent can distinguish "agent not indexed"
+// from "agent has zero Resources" via the broader /v1/agent/{address}.
+app.MapGet("/v1/agent/{address}/resources",
+    async (string address, AgentResourcesRepository repo, CancellationToken ct) =>
+    {
+        if (string.IsNullOrWhiteSpace(address))
+            return Results.BadRequest(new { error = "agentAddress is required" });
+        var addr = address.Trim().ToLowerInvariant();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+            return Results.BadRequest(new { error = "invalid_address", message = "must be 0x followed by 40 hex chars" });
+
+        var rows = await repo.ListByAgentAsync(addr, ct);
+        var dtos = rows.Select(r =>
+        {
+            System.Text.Json.JsonElement? schema = null;
+            if (!string.IsNullOrEmpty(r.ParamsJson))
+            {
+                try
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(r.ParamsJson);
+                    schema = doc.RootElement.Clone();
+                }
+                catch
+                {
+                    // Malformed cached params — surface as null rather than
+                    // 500 on the whole response.
+                }
+            }
+            return new
+            {
+                agentAddress       = r.AgentAddress,
+                agentName          = r.AgentName,
+                name               = r.Name,
+                url                = r.Url,
+                paramsSchema       = schema,
+                description        = r.Description,
+                marketplaceVersion = r.MarketplaceVersion,
+                firstSeenAt        = r.FirstSeenAt.ToString("O"),
+                lastSeenAt         = r.LastSeenAt.ToString("O")
+            };
+        }).ToArray();
+
+        return Results.Ok(new
+        {
+            agentAddress = addr,
+            count = dtos.Length,
+            resources = dtos
+        });
+    }).RequireRateLimiting("public-marketplace-resources");
+
+// Per-agent reputation feed lookup (v1.6 #1 v0.1+v0.2). Returns the on-chain
+// AggregatorV3 contract address ChainlinkBot deployed for this agent — the
+// same shape DeFi protocols use to read Chainlink price feeds. Public, so
+// buyer-side code can discover the feed address without going through the
+// operator-only /feeds/published endpoint. 404 when the agent hasn't been
+// published to the on-chain feed yet (i.e. not in reputation_feeds, or
+// publisher worker recorded an error row with empty aggregator_address).
+app.MapGet("/v1/agent/{address}/feed-address",
+    async (string address, ReputationFeedRepository repo) =>
+    {
+        if (string.IsNullOrWhiteSpace(address))
+            return Results.BadRequest(new { error = "invalid_address", message = "agentAddress is required" });
+        var addr = address.Trim().ToLowerInvariant();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+            return Results.BadRequest(new { error = "invalid_address", message = "must be 0x followed by 40 hex chars" });
+
+        var row = await repo.GetAsync(addr);
+        if (row is null || string.IsNullOrEmpty(row.AggregatorAddress))
+            return Results.NotFound(new
+            {
+                error = "no_feed",
+                agentAddress = addr,
+                hint = "This agent hasn't been published as an on-chain reputation feed yet. Top-N agents by cached score get a feed when the daily ReputationFeedPublisherWorker runs. Subscribe via /v1/watches/* (not implemented for feeds yet) or check back after the next daily run."
+            });
+
+        return Results.Ok(new
+        {
+            agentAddress      = row.AgentAddress,
+            // Base mainnet — ChainlinkBot deploys feeds on chain 8453 only.
+            // If feeds are ever multi-chain, source this from config.
+            chainId           = 8453,
+            aggregatorAddress = row.AggregatorAddress,
+            methodologyHash   = row.MethodologyHash,
+            decimals          = row.Decimals,
+            latestScore       = row.LatestScore,
+            deployedAt        = row.DeployedAt.ToString("O"),
+            firstSeenAt       = row.FirstSeenAt.ToString("O"),
+            lastPushedRound   = row.LastPushedRound,
+            lastPushedAt      = row.LastPushedAt?.ToString("O"),
+            // Convenience: a Basescan link to the deployed aggregator so the
+            // caller can verify the contract by eye / wire up their reader.
+            explorerUrl       = $"https://basescan.org/address/{row.AggregatorAddress}",
+            notes             = "Reads conform to Chainlink AggregatorV3Interface (decimals=8, range 0..100*1e8). See ACP_ChainlinkBot/docs/REPUTATION_FEEDS.md."
+        });
+    }).RequireRateLimiting("public-marketplace-resources");
+
+// Cross-agent Resource search. LIKE-based match on name + description +
+// agent_name. v1 is fine at the current ~500-row scale; v1.1 may upgrade
+// to FTS5 + a new agent_resources_fts virtual table.
+app.MapGet("/v1/marketplace/resources/search",
+    async (string? query, int? limit, string? marketplace,
+        AgentResourcesRepository repo, CancellationToken ct) =>
+    {
+        if (string.IsNullOrWhiteSpace(query))
+            return Results.BadRequest(new { error = "query is required" });
+        if (query.Length > 200)
+            return Results.BadRequest(new { error = "query must be 200 characters or fewer" });
+        var cap = limit is null ? 25 : Math.Clamp(limit.Value, 1, 100);
+        string? mvFilter = null;
+        if (!string.IsNullOrWhiteSpace(marketplace))
+        {
+            var mv = marketplace.Trim().ToLowerInvariant();
+            if (mv is not ("v1" or "v2"))
+                return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
+            mvFilter = mv;
+        }
+
+        var rows = await repo.SearchAsync(query, cap, mvFilter, ct);
+        var dtos = rows.Select(r =>
+        {
+            System.Text.Json.JsonElement? schema = null;
+            if (!string.IsNullOrEmpty(r.ParamsJson))
+            {
+                try
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(r.ParamsJson);
+                    schema = doc.RootElement.Clone();
+                }
+                catch { /* surface as null */ }
+            }
+            return new
+            {
+                agentAddress       = r.AgentAddress,
+                agentName          = r.AgentName,
+                name               = r.Name,
+                url                = r.Url,
+                paramsSchema       = schema,
+                description        = r.Description,
+                marketplaceVersion = r.MarketplaceVersion,
+                lastSeenAt         = r.LastSeenAt.ToString("O")
+            };
+        }).ToArray();
+
+        return Results.Ok(new
+        {
+            query,
+            marketplace = mvFilter,
+            count = dtos.Length,
+            results = dtos
+        });
+    }).RequireRateLimiting("public-marketplace-resources");
+
 // Plugin activation beacon. Fired once per MCP-server boot by acp-find-mcp
 // (>= 0.6.0) right after handling the MCP `initialize` request — proves the
 // server actually started under a real client, separate from npx-cache or
@@ -825,6 +1173,26 @@ app.MapGet("/v1/agentRecentJobs",
         HandleAgentRecentJobs(agent, days, limit, scanner, ct))
     .RequireRateLimiting("public-agent-recent-jobs");
 
+// Internal cross-bot endpoint — returns lowercased addresses of agents with at
+// least one non-tombstoned offering seen in the last 30 days. Consumed by
+// ACP_ChainlinkBot (over the acp-shared docker network) to enumerate which
+// agents to score on-chain. Path lives under /v1/* but is special-cased in the
+// X-API-Key middleware above so callers must hold INTERNAL_API_KEY.
+//
+// `windowDays` is the configurable lookback (default 30, clamped 1..365).
+app.MapGet("/v1/agents/active",
+    async (int? windowDays, OfferingRepository repo, CancellationToken ct) =>
+    {
+        var window = windowDays is null ? 30 : Math.Clamp(windowDays.Value, 1, 365);
+        var addrs = await repo.ListActiveAgentAddressesAsync(window, ct);
+        return Results.Ok(new
+        {
+            windowDays = window,
+            count = addrs.Count,
+            agents = addrs
+        });
+    });
+
 app.MapGet("/index/stats", async (OfferingRepository repo, MarketplaceIndexerService idx,
     VoyageEmbeddingProvider emb) =>
 {
@@ -846,6 +1214,50 @@ app.MapPost("/index/refresh", async (MarketplaceIndexerService idx, Cancellation
 {
     await idx.RunOnceAsync(ct);
     return Results.Ok(new { ok = true });
+});
+
+// Operator-only: list all ReputationAggregator feeds that TheMetaBot has
+// asked ChainlinkBot to publish (v1.6 #1). Outside /v1/* so the X-API-Key
+// middleware gates it. Consumers (e.g. DeFi protocols wanting to wire an
+// AggregatorV3 read on an ACP agent's reputation) currently learn feed
+// addresses out-of-band; v0.2 will surface this as a public Resource.
+app.MapGet("/feeds/published", async (ReputationFeedRepository repo) =>
+{
+    var rows = await repo.ListAllAsync(limit: 500);
+    return Results.Ok(new
+    {
+        count = rows.Count,
+        feeds = rows.Select(r => new
+        {
+            agentAddress      = r.AgentAddress,
+            aggregatorAddress = r.AggregatorAddress,
+            methodologyHash   = r.MethodologyHash,
+            decimals          = r.Decimals,
+            latestScore       = r.LatestScore,
+            deployedAt        = r.DeployedAt.ToString("O"),
+            lastPushedRound   = r.LastPushedRound,
+            lastPushedAt      = r.LastPushedAt?.ToString("O"),
+            lastError         = r.LastError
+        })
+    });
+});
+
+// Operator-only: trigger a publish run immediately (useful in dev and for
+// catching agents that crossed the score threshold between daily cron ticks).
+app.MapPost("/feeds/publish-now", async (
+    ReputationFeedPublisherWorker worker, CancellationToken ct) =>
+{
+    var published = await worker.RunOnceAsync(DateTime.UtcNow, ct);
+    return Results.Ok(new { ok = true, published });
+});
+
+// Operator-only: trigger a sync run immediately (v0.2). Polls ChainlinkBot
+// for every deployed feed and refreshes last_pushed_round + last_pushed_at.
+app.MapPost("/feeds/sync-now", async (
+    ReputationFeedSyncWorker worker, CancellationToken ct) =>
+{
+    var (synced, notPushed, failed) = await worker.RunOnceAsync(ct);
+    return Results.Ok(new { ok = true, synced, notPushed, failed });
 });
 
 // Operator-only telemetry. All five sit outside /v1/* so the X-API-Key

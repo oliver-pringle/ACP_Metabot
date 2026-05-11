@@ -22,6 +22,11 @@ export const today: Offering = {
     },
     required: [],
   },
+  requirementExample: {
+    days: 7,
+    marketplace: "v2",
+  },
+  slaMinutes: 5,
   deliverableSchema: {
     type: "object",
     required: ["windowDays", "windowStart", "snapshotComparison", "partial", "newOfferings", "gainers", "newAgents", "churnRate", "saturationMap", "computedAt"],
@@ -45,18 +50,19 @@ export const today: Offering = {
         required: ["count", "agents"],
         description: "Agents that appeared on the marketplace for the first time in the window.",
         properties: {
-          count: { type: "integer" },
+          count: { type: "integer", description: "Number of agents that first appeared within the window" },
           agents: {
             type: "array",
+            description: "List of agents that first appeared within the window",
             items: {
               type: "object",
               required: ["address", "name", "marketplace", "firstSeenAt", "offeringCount"],
               properties: {
-                address: { type: "string" },
-                name: { type: "string" },
-                marketplace: { type: "string", enum: ["v1", "v2"] },
-                firstSeenAt: { type: "string", format: "date-time" },
-                offeringCount: { type: "integer" },
+                address: { type: "string", description: "Lowercased 0x-prefixed wallet address of the agent" },
+                name: { type: "string", description: "Marketplace display name of the agent" },
+                marketplace: { type: "string", enum: ["v1", "v2"], description: "ACP marketplace where the agent first appeared" },
+                firstSeenAt: { type: "string", format: "date-time", description: "ISO-8601 UTC timestamp the agent was first observed" },
+                offeringCount: { type: "integer", description: "Number of active offerings the agent has now" },
               },
             },
           },
@@ -68,8 +74,8 @@ export const today: Offering = {
         description: "Fraction of offerings that went inactive (tombstoned) in the window relative to the start-of-window total.",
         properties: {
           rate: { type: "number", description: "Churn rate 0.0–1.0." },
-          churnedCount: { type: "integer" },
-          baselineCount: { type: "integer" },
+          churnedCount: { type: "integer", description: "Number of offerings that went inactive within the window" },
+          baselineCount: { type: "integer", description: "Total active offerings at the start of the window" },
         },
       },
       cohortSurvival: {
@@ -81,9 +87,9 @@ export const today: Offering = {
           required: ["cohortWeek", "cohortStart", "cohortSize", "surviving", "survivalRate"],
           properties: {
             cohortWeek: { type: "string", description: "ISO week string (e.g. '2026-W12')." },
-            cohortStart: { type: "string", format: "date-time" },
-            cohortSize: { type: "integer" },
-            surviving: { type: "integer" },
+            cohortStart: { type: "string", format: "date-time", description: "ISO-8601 UTC timestamp of the start of the cohort week" },
+            cohortSize: { type: "integer", description: "Number of offerings that joined the marketplace in this week" },
+            surviving: { type: "integer", description: "Number of those offerings still active at the end of the window" },
             survivalRate: { type: "number", description: "Fraction of the cohort still active, 0.0–1.0." },
           },
         },
@@ -95,14 +101,14 @@ export const today: Offering = {
           type: "object",
           required: ["category", "total", "saturatedCount", "saturationPct"],
           properties: {
-            category: { type: "string" },
-            total: { type: "integer" },
-            saturatedCount: { type: "integer" },
+            category: { type: "string", description: "Canonical marketplace category id (e.g. 'wallet-intelligence')" },
+            total: { type: "integer", description: "Total offerings in the category" },
+            saturatedCount: { type: "integer", description: "Offerings with at least one near-duplicate in the same category" },
             saturationPct: { type: "number", description: "Percentage of offerings that are near-duplicates, 0–100." },
           },
         },
       },
-      computedAt: { type: "string", format: "date-time" },
+      computedAt: { type: "string", format: "date-time", description: "ISO-8601 UTC timestamp the digest was computed" },
     },
   },
   deliverableExample: {
