@@ -25,6 +25,18 @@ public sealed record FeedAddressResponse(
     [property: JsonPropertyName("latestScore")]       double LatestScore);
 
 /// <summary>
+/// Response shape from ACP_ChainlinkBot's <c>GET /v1/feed/{agent}/score</c>
+/// endpoint. Returns the most recent on-chain push for the agent — the
+/// payload the AggregatorV3 feed reflects. 404 when never pushed.
+/// </summary>
+public sealed record FeedScoreResponse(
+    [property: JsonPropertyName("agentAddress")]    string AgentAddress,
+    [property: JsonPropertyName("publishedValue")]  double PublishedValue,
+    [property: JsonPropertyName("methodologyHash")] string MethodologyHash,
+    [property: JsonPropertyName("pushedAt")]        DateTime PushedAt,
+    [property: JsonPropertyName("roundId")]         long RoundId);
+
+/// <summary>
 /// Cross-bot contract for ACP_ChainlinkBot HTTP calls. Extracted so tests can
 /// substitute a fake without spinning up an HttpClient + IHttpClientFactory.
 /// </summary>
@@ -35,6 +47,15 @@ public interface ITheChainlinkBotClient
         string secretsLocation, CancellationToken ct = default);
 
     Task<FeedAddressResponse> RequestFeedAddressAsync(
+        string agentAddress, CancellationToken ct = default);
+
+    /// <summary>
+    /// Latest on-chain push for the agent, or null when no push has happened
+    /// yet. Used by ReputationFeedSyncWorker to keep Metabot's view of the
+    /// reputation_feeds table in sync with ChainlinkBot's ScoringPushWorker
+    /// activity. 404 → null; other non-2xx → throw.
+    /// </summary>
+    Task<FeedScoreResponse?> GetFeedScoreAsync(
         string agentAddress, CancellationToken ct = default);
 }
 
@@ -127,5 +148,25 @@ public sealed class TheChainlinkBotClient : ITheChainlinkBotClient
         var result = await resp.Content.ReadFromJsonAsync<FeedAddressResponse>(cancellationToken: ct)
             ?? throw new InvalidOperationException("ChainlinkBot returned empty feed-address response");
         return result;
+    }
+
+    /// <inheritdoc />
+    public async Task<FeedScoreResponse?> GetFeedScoreAsync(
+        string agentAddress, CancellationToken ct = default)
+    {
+        var http = _httpFactory.CreateClient("thechainlinkbot");
+        using var req = new HttpRequestMessage(HttpMethod.Get, $"v1/feed/{agentAddress}/score");
+        if (!string.IsNullOrEmpty(_apiKey)) req.Headers.Add("X-API-Key", _apiKey);
+
+        using var resp = await http.SendAsync(req, ct);
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
+        if (!resp.IsSuccessStatusCode)
+        {
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            _log.LogWarning("[thechainlinkbot] /v1/feed/{Agent}/score returned {Status}: {Body}",
+                agentAddress, resp.StatusCode, body);
+            resp.EnsureSuccessStatusCode();
+        }
+        return await resp.Content.ReadFromJsonAsync<FeedScoreResponse>(cancellationToken: ct);
     }
 }

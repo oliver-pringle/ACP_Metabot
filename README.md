@@ -238,6 +238,38 @@ A `json-file` source is also supported for offline dev — see
    cd acp-v2 && npm run print-offerings
    ```
 
+## Wallet allocation across the ACP portfolio
+
+`app.virtuals.io` caps any single wallet at **5 agents**. TheMetaBot is one of
+those 5. When you spin up the 6th portfolio bot, it CANNOT live on the same
+wallet — you provision a new MetaMask wallet and the new bot points at it
+via its own `ACP_WALLET_ADDRESS` / `ACP_WALLET_ID` / `ACP_SIGNER_PRIVATE_KEY`.
+
+**Current allocation:**
+
+| Wallet | Slot use | Agents |
+|---|---|---|
+| `0x4e47…6C0b` (wallet 1) | **5 / 5 (cap)** | TheMetaBot, DeFi Evaluation Bot, Agent Evaluation Bot, Liquid Guard Bot, MEVProtect Bot |
+| `0x6f28…e738` (wallet 2) | 1 / 5 | TheChainlinkBot |
+| `0x693a…4633` (deployer EOA) | — (not an ACP wallet) | Pays gas for ChainlinkBot contract deploys + Chainlink subscription owner |
+
+**Why TheMetaBot is on wallet 1 specifically:** historical — it was the
+first bot in the portfolio. Don't try to move it; ACP wallet addresses
+are baked into the agent's on-chain identity on the marketplace. Moving
+would break every existing buyer reference and reputation history.
+
+**When wallet 2 hits 5 / 5:** spin up wallet 3 in MetaMask, fund it with
+~$5 of ETH on Base for gas, and use it for the next bot's ACP wallet.
+Owner-EOA and Privy smart-account addresses are different — see the
+"Privy smart-account ≠ owner EOA" note in `/CLAUDE.md` before depositing
+any USDC at the new wallet.
+
+**Useful for new bots inheriting this README:** the wallet pattern is
+portfolio-wide; copy this section verbatim, update the table for the
+relevant bot's wallet, and link back to `/CLAUDE.md` for the full
+portfolio map. The 5-cap is an `app.virtuals.io` constraint, not an
+ACP-protocol constraint — it applies to every bot built on V2.
+
 ## Production (Linux / Docker)
 
 The canonical deploy target is **Oracle Cloud Ampere A1 (ARM, free tier)

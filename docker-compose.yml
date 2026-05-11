@@ -72,6 +72,21 @@ services:
       - Feeds__TopN=${FEEDS_TOP_N:-50}
       - Feeds__MinScore=${FEEDS_MIN_SCORE:-50}
       - Feeds__BatchSize=${FEEDS_BATCH_SIZE:-5}
+      # v1.6 #1 v0.2 — hourly sync worker that polls ChainlinkBot's
+      # /v1/feed/{agent}/score for each published feed and refreshes Metabot's
+      # reputation_feeds.last_pushed_round + last_pushed_at columns. Mirror of
+      # ChainlinkBot's ScoringPushWorker activity. Default OFF; enable AFTER
+      # v0.1 publish has deployed feeds.
+      - Feeds__Sync__Enabled=${FEEDS_SYNC_ENABLED:-false}
+      - Feeds__Sync__IntervalMinutes=${FEEDS_SYNC_INTERVAL_MINUTES:-60}
+      - Feeds__Sync__BatchSize=${FEEDS_SYNC_BATCH_SIZE:-5}
+      - Feeds__Sync__MaxAgents=${FEEDS_SYNC_MAX_AGENTS:-500}
+      # M8 self-watch — Metabot pulls its OWN reputation from ChainlinkBot
+      # on every sync tick and warns loudly if it drops below the threshold.
+      # Set OwnAgentAddress to the Privy smart-account address of TheMetaBot
+      # on app.virtuals.io. Unset → self-watch disabled.
+      - Feeds__Sync__OwnAgentAddress=${FEEDS_SYNC_OWN_ADDRESS:-}
+      - Feeds__Sync__OwnScoreThreshold=${FEEDS_SYNC_OWN_THRESHOLD:-30}
     volumes:
       # Bind-mount must be writable by UID 1654 (the .NET 10 `app` user).
       # One-time setup on a fresh host: `mkdir -p data && sudo chown 1654:1654 data`.

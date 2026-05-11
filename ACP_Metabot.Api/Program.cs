@@ -31,6 +31,28 @@ builder.Services.AddSingleton<ReputationFeedRepository>();
 builder.Services.AddSingleton<MetricsChannel>();
 
 builder.Services.AddHttpClient();
+// M1 — Resilient HttpClients for both embedding providers. Standard handler
+// gives us retries with exponential backoff + jitter, circuit breaker, and
+// per-attempt + total-request timeouts. AttemptTimeout bumped to 60s
+// because embedding requests for large batches legitimately take 20-40s;
+// the default 10s would shred well-behaved upstream into spurious retries.
+// SamplingDuration must be >= 2x AttemptTimeout (library validation rule).
+builder.Services.AddHttpClient(nameof(VoyageEmbeddingProvider))
+    .AddStandardResilienceHandler(o =>
+    {
+        o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(60);
+        o.TotalRequestTimeout.Timeout = TimeSpan.FromMinutes(3);
+        o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(120);
+        o.Retry.MaxRetryAttempts = 3;
+    });
+builder.Services.AddHttpClient(nameof(CohereEmbeddingProvider))
+    .AddStandardResilienceHandler(o =>
+    {
+        o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(60);
+        o.TotalRequestTimeout.Timeout = TimeSpan.FromMinutes(3);
+        o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(120);
+        o.Retry.MaxRetryAttempts = 3;
+    });
 // Cross-bot HTTP client to ACP_ChainlinkBot. BaseAddress comes from
 // TheChainlinkBot:BaseUrl (default: the acp-shared bridge service name);
 // the THECHAINLINKBOT_API_KEY env var is read by the typed client itself.
@@ -142,6 +164,8 @@ builder.Services.AddHostedService<AgentProfileEmbedderService>();
 builder.Services.AddHostedService<BackupWorker>();
 builder.Services.AddSingleton<ReputationFeedPublisherWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ReputationFeedPublisherWorker>());
+builder.Services.AddSingleton<ReputationFeedSyncWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ReputationFeedSyncWorker>());
 
 builder.Services.AddOpenApi();
 
@@ -1179,6 +1203,15 @@ app.MapPost("/feeds/publish-now", async (
 {
     var published = await worker.RunOnceAsync(DateTime.UtcNow, ct);
     return Results.Ok(new { ok = true, published });
+});
+
+// Operator-only: trigger a sync run immediately (v0.2). Polls ChainlinkBot
+// for every deployed feed and refreshes last_pushed_round + last_pushed_at.
+app.MapPost("/feeds/sync-now", async (
+    ReputationFeedSyncWorker worker, CancellationToken ct) =>
+{
+    var (synced, notPushed, failed) = await worker.RunOnceAsync(ct);
+    return Results.Ok(new { ok = true, synced, notPushed, failed });
 });
 
 // Operator-only telemetry. All five sit outside /v1/* so the X-API-Key

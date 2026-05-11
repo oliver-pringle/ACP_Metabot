@@ -154,5 +154,9 @@ public class ReputationFeedPublisherWorkerTests : IDisposable
             Interlocked.Increment(ref CallCount);
             return Handler(agentAddress, ct);
         }
+
+        public Task<FeedScoreResponse?> GetFeedScoreAsync(
+            string agentAddress, CancellationToken ct = default)
+            => throw new NotImplementedException("not exercised in this test");
     }
 }

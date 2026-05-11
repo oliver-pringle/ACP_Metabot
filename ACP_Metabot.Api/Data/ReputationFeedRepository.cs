@@ -125,6 +125,49 @@ public class ReputationFeedRepository
         await cmd.ExecuteNonQueryAsync();
     }
 
+    // Returns aggregator addresses that are deployed (non-empty). The sync
+    // worker (v0.2) uses this to know which feeds to poll ChainlinkBot for.
+    public async Task<IReadOnlyList<(string AgentAddress, string AggregatorAddress)>>
+        ListDeployedAsync(int limit = 500)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT agent_address, aggregator_address
+            FROM reputation_feeds
+            WHERE aggregator_address != ''
+            ORDER BY deployed_at DESC
+            LIMIT $n;";
+        cmd.Parameters.AddWithValue("$n", limit);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        var rows = new List<(string, string)>(capacity: limit);
+        while (await reader.ReadAsync()) rows.Add((reader.GetString(0), reader.GetString(1)));
+        return rows;
+    }
+
+    // v0.2 sync — record what we observed from ChainlinkBot's score push log.
+    // Updates only the sync columns (latest_score, last_pushed_round/at) and
+    // clears last_error on success. Does NOT touch aggregator_address or
+    // deployed_at — those are the publisher worker's territory.
+    public async Task UpdateSyncedScoreAsync(
+        string agentAddress, double latestScore, long roundId, DateTime pushedAt)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            UPDATE reputation_feeds SET
+                latest_score      = $s,
+                last_pushed_round = $r,
+                last_pushed_at    = $p,
+                last_error        = NULL
+            WHERE agent_address = $a;";
+        cmd.Parameters.AddWithValue("$a", agentAddress.ToLowerInvariant());
+        cmd.Parameters.AddWithValue("$s", latestScore);
+        cmd.Parameters.AddWithValue("$r", roundId);
+        cmd.Parameters.AddWithValue("$p", pushedAt.ToString("O", CultureInfo.InvariantCulture));
+        await cmd.ExecuteNonQueryAsync();
+    }
+
     public async Task<int> CountPublishedAsync()
     {
         await using var conn = _db.OpenConnection();
