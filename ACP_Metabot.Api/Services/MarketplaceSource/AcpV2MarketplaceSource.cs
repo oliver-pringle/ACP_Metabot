@@ -39,6 +39,7 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
     private readonly HttpClient _http;
     private readonly ILogger<AcpV2MarketplaceSource> _logger;
     private readonly V2KnownSellersRepository? _sellersRepo;
+    private readonly AgentResourcesRepository? _resourcesRepo;
     private readonly int _chainId;
     private readonly string[] _knownAgents;
     private readonly bool _keywordSweepEnabled;
@@ -88,10 +89,12 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
         IConfiguration config,
         IHttpClientFactory httpFactory,
         ILogger<AcpV2MarketplaceSource> logger,
-        V2KnownSellersRepository? sellersRepo = null)
+        V2KnownSellersRepository? sellersRepo = null,
+        AgentResourcesRepository? resourcesRepo = null)
     {
         _logger = logger;
         _sellersRepo = sellersRepo;
+        _resourcesRepo = resourcesRepo;
         var baseUrl = config["Indexer:V2:ApiBaseUrl"] ?? "https://api.acp.virtuals.io";
         if (baseUrl.EndsWith("/")) baseUrl = baseUrl.TrimEnd('/');
         _chainId = config.GetValue<int?>("Indexer:V2:ChainId") ?? 8453;
@@ -244,6 +247,42 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
                 c.ChainId == _chainId && c.Active);
             if (chainBinding is null) return null;
 
+            // R7-IDEA-C: persist this agent's Resources as a side-effect of
+            // the per-wallet fetch. AcpAgentDetail.resources is what every
+            // portfolio bot writes via R7-IDEA-A; here we mirror them into
+            // SQLite so /v1/agent/{address}/resources and
+            // /v1/marketplace/resources/search can expose them. Best-effort —
+            // a write failure here must not break offering ingestion, so
+            // we swallow + log and continue.
+            if (_resourcesRepo is not null && agent.Resources is { Count: > 0 } incomingResources)
+            {
+                var payload = new List<(string Name, string Url, string? ParamsJson, string Description)>(incomingResources.Count);
+                foreach (var r in incomingResources)
+                {
+                    if (string.IsNullOrWhiteSpace(r.Name) || string.IsNullOrWhiteSpace(r.Url)) continue;
+                    string? paramsJson = null;
+                    if (r.Params.ValueKind != JsonValueKind.Undefined &&
+                        r.Params.ValueKind != JsonValueKind.Null)
+                    {
+                        paramsJson = r.Params.GetRawText();
+                    }
+                    payload.Add((r.Name, r.Url, paramsJson, r.Description ?? ""));
+                }
+                if (payload.Count > 0)
+                {
+                    try
+                    {
+                        await _resourcesRepo.UpsertManyForAgentAsync(
+                            wallet, agent.Name ?? "", MarketplaceVersion, payload, ct);
+                    }
+                    catch (Exception rex)
+                    {
+                        _logger.LogWarning(rex,
+                            "[v2-source] resources upsert failed for {Wallet}; continuing", wallet);
+                    }
+                }
+            }
+
             var dtos = new List<MarketplaceOfferingDto>(agent.Offerings?.Count ?? 0);
             foreach (var o in agent.Offerings ?? Enumerable.Empty<V2Offering>())
             {
@@ -329,6 +368,10 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
         [JsonPropertyName("walletAddress")] public string? WalletAddress { get; set; }
         [JsonPropertyName("chains")] public List<V2Chain>? Chains { get; set; }
         [JsonPropertyName("offerings")] public List<V2Offering>? Offerings { get; set; }
+        // R7-IDEA-C: AcpAgentDetail.resources from acp-node-v2 ^0.0.6
+        // dist/events/types.d.ts:168. Mirrored into SQLite by the
+        // _resourcesRepo side-effect inside FetchAgentAsync.
+        [JsonPropertyName("resources")] public List<V2Resource>? Resources { get; set; }
     }
 
     private class V2Chain
@@ -345,5 +388,17 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
         [JsonPropertyName("priceType")] public string? PriceType { get; set; }
         [JsonPropertyName("priceValue")] public double? PriceValue { get; set; }
         [JsonPropertyName("isHidden")] public bool IsHidden { get; set; }
+    }
+
+    // R7-IDEA-C: matches AcpAgentResource in
+    // @virtuals-protocol/acp-node-v2/dist/events/types.d.ts:168
+    // (name, url, params, description). The `params` field is left as
+    // JsonElement so it round-trips through SQLite as a raw JSON string.
+    private class V2Resource
+    {
+        [JsonPropertyName("name")] public string Name { get; set; } = "";
+        [JsonPropertyName("url")] public string Url { get; set; } = "";
+        [JsonPropertyName("params")] public JsonElement Params { get; set; }
+        [JsonPropertyName("description")] public string Description { get; set; } = "";
     }
 }

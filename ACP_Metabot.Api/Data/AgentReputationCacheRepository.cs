@@ -129,6 +129,38 @@ public class AgentReputationCacheRepository
         return dict;
     }
 
+    // Returns the top-N fresh cache rows with score >= minScore, ordered by
+    // score DESC. Used by the v1.6 ReputationFeedPublisherWorker to pick the
+    // agents whose reputation gets a Chainlink AggregatorV3 feed published.
+    public async Task<IReadOnlyList<CachedReputationRow>> ListTopByScoreAsync(
+        int topN, int minScore, DateTime nowUtc)
+    {
+        var cutoff = nowUtc.Subtract(Ttl).ToString("O", CultureInfo.InvariantCulture);
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT agent_address, agent_name, agent_score, sub_scores_json, raw_counts_json,
+                   flags_json, computed_at, last_scanned_block, source
+            FROM agent_reputation_cache
+            WHERE computed_at >= $cutoff AND agent_score >= $min
+            ORDER BY agent_score DESC
+            LIMIT $n;";
+        cmd.Parameters.AddWithValue("$cutoff", cutoff);
+        cmd.Parameters.AddWithValue("$min", minScore);
+        cmd.Parameters.AddWithValue("$n", topN);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        var list = new List<CachedReputationRow>();
+        while (await reader.ReadAsync())
+        {
+            list.Add(new CachedReputationRow(
+                reader.GetString(0), reader.GetString(1), reader.GetInt32(2),
+                reader.GetString(3), reader.GetString(4), reader.GetString(5),
+                DateTime.Parse(reader.GetString(6), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                reader.GetInt64(7), reader.GetString(8)));
+        }
+        return list;
+    }
+
     // Loads every fresh (≤ 24h old) cache row for the percentile rebuild pass.
     public async Task<IReadOnlyList<CachedReputationRow>> ListAllForPercentilesAsync(DateTime nowUtc)
     {

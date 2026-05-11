@@ -16,6 +16,14 @@ public class Db
     {
         var conn = new SqliteConnection(_connectionString);
         conn.Open();
+        // busy_timeout is per-connection (resets on each Open). Wait up to 5s
+        // on writer contention instead of throwing SQLITE_BUSY immediately.
+        // Particularly important for Metabot — the chain-event indexer holds
+        // a writer while sidecar-driven /v1/search reads cohabit the file.
+        // WAL mode is file-level and set once in InitializeSchemaAsync.
+        using var pragma = conn.CreateCommand();
+        pragma.CommandText = "PRAGMA busy_timeout = 5000;";
+        pragma.ExecuteNonQuery();
         return conn;
     }
 
@@ -55,6 +63,16 @@ public class Db
     {
         await using var conn = OpenConnection();
         await using var cmd = conn.CreateCommand();
+        // WAL is persistent at the file level — set once, sticks across
+        // restarts. Lets readers and writers run concurrently (only
+        // writer-writer is serialised through a small WAL file). Particularly
+        // important for Metabot — the long-running indexer (chain-event +
+        // offering writer) cohabits the file with thousands of /v1/search
+        // reader queries. Requires the SQLite file to live on local disk
+        // (not NFS/SMB).
+        cmd.CommandText = "PRAGMA journal_mode = WAL;";
+        await cmd.ExecuteNonQueryAsync();
+
         cmd.CommandText = @"
             CREATE TABLE IF NOT EXISTS offerings (
                 id                       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -306,6 +324,52 @@ public class Db
                 INSERT INTO agent_profiles_fts(rowid, agent_name, profile_text)
                 VALUES (new.id, new.agent_name, new.profile_text);
             END;
+
+            -- R7-IDEA-C: per-agent Resources index. Resources are first-class
+            -- in the ACP v2 SDK (AcpAgentResource: name, url, params, description),
+            -- surfaced on a separate tab from offerings on app.virtuals.io.
+            -- Buyer / orchestrator agents (Butler etc.) call Resources BEFORE
+            -- paying for an offering. AcpV2MarketplaceSource persists rows
+            -- here as a side-effect of its per-wallet fetch; HTTP endpoints
+            -- (/v1/agent/{address}/resources, /v1/marketplace/resources/search)
+            -- expose them.
+            CREATE TABLE IF NOT EXISTS agent_resources (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_address       TEXT    NOT NULL,
+                agent_name          TEXT    NOT NULL,
+                name                TEXT    NOT NULL,
+                url                 TEXT    NOT NULL,
+                params_json         TEXT,
+                description         TEXT    NOT NULL,
+                marketplace_version TEXT    NOT NULL DEFAULT 'v2',
+                first_seen_at       TEXT    NOT NULL,
+                last_seen_at        TEXT    NOT NULL,
+                UNIQUE(marketplace_version, agent_address, name)
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_agent_resources_agent     ON agent_resources(agent_address);
+            CREATE INDEX IF NOT EXISTS ix_agent_resources_last_seen ON agent_resources(last_seen_at);
+
+            -- v1.6 #1 v0.1: reputation_feeds tracks ReputationAggregator
+            -- contracts deployed by ChainlinkBot's POST /feed-address on behalf
+            -- of high-reputation agents in our corpus. One row per agent; the
+            -- aggregator_address is the on-chain AggregatorV3Interface that
+            -- consumers can read with the same shape as ETH/USD. last_pushed_*
+            -- columns are populated by the (future) v0.2 score-push flow;
+            -- v0.1 only fills the deploy-time columns.
+            CREATE TABLE IF NOT EXISTS reputation_feeds (
+                agent_address       TEXT PRIMARY KEY,
+                aggregator_address  TEXT NOT NULL,
+                methodology_hash    TEXT NOT NULL,
+                decimals            INTEGER NOT NULL DEFAULT 8,
+                latest_score        REAL,
+                deployed_at         TEXT NOT NULL,
+                first_seen_at       TEXT NOT NULL,
+                last_pushed_round   INTEGER,
+                last_pushed_at      TEXT,
+                last_error          TEXT
+            );
+            CREATE INDEX IF NOT EXISTS ix_repfeeds_deployed_at ON reputation_feeds(deployed_at);
             ";
         await cmd.ExecuteNonQueryAsync();
 
