@@ -15,7 +15,7 @@ const PRICE_USDC: Record<string, number> = {
   agentReputation: 0.05,
   // v1.7 paid offerings
   arenaParticipants: 0.05,
-  buyerStackOrchestration: 0.10,
+  buyerOrchestrate: 0.10,
   preHireBudgetCheck: 0.02,
   sellerCoachingPack: 1.00,
   v1Tov2Migration: 0.50,

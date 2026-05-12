@@ -903,7 +903,7 @@ app.MapGet("/v1/resources/capabilities", () =>
             // v1.7 Bundle A — Arena integration
             new { name = "arenaParticipants",        priceUsdc = 0.05, slaMinutes = 5, description = "Bulk pre-hire gate. For 1-25 agent addresses, returns per-address Degen Arena participation: indexed yes/no, lifetime + 30d ranks, PnL, last-week Council pick. Cached." },
             // v1.7 Bundle B — Buyer Agent Toolkit
-            new { name = "buyerStackOrchestration",  priceUsdc = 0.10, slaMinutes = 5, description = "composeStack with reputation + Arena participation badges. Returns a use-case-driven stack with each seller's cached reputation summary and Arena rank attached as a trust signal." },
+            new { name = "buyerOrchestrate",         priceUsdc = 0.10, slaMinutes = 5, description = "composeStack with reputation + Arena participation badges. Returns a use-case-driven stack with each seller's cached reputation summary and Arena rank attached as a trust signal." },
             new { name = "preHireBudgetCheck",       priceUsdc = 0.02, slaMinutes = 5, description = "Given 1-25 offering IDs, returns per-offering price + total USDC + any missing IDs. Lets a buyer agent compute exact escrow before issuing any individual hire." },
             // v1.7 Bundle C — Seller-Success Coach + V1↔V2 portage
             new { name = "sellerCoachingPack",       priceUsdc = 1.00, slaMinutes = 5, description = "Premium seller-success report: per-offering 0-100 health score, overall verdict (STRONG / OK_WITH_GAPS / WEAK), and prioritised remediation list (missing schemas, sub-min prices, short descriptions, zero-hire offerings, missing Resources)." },

@@ -7,7 +7,7 @@ import { composeStack } from "./composeStack.js";
 import { watchOffering } from "./watchOffering.js";
 import { agentReputation } from "./agentReputation.js";
 import { arenaParticipants } from "./arenaParticipants.js";
-import { buyerStackOrchestration } from "./buyerStackOrchestration.js";
+import { buyerOrchestrate } from "./buyerOrchestrate.js";
 import { preHireBudgetCheck } from "./preHireBudgetCheck.js";
 import { sellerCoachingPack } from "./sellerCoachingPack.js";
 import { v1Tov2Migration } from "./v1Tov2Migration.js";
@@ -25,7 +25,7 @@ export const OFFERINGS: Record<string, Offering> = {
   // pattern (new table + repo + poller).
   arenaParticipants,
   // v1.7 (Bundle B): Buyer Agent Toolkit
-  buyerStackOrchestration,
+  buyerOrchestrate,
   preHireBudgetCheck,
   // v1.7 (Bundle C): Seller-Success Coach + V1↔V2 portage
   sellerCoachingPack,

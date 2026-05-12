@@ -1,8 +1,8 @@
 import type { Offering } from "./types.js";
 import { requireString } from "../validators.js";
 
-export const buyerStackOrchestration: Offering = {
-  name: "buyerStackOrchestration",
+export const buyerOrchestrate: Offering = {
+  name: "buyerOrchestrate",
   description:
     "composeStack + reputation badges + Arena participation. Returns a use-case-driven 1-10 step stack of " +
     "complementary marketplace offerings, with each seller's cached reputation and Arena ranking attached " +
