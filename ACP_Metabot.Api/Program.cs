@@ -980,14 +980,30 @@ app.MapGet("/v1/resources/buyerUsdcReadiness", () =>
 });
 
 app.MapGet("/v1/resources/offeringSchemaTemplate",
-    async ([Microsoft.AspNetCore.Mvc.FromQuery] long? offeringId, OfferingRepository repo) =>
+    async ([Microsoft.AspNetCore.Mvc.FromQuery] string? offeringId, OfferingRepository repo) =>
 {
-    if (!offeringId.HasValue || offeringId.Value <= 0)
-        return Results.BadRequest(new { error = "offeringId query param required" });
+    // v1.7.1: bind as string so ASP.NET model binding can't 400-empty-body when
+    // a buyer agent passes the offering NAME (e.g. "searchAgents") instead of
+    // the numeric id. Parse manually and surface a helpful 400 either way.
+    if (string.IsNullOrWhiteSpace(offeringId))
+        return Results.BadRequest(new
+        {
+            error = "offeringId query param required",
+            hint  = "Pass the numeric offering id from /v1/search or /v1/agent/{addr} results (the `id` field on each offering), not the offering name."
+        });
 
-    var off = await repo.GetByIdAsync(offeringId.Value);
+    if (!long.TryParse(offeringId.Trim(), System.Globalization.NumberStyles.Integer,
+                       System.Globalization.CultureInfo.InvariantCulture, out var id) || id <= 0)
+        return Results.BadRequest(new
+        {
+            error    = "offeringId must be a positive integer",
+            received = offeringId,
+            hint     = "If you only know the offering name, call /v1/agent/{addr} (free) and grab the numeric `id` field from the matching offering. The marketplace assigns one integer id per offering, per agent."
+        });
+
+    var off = await repo.GetByIdAsync(id);
     if (off is null)
-        return Results.NotFound(new { error = "offering_not_found", offeringId });
+        return Results.NotFound(new { error = "offering_not_found", offeringId = id });
 
     System.Text.Json.JsonElement? schema = null;
     if (!string.IsNullOrEmpty(off.RequirementSchemaJson))
