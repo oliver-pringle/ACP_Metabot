@@ -289,23 +289,35 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
                 if (o.IsHidden) continue;
                 if (string.IsNullOrEmpty(o.Name)) continue;
 
-                // V2 stores requirements as a JSON-as-string field; SDK strips
-                // surrounding "" quotes when used. Trim our own whitespace and
-                // hand it through as-is. The DTO's RequirementSchema is a
-                // JsonElement?, so parse once here to fail loudly on bad input.
+                // V2 stores `requirements` two ways across the marketplace's
+                // history: legacy registrations have it as a JSON-as-string,
+                // newer ones (LiquidGuard re-register 2026-05-12 onward) have
+                // it as a structured JSON object. Handle both ValueKinds so
+                // either shape lands as the same JsonElement? downstream.
                 JsonElement? schema = null;
-                if (!string.IsNullOrWhiteSpace(o.Requirements))
+                switch (o.Requirements.ValueKind)
                 {
-                    var trimmed = o.Requirements.Trim().Trim('"');
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(trimmed);
-                        schema = doc.RootElement.Clone();
-                    }
-                    catch (JsonException)
-                    {
-                        // Malformed schema string; surface upstream as null.
-                    }
+                    case JsonValueKind.Object:
+                    case JsonValueKind.Array:
+                        schema = o.Requirements.Clone();
+                        break;
+                    case JsonValueKind.String:
+                        var raw = o.Requirements.GetString();
+                        if (!string.IsNullOrWhiteSpace(raw))
+                        {
+                            var trimmed = raw.Trim().Trim('"');
+                            try
+                            {
+                                using var doc = JsonDocument.Parse(trimmed);
+                                schema = doc.RootElement.Clone();
+                            }
+                            catch (JsonException)
+                            {
+                                // Malformed schema string; surface upstream as null.
+                            }
+                        }
+                        break;
+                    // null / undefined / number / etc → schema stays null.
                 }
 
                 dtos.Add(new MarketplaceOfferingDto
@@ -384,7 +396,14 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
     {
         [JsonPropertyName("name")] public string? Name { get; set; }
         [JsonPropertyName("description")] public string? Description { get; set; }
-        [JsonPropertyName("requirements")] public string? Requirements { get; set; }
+        // Upstream returns `requirements` as EITHER a JSON-as-string (older
+        // marketplace state) OR a structured JSON object (newer registrations
+        // — e.g. LiquidGuard after a 2026-05-12 re-register). Declared as
+        // JsonElement so System.Text.Json accepts either ValueKind without
+        // throwing the entire FetchAgentAsync into the catch (which silently
+        // dropped the whole agent — including its Resources side-effect —
+        // pre-fix).
+        [JsonPropertyName("requirements")] public JsonElement Requirements { get; set; }
         [JsonPropertyName("priceType")] public string? PriceType { get; set; }
         [JsonPropertyName("priceValue")] public double? PriceValue { get; set; }
         [JsonPropertyName("isHidden")] public bool IsHidden { get; set; }
