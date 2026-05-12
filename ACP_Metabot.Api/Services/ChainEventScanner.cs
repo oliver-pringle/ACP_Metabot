@@ -401,7 +401,9 @@ public class ChainEventScanner
     public async Task<ChainScanResult> ScanAgentAsync(
         string agentAddress, long fromBlock, DateTime nowUtc, CancellationToken ct)
     {
-        var headBlock = (long)(await _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync()).Value;
+        var headBlock = (long)(await RpcRetry.ExecuteAsync(
+            () => _web3.Eth.Blocks.GetBlockNumber.SendRequestAsync(),
+            "blockNumber", _logger, ct)).Value;
 
         // Cold-start cap: if the caller is asking us to scan from at-or-before
         // the deploy block (first ever scan for this agent), restrict the
@@ -558,7 +560,11 @@ public class ChainEventScanner
             var fromBP = new BlockParameter(new HexBigInteger(s));
             var toBP   = new BlockParameter(new HexBigInteger(e));
             var filter = filterBuilder(fromBP, toBP);
-            var logs   = await handler.GetAllChangesAsync(filter);
+            // Wrapped in RpcRetry so 429s / 5xx / network flakes on free Base
+            // RPCs don't kill a 390-chunk cold-start mid-scan.
+            var logs = await RpcRetry.ExecuteAsync(
+                () => handler.GetAllChangesAsync(filter),
+                $"getLogs[{s}..{e}]", _logger, ct);
             all.AddRange(logs);
         }
         return all;
@@ -574,8 +580,10 @@ public class ChainEventScanner
         {
             if (_blockTimestamps.TryGetValue(blockNumber, out var cached)) return cached;
         }
-        var block = await _web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(
-            new HexBigInteger(blockNumber));
+        var block = await RpcRetry.ExecuteAsync(
+            () => _web3.Eth.Blocks.GetBlockWithTransactionsHashesByNumber.SendRequestAsync(
+                new HexBigInteger(blockNumber)),
+            $"getBlock[{blockNumber}]", _logger, ct);
         var ts = DateTimeOffset.FromUnixTimeSeconds((long)block.Timestamp.Value).UtcDateTime;
         lock (_blockTimestampsLock)
         {

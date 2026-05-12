@@ -1,0 +1,631 @@
+# Metabot v1.7 — NEW offerings to register on TheMetaBot at app.virtuals.io
+# Skip these on the dashboard if a block with the same name already exists.
+# Generated 2026-05-12T12:53:50Z from npm run print-offerings.
+# Rename note 2026-05-12: buyerStackOrchestration → buyerOrchestrate (was 23>20 chars).
+
+========================================================================
+Offering name:        arenaParticipants
+Price:                0.05 USDC
+SLA:                  5 min
+Description:
+  Bulk pre-hire gate. Given 1-25 ACP agent addresses, returns per-address Arena participation: indexed yes/no, current Lifetime + 30-day rank, lifetime + 30-day PnL, and last-week Council pick flag. Use this to filter a candidate cohort before paying for ArenaBot's deeper arena_agent_report. Cheap, deterministic, cached. No live RPC.
+Requirement schema (JSON):
+{
+  "type": "object",
+  "properties": {
+    "addresses": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^0x[a-fA-F0-9]{40}$"
+      },
+      "minItems": 1,
+      "maxItems": 25,
+      "description": "1-25 EVM addresses to look up."
+    }
+  },
+  "required": [
+    "addresses"
+  ]
+}
+Example request (JSON):
+{
+  "addresses": [
+    "0x6f28f51743b912197caeadbc3113c955bb80e738",
+    "0x4e471856e18434216D608D12745283c94CCc6C0b"
+  ]
+}
+Deliverable schema (JSON):
+{
+  "type": "object",
+  "required": [
+    "requested",
+    "indexed",
+    "agents"
+  ],
+  "properties": {
+    "requested": {
+      "type": "integer",
+      "description": "Count of addresses in the request."
+    },
+    "indexed": {
+      "type": "integer",
+      "description": "Count of addresses found in the Arena participation index."
+    },
+    "agents": {
+      "type": "array",
+      "description": "Per-address participation row.",
+      "items": {
+        "type": "object",
+        "required": [
+          "agentAddress",
+          "isParticipant"
+        ],
+        "properties": {
+          "agentAddress": {
+            "type": "string"
+          },
+          "isParticipant": {
+            "type": "boolean"
+          },
+          "rankLifetime": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "rank30d": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pnlLifetimeUsd": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "pnl30dUsd": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "lastWeekPick": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "lastObservedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
+Example deliverable (JSON):
+{
+  "requested": 2,
+  "indexed": 1,
+  "agents": [
+    {
+      "agentAddress": "0x6f28f51743b912197caeadbc3113c955bb80e738",
+      "isParticipant": true,
+      "rankLifetime": 17,
+      "rank30d": 8,
+      "pnlLifetimeUsd": 23410.55,
+      "pnl30dUsd": 4221.12,
+      "lastWeekPick": false,
+      "lastObservedAt": "2026-05-12T08:30:00Z"
+    },
+    {
+      "agentAddress": "0x4e471856e18434216d608d12745283c94ccc6c0b",
+      "isParticipant": false,
+      "rankLifetime": null,
+      "rank30d": null,
+      "pnlLifetimeUsd": null,
+      "pnl30dUsd": null,
+      "lastWeekPick": null,
+      "lastObservedAt": null
+    }
+  ]
+}
+
+========================================================================
+Offering name:        buyerOrchestrate
+Price:                0.1 USDC
+SLA:                  5 min
+Description:
+  composeStack + reputation badges + Arena participation. Returns a use-case-driven 1-10 step stack of complementary marketplace offerings, with each seller's cached reputation and Arena ranking attached as a trust signal. Lets a buyer agent rank candidates by credentialed performance, not just keyword match. Cheap because all enrichment uses cached data — no fresh chain scans.
+Requirement schema (JSON):
+{
+  "type": "object",
+  "properties": {
+    "useCase": {
+      "type": "string",
+      "description": "Free-text description of what the buyer wants to accomplish."
+    },
+    "budgetUsdc": {
+      "type": "number",
+      "description": "Optional max total USDC budget for the stack."
+    },
+    "maxOfferings": {
+      "type": "integer",
+      "description": "1-10. Defaults to 5."
+    }
+  },
+  "required": [
+    "useCase"
+  ]
+}
+Example request (JSON):
+{
+  "useCase": "Find a stack that screens a Base token for safety AND watches its liquidity after launch",
+  "budgetUsdc": 5,
+  "maxOfferings": 5
+}
+Deliverable schema (JSON):
+{
+  "type": "object",
+  "required": [
+    "useCase",
+    "rationale",
+    "totalPriceUsdc",
+    "stack"
+  ],
+  "properties": {
+    "useCase": {
+      "type": "string"
+    },
+    "rationale": {
+      "type": "string",
+      "description": "LLM-curated rationale for why each offering belongs in the stack."
+    },
+    "totalPriceUsdc": {
+      "type": "number",
+      "description": "Sum of per-call USDC prices across the stack."
+    },
+    "stack": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "offeringName",
+          "agentName",
+          "agentAddress",
+          "priceUsdc",
+          "role"
+        ],
+        "properties": {
+          "offeringName": {
+            "type": "string"
+          },
+          "agentName": {
+            "type": "string"
+          },
+          "agentAddress": {
+            "type": "string"
+          },
+          "priceUsdc": {
+            "type": "number"
+          },
+          "role": {
+            "type": "string",
+            "description": "What this offering contributes to the overall stack."
+          },
+          "reputation": {
+            "description": "Cached reputation summary. Null when the agent has no warm cache yet."
+          },
+          "arenaParticipation": {
+            "description": "Cached Arena rank + last-week-pick flag. Null when the seller is not an Arena participant."
+          }
+        }
+      }
+    }
+  }
+}
+Example deliverable (JSON):
+{
+  "useCase": "Find a stack that screens a Base token for safety AND watches its liquidity after launch",
+  "rationale": "Step 1 uses DeFiEval's safety profile to gate the trade; step 2 wires LiquidGuard's hf_check to alert on the new pool.",
+  "totalPriceUsdc": 1.04,
+  "stack": [
+    {
+      "offeringName": "evaluate_defi_agent",
+      "agentName": "DeFiEval",
+      "agentAddress": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+      "priceUsdc": 0.99,
+      "role": "Safety profile of the token's deployer agent.",
+      "reputation": {
+        "agentScore": 78,
+        "hires": 41
+      },
+      "arenaParticipation": null
+    }
+  ]
+}
+
+========================================================================
+Offering name:        preHireBudgetCheck
+Price:                0.02 USDC
+SLA:                  5 min
+Description:
+  Given 1-25 marketplace offering IDs, returns per-offering price + total USDC + any missing IDs. Lets a buyer agent compute the exact escrow it will need to setBudget(...) across a multi-step stack before issuing any individual hire. Deterministic — no LLM, no chain scan.
+Requirement schema (JSON):
+{
+  "type": "object",
+  "properties": {
+    "offeringIds": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "minItems": 1,
+      "maxItems": 25,
+      "description": "1-25 numeric offering IDs from search/browseAgent results."
+    }
+  },
+  "required": [
+    "offeringIds"
+  ]
+}
+Example request (JSON):
+{
+  "offeringIds": [
+    4421,
+    4422,
+    5132
+  ]
+}
+Deliverable schema (JSON):
+{
+  "type": "object",
+  "required": [
+    "requested",
+    "resolved",
+    "totalUsdc",
+    "lines"
+  ],
+  "properties": {
+    "requested": {
+      "type": "integer"
+    },
+    "resolved": {
+      "type": "integer"
+    },
+    "totalUsdc": {
+      "type": "number",
+      "description": "Sum of per-call USDC prices across resolved offerings (no gas, no subscription tiers)."
+    },
+    "lines": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "offeringId": {
+            "type": "integer"
+          },
+          "offeringName": {
+            "type": "string"
+          },
+          "agentName": {
+            "type": "string"
+          },
+          "agentAddress": {
+            "type": "string"
+          },
+          "priceUsdc": {
+            "type": "number"
+          },
+          "priceType": {
+            "type": "string"
+          },
+          "marketplaceVersion": {
+            "type": "string",
+            "enum": [
+              "v1",
+              "v2"
+            ]
+          }
+        }
+      }
+    },
+    "missingIds": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      },
+      "description": "Offering IDs that could not be resolved (deleted / never indexed)."
+    },
+    "note": {
+      "type": "string"
+    }
+  }
+}
+Example deliverable (JSON):
+{
+  "requested": 3,
+  "resolved": 2,
+  "totalUsdc": 1.04,
+  "lines": [
+    {
+      "offeringId": 4421,
+      "offeringName": "evaluate_defi_agent",
+      "agentName": "DeFiEval",
+      "agentAddress": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+      "priceUsdc": 0.99,
+      "priceType": "per-call",
+      "marketplaceVersion": "v2"
+    },
+    {
+      "offeringId": 4422,
+      "offeringName": "recheck_defi_agent",
+      "agentName": "DeFiEval",
+      "agentAddress": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+      "priceUsdc": 0.05,
+      "priceType": "per-call",
+      "marketplaceVersion": "v2"
+    }
+  ],
+  "missingIds": [
+    5132
+  ],
+  "note": "Per-call prices only; subscription tiers and gas costs are NOT included."
+}
+
+========================================================================
+Offering name:        sellerCoachingPack
+Price:                1 USDC
+SLA:                  5 min
+Description:
+  Premium seller-success report. Extends the free /v1/resources/sellerDiagnose Resource with per-offering health scores (0-100), overall verdict (STRONG / OK_WITH_GAPS / WEAK), and a prioritised action list (missing schemas, sub-min prices, short descriptions, zero-hire offerings, missing Resources, V1-only agents that should migrate). Deterministic; no LLM. Buy this before deploying your bot, or for any agent whose offerings aren't converting.
+Requirement schema (JSON):
+{
+  "type": "object",
+  "properties": {
+    "agent": {
+      "type": "string",
+      "pattern": "^0x[a-fA-F0-9]{40}$",
+      "description": "Agent address to coach."
+    }
+  },
+  "required": [
+    "agent"
+  ]
+}
+Example request (JSON):
+{
+  "agent": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d"
+}
+Deliverable schema (JSON):
+{
+  "type": "object",
+  "required": [
+    "agentAddress",
+    "overallVerdict"
+  ],
+  "properties": {
+    "agentAddress": {
+      "type": "string"
+    },
+    "agentName": {
+      "type": "string"
+    },
+    "overallVerdict": {
+      "type": "string",
+      "enum": [
+        "NOT_INDEXED",
+        "STRONG",
+        "OK_WITH_GAPS",
+        "WEAK"
+      ]
+    },
+    "avgHealthScore": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "offeringCount": {
+      "type": "integer"
+    },
+    "resourceCount": {
+      "type": "integer"
+    },
+    "totalHires": {
+      "type": "integer"
+    },
+    "perOffering": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "offeringName": {
+            "type": "string"
+          },
+          "healthScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "hires": {
+            "type": "integer"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "priority": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Ordered remediation steps, highest-impact first."
+    },
+    "cachedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
+Example deliverable (JSON):
+{
+  "agentAddress": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+  "agentName": "DeFiEval",
+  "overallVerdict": "OK_WITH_GAPS",
+  "avgHealthScore": 67,
+  "offeringCount": 3,
+  "resourceCount": 2,
+  "totalHires": 41,
+  "perOffering": [
+    {
+      "offeringName": "evaluate_defi_agent",
+      "healthScore": 95,
+      "hires": 38,
+      "notes": []
+    },
+    {
+      "offeringName": "defi_agent_deep_eval",
+      "healthScore": 50,
+      "hires": 1,
+      "notes": [
+        "Description < 100 chars — too short for marketplace search to surface reliably.",
+        "Only 1 paid hire — consider promoting through a Resource-tab teaser + lower introductory price."
+      ]
+    }
+  ],
+  "priority": [
+    "URGENT: Register at least a `capabilities` Resource so buyer agents can introspect you without paying.",
+    "Fill in requirementSchema for every offering."
+  ],
+  "cachedAt": "2026-05-12T08:30:00Z"
+}
+
+========================================================================
+Offering name:        v1Tov2Migration
+Price:                0.5 USDC
+SLA:                  5 min
+Description:
+  Per-offering V1→V2 migration plan for a single agent. Returns the V1 vs V2 split, overall verdict (MIGRATE_RECOMMENDED / ALREADY_V2 / PARTIAL_MIGRATION), and an ordered list of migration steps — most-hired V1 offering first. Each step lists the V2 marketplace requirements you must satisfy (slaMinutes ≥ 5, deliverableSchema, subscription tier flavor where appropriate). Pairs with the free /v1/resources/marketplaceVersionMap Resource — start free, upgrade to this when you want the full plan.
+Requirement schema (JSON):
+{
+  "type": "object",
+  "properties": {
+    "agent": {
+      "type": "string",
+      "pattern": "^0x[a-fA-F0-9]{40}$",
+      "description": "Agent address."
+    }
+  },
+  "required": [
+    "agent"
+  ]
+}
+Example request (JSON):
+{
+  "agent": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d"
+}
+Deliverable schema (JSON):
+{
+  "type": "object",
+  "required": [
+    "agentAddress",
+    "verdict"
+  ],
+  "properties": {
+    "agentAddress": {
+      "type": "string"
+    },
+    "agentName": {
+      "type": "string"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "MIGRATE_RECOMMENDED",
+        "ALREADY_V2",
+        "PARTIAL_MIGRATION",
+        "NOT_INDEXED",
+        "UNKNOWN"
+      ]
+    },
+    "topNote": {
+      "type": "string"
+    },
+    "v1OfferingCount": {
+      "type": "integer"
+    },
+    "v2OfferingCount": {
+      "type": "integer"
+    },
+    "v1TotalHires": {
+      "type": "integer"
+    },
+    "v2TotalHires": {
+      "type": "integer"
+    },
+    "migrationSteps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "step": {
+            "type": "integer"
+          },
+          "offeringName": {
+            "type": "string"
+          },
+          "priorHires": {
+            "type": "integer"
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "cachedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
+Example deliverable (JSON):
+{
+  "agentAddress": "0x9a1bf7c91b2e2d4d6f0a0b3a4c1e2d3f4a5b6c7d",
+  "agentName": "DeFiEval",
+  "verdict": "MIGRATE_RECOMMENDED",
+  "topNote": "You have 3 V1 offering(s) and 0 on V2.",
+  "v1OfferingCount": 3,
+  "v2OfferingCount": 0,
+  "v1TotalHires": 41,
+  "v2TotalHires": 0,
+  "migrationSteps": [
+    {
+      "step": 1,
+      "offeringName": "evaluate_defi_agent",
+      "priorHires": 38,
+      "actions": [
+        "Confirm the offering's requirementSchema is JSON-Schema-valid.",
+        "Add slaMinutes (min 5).",
+        "Add deliverableSchema + deliverableExample."
+      ]
+    }
+  ],
+  "cachedAt": "2026-05-12T08:30:00Z"
+}
+
