@@ -42,6 +42,13 @@ services:
       # BASE_RPC_URL above.
       - BASE_RPC_URL_ENUM=${BASE_RPC_URL_ENUM:-}
       - ACP_CONTRACT_ADDRESS_BASE=${ACP_CONTRACT_ADDRESS_BASE:-0x238E541BfefD82238730D00a2208E5497F1832E0}
+      # ReputationWarmer: top-N agent_job_count agents, computed at 02:30 UTC.
+      # Concurrency default in code is 4; lowered here to 1 because parallel
+      # eth_getLogs against publicnode trips 429s (RPC rate limit) and the
+      # warmer's daily pass only completes 2-8 agents before stalling.
+      # mainnet.base.org (Coinbase) has higher limits but we keep concurrency=1
+      # as a defence in depth. Bump back up if we move to paid RPC.
+      - Reputation__WarmerConcurrency=${REPUTATION_WARMER_CONCURRENCY:-1}
       # X-Forwarded-* trust list. ForwardedHeaders middleware only honours these
       # headers from peers inside one of these CIDRs; everyone else's headers are
       # ignored (RemoteIpAddress falls back to the direct connection). Default to
