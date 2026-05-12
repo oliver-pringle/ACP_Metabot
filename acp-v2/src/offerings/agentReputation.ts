@@ -19,7 +19,10 @@ export const agentReputation: Offering = {
   requirementExample: {
     agentAddress: "0x693a237221e760bC7ff4968B74e25dCA17234633",
   },
-  slaMinutes: 5,
+  // Cold-compute path runs ChainEventScanner.ScanAgentAsync — 1-4 min
+  // on free RPCs even after the v1.7.2 RpcRetry helper. 10-min SLA
+  // gives the retry path real headroom; 5-min was structurally tight.
+  slaMinutes: 10,
   deliverableSchema: {
     type: "object",
     required: [
