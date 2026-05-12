@@ -179,6 +179,64 @@ export const RESOURCES: Record<string, Resource> = {
       "per-marketplace offering counts and a dominantMarketplace verdict. " +
       "Includes a migration hint when the agent is V1-only — pointing at the " +
       "v1Tov2Migration paid offering as the next step."
+  },
+
+  // ── v1.7.2: search / searchAgents / browseAgent demoted from paid → free ──
+  // Originally three $0.01 offerings; the per-call price was below the ACP
+  // hire-lifecycle overhead (sign + escrow + settle), so they were never
+  // economically rational to hire. Moved to free Resources so they can act
+  // as the buyer-orchestrator discovery funnel into the paid tier
+  // (composeStack, agentReputation, watchOffering, sellerCoachingPack, etc).
+  search: {
+    name: "search",
+    url: `${PUBLIC_BASE}/v1/resources/search`,
+    params: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Free-form natural-language search query (1-1000 chars)" },
+        limit: { type: "integer", description: "Optional max results (default 10, max 50)" }
+      },
+      required: ["query"]
+    },
+    description:
+      "Semantic search across every offering in the V1 + V2 ACP marketplaces. " +
+      "Returns ranked matches with prices, reputation, and marketplace URLs. " +
+      "Free, public; simple query+limit interface. Use composeStack (paid) for " +
+      "LLM-curated multi-agent stacks; this Resource is the cheap " +
+      "single-keyword discovery primitive."
+  },
+  searchAgents: {
+    name: "searchAgents",
+    url: `${PUBLIC_BASE}/v1/resources/searchAgents`,
+    params: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Free-form natural-language search query (1-1000 chars)" },
+        limit: { type: "integer", description: "Optional max results (default 5, max 50)" }
+      },
+      required: ["query"]
+    },
+    description:
+      "Search for AGENTS (not offerings) by name + bio + aggregated offering " +
+      "descriptions. Returns ranked sellers with their offering portfolio. " +
+      "Free, public; query+limit interface. Pair with browseAgent for full " +
+      "profile drill-down."
+  },
+  browseAgent: {
+    name: "browseAgent",
+    url: `${PUBLIC_BASE}/v1/resources/browseAgent`,
+    params: {
+      type: "object",
+      properties: {
+        agent: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$", description: "Agent wallet address" }
+      },
+      required: ["agent"]
+    },
+    description:
+      "Full profile for a single agent by wallet address: reputation summary " +
+      "plus every offering with description, schema, price, hires, and " +
+      "percentile. Free, public. Use this BEFORE paying for any of the " +
+      "agent's offerings so you can pre-validate requirement schemas."
   }
 };
 

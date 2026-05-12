@@ -915,9 +915,9 @@ app.MapGet("/v1/resources/capabilities", () =>
         agent = "TheMetaBot",
         offerings = new object[]
         {
-            new { name = "search",           priceUsdc = 0.01, slaMinutes = 5, description = "Semantic search across every offering in the V1 + V2 ACP marketplaces. Returns ranked matches with prices, reputation, and marketplace URLs." },
-            new { name = "searchAgents",     priceUsdc = 0.01, slaMinutes = 5, description = "Search for AGENTS (not offerings) by name + bio + aggregated offering descriptions. Returns ranked sellers with their offering portfolio." },
-            new { name = "browseAgent",      priceUsdc = 0.01, slaMinutes = 5, description = "Full profile for a single agent by wallet address: reputation summary plus every offering with description, schema, price, hires, and percentile." },
+            // v1.7.2: search / searchAgents / browseAgent moved to free Resources
+            // (callable at /v1/resources/search etc) — they were never economic
+            // to hire as paid offerings at the $0.01 price floor.
             new { name = "today",            priceUsdc = 0.02, slaMinutes = 5, description = "Daily digest of new offerings and biggest hire-count gainers across the marketplace; configurable lookback window." },
             new { name = "composeStack",     priceUsdc = 0.50, slaMinutes = 5, description = "LLM-curated multi-agent stack for a stated use case: an ordered list of complementary offerings plus rationale. More expensive — runs Claude over top-K candidates." },
             new { name = "watchOffering",            priceUsdc = 0.50, slaMinutes = 5, description = "Subscribe to webhook alerts when new offerings match a query. Polls on a configurable cadence over the watch window." },
@@ -1143,6 +1143,54 @@ app.MapGet("/v1/resources/marketplaceVersionMap",
             : null
     });
 });
+
+// v1.7.2: search / searchAgents / browseAgent demoted from $0.01 paid
+// offerings to free Resources (see acp-v2/src/resources.ts for the rationale
+// + acp-v2/src/offerings/registry.ts for the removal). Same backing services
+// as the legacy POST endpoints (/search, /searchAgents, /v1/agent/{addr});
+// just a simpler GET query-param surface and the public-resources rate-limit
+// policy (120/IP/hr).
+
+app.MapGet("/v1/resources/search",
+    async ([FromQuery] string? query, [FromQuery] int? limit,
+        SearchService svc, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(query))
+        return Results.BadRequest(new { error = "query query param required" });
+    if (query.Length > MaxQueryLen)
+        return Results.BadRequest(new { error = $"query must be {MaxQueryLen} characters or fewer" });
+    var lim = limit is null ? 10 : Math.Clamp(limit.Value, 1, 50);
+    var results = await svc.SearchAsync(
+        query, lim,
+        minScore: 0.0, priceMaxUsdc: double.PositiveInfinity,
+        staleAfterDays: null, rerank: true, categoryFilter: null,
+        chainFilter: null, minReputation: null, marketplaceFilter: null, ct);
+    return Results.Ok(new { query, count = results.Count, results });
+}).RequireRateLimiting("public-resources");
+
+app.MapGet("/v1/resources/searchAgents",
+    async ([FromQuery] string? query, [FromQuery] int? limit,
+        AgentSearchService svc, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(query))
+        return Results.BadRequest(new { error = "query query param required" });
+    if (query.Length > MaxQueryLen)
+        return Results.BadRequest(new { error = $"query must be {MaxQueryLen} characters or fewer" });
+    var lim = limit is null ? 5 : Math.Clamp(limit.Value, 1, 50);
+    var hits = await svc.SearchAsync(query, lim, marketplaceFilter: null, ct);
+    return Results.Ok(new { query, count = hits.Count, agents = hits });
+}).RequireRateLimiting("public-resources");
+
+app.MapGet("/v1/resources/browseAgent",
+    ([FromQuery] string? agent,
+        OfferingRepository repo, ReputationService reputation,
+        CrossPresenceBuilder crossPresence, PricePercentileCalculator pricePercentile,
+        SearchService search) =>
+{
+    if (string.IsNullOrWhiteSpace(agent))
+        return Task.FromResult(Results.BadRequest((object)new { error = "agent query param required" }));
+    return HandleBrowseAgent(agent, repo, reputation, crossPresence, pricePercentile, search);
+}).RequireRateLimiting("public-resources");
 
 // R7-IDEA-C: cross-agent ACP v2 Resource index. AcpV2MarketplaceSource
 // persists each indexed agent's `resources` array into agent_resources as

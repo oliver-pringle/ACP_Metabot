@@ -5,10 +5,9 @@ export interface Price {
   token: "USDC";
 }
 
+// v1.7.2: search / searchAgents / browseAgent demoted from $0.01 paid
+// offerings to free Resources. See acp-v2/src/resources.ts.
 const PRICE_USDC: Record<string, number> = {
-  search: 0.01,
-  searchAgents: 0.01,
-  browseAgent: 0.01,
   today: 0.02,
   composeStack: 0.50,
   watchOffering: 0.50,

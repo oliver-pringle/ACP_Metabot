@@ -1,7 +1,4 @@
 import type { Offering } from "./types.js";
-import { search } from "./search.js";
-import { searchAgents } from "./searchAgents.js";
-import { browseAgent } from "./browseAgent.js";
 import { today } from "./today.js";
 import { composeStack } from "./composeStack.js";
 import { watchOffering } from "./watchOffering.js";
@@ -12,10 +9,12 @@ import { preHireBudgetCheck } from "./preHireBudgetCheck.js";
 import { sellerCoachingPack } from "./sellerCoachingPack.js";
 import { v1Tov2Migration } from "./v1Tov2Migration.js";
 
+// v1.7.2: search / searchAgents / browseAgent moved from paid offerings to
+// free Resources (see acp-v2/src/resources.ts). The $0.01 price floor was
+// below the per-call hire-lifecycle overhead, so they were structurally
+// uneconomic. As free Resources they now act as the discovery funnel into
+// the paid offerings below.
 export const OFFERINGS: Record<string, Offering> = {
-  search,
-  searchAgents,
-  browseAgent,
   today,
   composeStack,
   watchOffering,
