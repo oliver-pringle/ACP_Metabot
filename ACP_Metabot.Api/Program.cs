@@ -381,10 +381,12 @@ app.UseMiddleware<RequestMetricsMiddleware>();
 // auth'd requests. Set INTERNAL_API_KEY in the environment for both this
 // container and the sidecar.
 //
-// Exception within /v1/*: /v1/agents/active is an internal cross-bot endpoint
-// (consumed over the acp-shared docker network by ACP_ChainlinkBot to learn
-// which agents to score on-chain). It MUST require X-API-Key — unlike the
-// other /v1/* paths it is never reached from the public Caddy gateway.
+// Exception within /v1/*: /v1/agents/active and /v1/internal/* are internal
+// cross-bot endpoints (consumed over the acp-shared docker network — e.g.
+// ACP_ChainlinkBot calls /v1/agents/active to enumerate agents and
+// /v1/internal/agentReputation to read cached scores without hitting the
+// per-IP public rate limiter). They MUST require X-API-Key — unlike the
+// other /v1/* paths they are never reached from the public Caddy gateway.
 var apiKey = builder.Configuration["INTERNAL_API_KEY"];
 var apiKeyBytes = string.IsNullOrEmpty(apiKey)
     ? Array.Empty<byte>()
@@ -393,7 +395,9 @@ app.Use(async (ctx, next) =>
 {
     var path = ctx.Request.Path;
     var isInternalV1 = path.StartsWithSegments("/v1/agents/active",
-        StringComparison.OrdinalIgnoreCase);
+                           StringComparison.OrdinalIgnoreCase)
+                    || path.StartsWithSegments("/v1/internal",
+                           StringComparison.OrdinalIgnoreCase);
     if (path.Equals("/health", StringComparison.OrdinalIgnoreCase) ||
         (path.StartsWithSegments("/v1", StringComparison.OrdinalIgnoreCase) && !isInternalV1))
     {
@@ -762,6 +766,24 @@ app.MapGet("/v1/agentReputation", async ([FromQuery] string agent,
         ("ETag", etag),
     });
 }).RequireRateLimiting("public-reputation");
+
+// Internal cross-bot variant. Same cache-only semantics as the public
+// /v1/agentReputation but exempt from the 60/hr per-IP limiter so callers
+// like ChainlinkBot's ScoringPushWorker can sweep the active-agents set.
+// Special-cased in the X-API-Key middleware above (path prefix /v1/internal).
+app.MapGet("/v1/internal/agentReputation", async ([FromQuery] string agent,
+    ReputationService reputation) =>
+{
+    if (string.IsNullOrWhiteSpace(agent))
+        return Results.BadRequest(new { error = "invalid_address", message = "agent query param is required" });
+    var addr = agent.Trim().ToLowerInvariant();
+    if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+        return Results.BadRequest(new { error = "invalid_address", message = "must be 0x followed by 40 hex chars" });
+    var result = await reputation.GetCachedAsync(addr);
+    return result is null
+        ? Results.NotFound(new { error = "not_cached" })
+        : Results.Ok(result);
+});
 
 // Public + internal — day-by-day reputation trajectory. Cache-only-ish in the
 // sense that it reads from agent_reputation_history without triggering a chain
