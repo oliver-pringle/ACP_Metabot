@@ -68,14 +68,4 @@ public class SearchFusionEvaluationTests
         Assert.True(spreadHigh < spreadLow);
     }
 
-    [Fact(Skip = "manual; requires populated fixture (TBDs filled in) + prod DB snapshot at data/acp_metabot.db. Run with `dotnet test --filter HybridBeatsCosineOn30Q`")]
-    public Task HybridBeatsCosineOn30Q()
-    {
-        // Future: boot the real service stack, run both ranking paths, compute
-        // MRR@10 for each, assert hybrid >= cosine. Requires:
-        //   1. Voyage API credentials (VOYAGE_API_KEY)
-        //   2. Local data/acp_metabot.db with embeddings populated
-        //   3. All TBD fields in search-eval-queries.json filled in
-        return Task.CompletedTask;
-    }
 }
