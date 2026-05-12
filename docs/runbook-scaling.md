@@ -1,9 +1,62 @@
 # TheMetaBot Scaling Runbook
 
-**Last reviewed:** 2026-04-29
+**Last reviewed:** 2026-05-12
 **Companion spec:** [`superpowers/specs/2026-04-29-metrics-and-scaling-design.md`](superpowers/specs/2026-04-29-metrics-and-scaling-design.md)
 
 Seven scaling levers, ordered by likely trigger order. Each names the metric signal that fires it (queryable from `/metrics/*`), the action, the effort, and the risk. None of these are pre-implemented — pull a lever only when its signal trips.
+
+## Deploy operations (2026-05-12 learnings)
+
+The droplet that hosts Metabot also hosts five other bots (DeFiEval, AgentEval, LiquidGuard, MEVProtect, ChainlinkBot — 14 containers total + Caddy) and sits at ~80% RAM in steady state. Two patterns matter when redeploying any of them:
+
+**Sequential rebuilds — never parallel.** Each `docker compose up -d --build` spikes RAM during `dotnet publish` (~600–1000 MB). Two rebuilds running concurrently will OOM-kill the host. Always finish one bot's deploy (containers `Up` and health-checked) before starting the next. The reference order used 2026-05-12 was: Metabot → DeFiEval → AgentEval → LiquidGuard → MEVProtect → ChainlinkBot.
+
+**Stop the bot's containers first to free RAM for the build.**
+
+```bash
+ssh root@138.68.174.116 'cd /root/ACP_Metabot && \
+  docker compose stop acp-metabot-api acp-metabot-acp'
+# Frees ~1 GB RAM. Caddy stays up; public hostname returns 502 only for the rebuild window (~3-5 min).
+ssh root@138.68.174.116 'cd /root/ACP_Metabot && \
+  docker compose up -d --build acp-metabot-api acp-metabot-acp'
+```
+
+**Docker build-cache gotcha — `--no-cache` when one-file fixes don't take.** Symptom: you pushed a fix, the droplet's `git pull` shows the new commit, the rebuild reports `Image ... Built`, but the running container still throws the same exception at the same source-file line number. Cause: `COPY . ./` layer was reused from cache. Force rebuild:
+
+```bash
+ssh root@138.68.174.116 'cd /root/ACP_<Bot> && \
+  docker compose build --no-cache <service> && \
+  docker compose up -d <service>'
+```
+
+This bit on 2026-05-12 during the `TheMetaBotClient` envelope fix — first rebuild silently shipped the old DLL. Forcing `--no-cache` got the correct binary into the running container. Cost: one full .NET publish per bot.
+
+## Post-deploy verification (Metabot specifically)
+
+After `acp-metabot-api` reports `(healthy)`, walk the public surface:
+
+```bash
+# 1. Corpus is rebuilt within ~2 indexer ticks (2 × 120s).
+curl -sf https://api.acp-metabot.dev/v1/health | jq '.corpus'
+
+# 2. Cross-bot Resources index is live (v1.6+).
+curl -sf -H "X-API-Key: $INTERNAL_API_KEY" \
+  https://api.acp-metabot.dev/v1/marketplace/resources/search?query=status | jq '.count'
+
+# 3. On-chain feed-address lookup is wired (404 with hint expected for any
+#    agent without a published feed — that's the whole population today
+#    until Feeds:Enabled=true is set).
+curl -sf -w "%{http_code}\n" -o /tmp/feed.json \
+  https://api.acp-metabot.dev/v1/agent/0x6f28f51743b912197caeadbc3113c955bb80e738/feed-address
+cat /tmp/feed.json | jq
+
+# 4. Both feed workers should log "disabled via config" at boot — Feeds:Enabled
+#    and Feeds:Sync:Enabled stay false until ChainlinkBot is reachable on
+#    acp-shared AND you've decided to start publishing feeds for real.
+ssh root@138.68.174.116 'docker logs --since 1m acp-metabot-api 2>&1 | grep -E "feeds.*disabled|backup.*enabled"'
+```
+
+If `/v1/agentReputation?agent=…` returns `not_cached` after a deploy, that's normal: the cache is in SQLite but the reputation warmer takes one full pass to repopulate it after a fresh container start. Wait one warm-set interval (~10 min by default) before treating it as a bug.
 
 ## Reading the metrics
 
