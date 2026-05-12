@@ -13,6 +13,12 @@ const PRICE_USDC: Record<string, number> = {
   composeStack: 0.50,
   watchOffering: 0.50,
   agentReputation: 0.05,
+  // v1.7 paid offerings
+  arenaParticipants: 0.05,
+  buyerStackOrchestration: 0.10,
+  preHireBudgetCheck: 0.02,
+  sellerCoachingPack: 1.00,
+  v1Tov2Migration: 0.50,
 };
 
 const DEFAULT_PRICE_USDC = 0.01;

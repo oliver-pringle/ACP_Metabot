@@ -6,6 +6,11 @@ import { today } from "./today.js";
 import { composeStack } from "./composeStack.js";
 import { watchOffering } from "./watchOffering.js";
 import { agentReputation } from "./agentReputation.js";
+import { arenaParticipants } from "./arenaParticipants.js";
+import { buyerStackOrchestration } from "./buyerStackOrchestration.js";
+import { preHireBudgetCheck } from "./preHireBudgetCheck.js";
+import { sellerCoachingPack } from "./sellerCoachingPack.js";
+import { v1Tov2Migration } from "./v1Tov2Migration.js";
 
 export const OFFERINGS: Record<string, Offering> = {
   search,
@@ -15,6 +20,16 @@ export const OFFERINGS: Record<string, Offering> = {
   composeStack,
   watchOffering,
   agentReputation,
+  // v1.7 (Bundle A): Arena marketplace integration. arenaDigestPro
+  // (subscription, $4/mo) is deferred to v1.7.1 — clones the watchOffering
+  // pattern (new table + repo + poller).
+  arenaParticipants,
+  // v1.7 (Bundle B): Buyer Agent Toolkit
+  buyerStackOrchestration,
+  preHireBudgetCheck,
+  // v1.7 (Bundle C): Seller-Success Coach + V1↔V2 portage
+  sellerCoachingPack,
+  v1Tov2Migration,
 };
 
 export function getOffering(name: string): Offering | undefined {

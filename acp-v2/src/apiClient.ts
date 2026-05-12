@@ -266,6 +266,13 @@ export interface ApiClient {
   composeStack(req: { useCase: string; budgetUsdc?: number; maxOfferings?: number }): Promise<ComposedStack>;
   registerWatch(req: RegisterWatchRequest): Promise<RegisterWatchResponse>;
   agentReputation(req: AgentReputationRequest): Promise<AgentReputationResponse>;
+
+  // v1.7 paid offerings
+  arenaParticipants(req: { addresses: string[] }): Promise<unknown>;
+  buyerOrchestrate(req: { useCase: string; budgetUsdc?: number; maxOfferings?: number }): Promise<unknown>;
+  budgetCheck(req: { offeringIds: number[] }): Promise<unknown>;
+  sellerCoaching(req: { agent: string }): Promise<unknown>;
+  v1Tov2Migration(req: { agent: string }): Promise<unknown>;
 }
 
 export function createApiClient(
@@ -353,5 +360,17 @@ export function createApiClient(
         method: "POST",
         body: JSON.stringify(req),
       }),
+
+    // v1.7 paid offerings
+    arenaParticipants: (req) =>
+      request<unknown>("/v1/arena/participants-bulk", { method: "POST", body: JSON.stringify(req) }),
+    buyerOrchestrate: (req) =>
+      request<unknown>("/v1/buyer/orchestrate", { method: "POST", body: JSON.stringify(req) }),
+    budgetCheck: (req) =>
+      request<unknown>("/v1/buyer/budget-check", { method: "POST", body: JSON.stringify(req) }),
+    sellerCoaching: (req) =>
+      request<unknown>("/v1/seller/coaching", { method: "POST", body: JSON.stringify(req) }),
+    v1Tov2Migration: (req) =>
+      request<unknown>("/v1/seller/migration", { method: "POST", body: JSON.stringify(req) }),
   };
 }

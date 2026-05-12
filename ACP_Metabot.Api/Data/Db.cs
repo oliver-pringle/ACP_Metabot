@@ -370,6 +370,37 @@ public class Db
                 last_error          TEXT
             );
             CREATE INDEX IF NOT EXISTS ix_repfeeds_deployed_at ON reputation_feeds(deployed_at);
+
+            -- v1.7 (Bundle A): Degen Arena participation index. Cross-references the
+            -- ACP agent wallet against the Arena leaderboard / AI Council picks.
+            -- Populated by ArenaSourceWorker which polls ArenaBot's free Resources.
+            -- Consumed by /v1/agentReputation (arenaParticipation block), the new
+            -- /v1/arena/* endpoints, and the arenaParticipantCount Resource.
+            CREATE TABLE IF NOT EXISTS agent_arena_participation (
+                agent_address          TEXT PRIMARY KEY,
+                is_participant         INTEGER NOT NULL DEFAULT 1,
+                rank_lifetime          INTEGER,
+                rank_30d               INTEGER,
+                pnl_lifetime_usd       REAL,
+                pnl_30d_usd            REAL,
+                last_week_pick         INTEGER,        -- 0/1
+                first_seen_in_arena_at TEXT,
+                last_observed_at       TEXT NOT NULL,
+                source                 TEXT NOT NULL DEFAULT 'arenabot'
+            );
+            CREATE INDEX IF NOT EXISTS ix_aap_rank_30d ON agent_arena_participation(rank_30d);
+            CREATE INDEX IF NOT EXISTS ix_aap_last_obs ON agent_arena_participation(last_observed_at);
+
+            -- v1.7 (Bundle A): cached council picks per week. Mirrors what
+            -- ArenaBot already stores; replicated here so /v1/arena/council-picks
+            -- can serve cohort-overlap queries without a cross-bot round-trip.
+            CREATE TABLE IF NOT EXISTS arena_council_pick_cache (
+                week_start            TEXT NOT NULL,
+                agent_address         TEXT NOT NULL,
+                pick_rank             INTEGER NOT NULL,
+                refreshed_at          TEXT NOT NULL,
+                PRIMARY KEY (week_start, agent_address)
+            );
             ";
         await cmd.ExecuteNonQueryAsync();
 

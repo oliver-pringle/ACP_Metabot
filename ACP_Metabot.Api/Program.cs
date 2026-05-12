@@ -167,6 +167,18 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ReputationFeedPubl
 builder.Services.AddSingleton<ReputationFeedSyncWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ReputationFeedSyncWorker>());
 
+// v1.7 Bundle A — Arena marketplace integration. Cross-bot calls into
+// ArenaBot's free Resources surface over the acp-shared docker network.
+builder.Services.AddSingleton<AgentArenaParticipationRepository>();
+builder.Services.AddHttpClient<TheArenaBotClient>();
+builder.Services.AddSingleton<ArenaSourceService>();
+builder.Services.AddSingleton<ArenaSourceWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ArenaSourceWorker>());
+
+// v1.7 Bundle A + B + C paid offerings — extracted into a single service for
+// clarity. See Services/V17PaidOfferingsService.cs.
+builder.Services.AddSingleton<V17PaidOfferingsService>();
+
 builder.Services.AddOpenApi();
 
 // Trust X-Forwarded-* ONLY from the configured reverse-proxy network. Without
@@ -532,6 +544,12 @@ async Task<IResult> HandleReputation(AgentReputationRequest req,
     try
     {
         var result = await reputation.GetOrComputeAsync(addr, ct);
+        // NOTE: v1.7 Bundle A intentionally does NOT wrap this result — the
+        // /v1/agentReputation response shape is stable for downstream clients
+        // (acp-find-plugin, marketplace agents). To get Arena participation
+        // for the same agent, callers hit the sibling GET /v1/agent/{addr}/arena
+        // endpoint, which Metabot also serves and ArenaSourceWorker keeps
+        // fresh on a 15-min cadence.
         return Results.Ok(result);
     }
     catch (Exception ex)
@@ -655,6 +673,64 @@ app.MapGet("/categories", (CategoryService svc) => Results.Ok(new { categories =
 // Public gateway — same logic, no X-API-Key, IP rate-limited.
 app.MapPost("/v1/search", HandleSearch).RequireRateLimiting("public-search");
 app.MapPost("/v1/composeStack", HandleCompose).RequireRateLimiting("public-compose");
+
+// ===== v1.7 paid offerings (5 of 6 shipped; arenaDigestPro deferred) =====
+//
+// All five live under /v1/* and share the public-compose rate-limit budget.
+// The internal (sidecar-only) names are kept as legacy POST aliases without
+// V1 prefix to make the apiClient calls symmetrical with the older offerings.
+
+app.MapPost("/v1/arena/participants-bulk",
+    async (ArenaParticipantsBulkRequest req, V17PaidOfferingsService svc) =>
+{
+    if (req.Addresses is null || req.Addresses.Length == 0)
+        return Results.BadRequest(new { error = "addresses array required" });
+    if (req.Addresses.Length > 25)
+        return Results.BadRequest(new { error = "max 25 addresses per call" });
+    return Results.Ok(await svc.ArenaParticipantsAsync(req.Addresses));
+}).RequireRateLimiting("public-compose");
+
+app.MapPost("/v1/buyer/orchestrate",
+    async (BuyerOrchestrationRequest req, V17PaidOfferingsService svc, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(req.UseCase))
+        return Results.BadRequest(new { error = "useCase required" });
+    if (req.UseCase.Length > 2000)
+        return Results.BadRequest(new { error = "useCase must be ≤ 2000 chars" });
+    return Results.Ok(await svc.BuyerStackOrchestrationAsync(req.UseCase, req.BudgetUsdc, req.MaxOfferings, ct));
+}).RequireRateLimiting("public-compose");
+
+app.MapPost("/v1/buyer/budget-check",
+    async (BudgetCheckRequest req, V17PaidOfferingsService svc) =>
+{
+    if (req.OfferingIds is null || req.OfferingIds.Length == 0)
+        return Results.BadRequest(new { error = "offeringIds array required" });
+    if (req.OfferingIds.Length > 25)
+        return Results.BadRequest(new { error = "max 25 offerings per call" });
+    return Results.Ok(await svc.PreHireBudgetCheckAsync(req.OfferingIds));
+}).RequireRateLimiting("public-compose");
+
+app.MapPost("/v1/seller/coaching",
+    async (SellerCoachingRequest req, V17PaidOfferingsService svc, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Agent))
+        return Results.BadRequest(new { error = "agent required" });
+    var addr = req.Agent.Trim().ToLowerInvariant();
+    if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+        return Results.BadRequest(new { error = "invalid_address" });
+    return Results.Ok(await svc.SellerCoachingPackAsync(addr, ct));
+}).RequireRateLimiting("public-compose");
+
+app.MapPost("/v1/seller/migration",
+    async (V1Tov2MigrationRequest req, V17PaidOfferingsService svc) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Agent))
+        return Results.BadRequest(new { error = "agent required" });
+    var addr = req.Agent.Trim().ToLowerInvariant();
+    if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+        return Results.BadRequest(new { error = "invalid_address" });
+    return Results.Ok(await svc.V1Tov2MigrationAsync(addr));
+}).RequireRateLimiting("public-compose");
 app.MapGet("/v1/agentReputation", async ([FromQuery] string agent,
     ReputationService reputation) =>
 {
@@ -822,8 +898,16 @@ app.MapGet("/v1/resources/capabilities", () =>
             new { name = "browseAgent",      priceUsdc = 0.01, slaMinutes = 5, description = "Full profile for a single agent by wallet address: reputation summary plus every offering with description, schema, price, hires, and percentile." },
             new { name = "today",            priceUsdc = 0.02, slaMinutes = 5, description = "Daily digest of new offerings and biggest hire-count gainers across the marketplace; configurable lookback window." },
             new { name = "composeStack",     priceUsdc = 0.50, slaMinutes = 5, description = "LLM-curated multi-agent stack for a stated use case: an ordered list of complementary offerings plus rationale. More expensive — runs Claude over top-K candidates." },
-            new { name = "watchOffering",    priceUsdc = 0.50, slaMinutes = 5, description = "Subscribe to webhook alerts when new offerings match a query. Polls on a configurable cadence over the watch window." },
-            new { name = "agentReputation",  priceUsdc = 0.05, slaMinutes = 5, description = "Live computed reputation for an agent address: composite 0-100 score with on-chain behavioural signals (90-day window)." }
+            new { name = "watchOffering",            priceUsdc = 0.50, slaMinutes = 5, description = "Subscribe to webhook alerts when new offerings match a query. Polls on a configurable cadence over the watch window." },
+            new { name = "agentReputation",          priceUsdc = 0.05, slaMinutes = 5, description = "Live computed reputation for an agent address: composite 0-100 score with on-chain behavioural signals (90-day window)." },
+            // v1.7 Bundle A — Arena integration
+            new { name = "arenaParticipants",        priceUsdc = 0.05, slaMinutes = 5, description = "Bulk pre-hire gate. For 1-25 agent addresses, returns per-address Degen Arena participation: indexed yes/no, lifetime + 30d ranks, PnL, last-week Council pick. Cached." },
+            // v1.7 Bundle B — Buyer Agent Toolkit
+            new { name = "buyerStackOrchestration",  priceUsdc = 0.10, slaMinutes = 5, description = "composeStack with reputation + Arena participation badges. Returns a use-case-driven stack with each seller's cached reputation summary and Arena rank attached as a trust signal." },
+            new { name = "preHireBudgetCheck",       priceUsdc = 0.02, slaMinutes = 5, description = "Given 1-25 offering IDs, returns per-offering price + total USDC + any missing IDs. Lets a buyer agent compute exact escrow before issuing any individual hire." },
+            // v1.7 Bundle C — Seller-Success Coach + V1↔V2 portage
+            new { name = "sellerCoachingPack",       priceUsdc = 1.00, slaMinutes = 5, description = "Premium seller-success report: per-offering 0-100 health score, overall verdict (STRONG / OK_WITH_GAPS / WEAK), and prioritised remediation list (missing schemas, sub-min prices, short descriptions, zero-hire offerings, missing Resources)." },
+            new { name = "v1Tov2Migration",          priceUsdc = 0.50, slaMinutes = 5, description = "Per-offering V1→V2 migration plan: split + verdict + ordered migration steps (most-hired V1 offering first) with the V2 marketplace requirements you must satisfy. Pairs with the free /v1/resources/marketplaceVersionMap Resource." }
         },
         notes = "Prices in USDC, slaMinutes is the wall-clock window from hire to deliverable. Full requirement and deliverable schemas live on each offering's marketplace card."
     });
@@ -849,6 +933,178 @@ app.MapGet("/v1/resources/chainCoverage", () =>
         notes = "search / searchAgents / today / composeStack / browseAgent default to spanning both V1 + V2. Use the marketplace filter to restrict to one."
     });
 }).RequireRateLimiting("public-resources");
+
+// ===== v1.7 Bundle B — Buyer Agent Toolkit (R6-IDEA-4 promoted) =====
+//
+// Free Resources that let buyer agents self-orchestrate without paying a
+// single Metabot hire. Demand-side primitive — pairs naturally with the
+// acp_estimate_stack_cost MCP tool shipped in acp-find-plugin v0.8.0.
+//
+// IMPORTANT: the two wallet-check Resources are informational-only in v1.7.
+// They DO NOT make live RPC calls (Metabot doesn't carry a per-buyer RPC
+// budget); they return the canonical procedure plus where to look on-chain
+// so the buyer agent can self-verify. v1.8 may add a real Alchemy probe
+// once we wire Metabot to ChainlinkBot's RPC budget.
+
+app.MapGet("/v1/resources/buyerWalletDelegationCheck", () =>
+{
+    return Results.Ok(new
+    {
+        description = "How to verify a buyer wallet has the EIP-7702 delegation the ACP v2 SDK requires before issuing any hire. Returns the expected ModularAccountV2 delegation prefix, a probe procedure, and the recovery path when drift is detected.",
+        expectedDelegationPrefix = "0xef010069007702764179f14F51cdce752f4f775d74E139",
+        probeRpcCall = new
+        {
+            method = "eth_getCode",
+            paramsTemplate = new object[] { "<bufferWallet>", "latest" }
+        },
+        baseRpcDefault = "https://base.publicnode.com",
+        passCondition  = "Response starts with 0xef0100<impl> where impl = SUPPORTED_DELEGATION_ADDRESSES[0] in @alchemy/wallet-api-types/dist/esm/capabilities/eip7702Auth.js.",
+        failRecoveryHint = "If the wallet is undelegated or pointing at the wrong impl, sign an EIP-7702 type-4 authorization via Privy's signer.signAuthorization and broadcast it from a sponsor EOA. ACP_BasicBot and ACP_BasicSubscriptionBot ship acp-v2/src/walletDelegation.ts that does this end-to-end."
+    });
+});
+
+app.MapGet("/v1/resources/buyerUsdcReadiness", () =>
+{
+    return Results.Ok(new
+    {
+        description = "How to verify a buyer smart-account wallet holds enough USDC on its target chain BEFORE attempting an ACP hire. Returns the canonical USDC contract addresses + balanceOf call shape per chain. Reminder: buyers using Privy WaaS smart accounts must check the SMART-ACCOUNT address, not the owner EOA — USDC lands at the smart account.",
+        usdcContracts = new[]
+        {
+            new { chainId = 8453,  symbol = "USDC", address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" },
+            new { chainId = 84532, symbol = "USDC", address = "0x036CbD53842c5426634e7929541eC2318f3dCF7e" },
+            new { chainId = 1,     symbol = "USDC", address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" }
+        },
+        balanceOfCallTemplate = "balanceOf(address) -> uint256 — selector 0x70a08231",
+        smartAccountReminder = "If the buyer is on Privy WaaS, ACP_WALLET_ADDRESS in their .env is the ERC-4337 smart account, NOT the owner EOA. USDC top-ups must hit the smart account."
+    });
+});
+
+app.MapGet("/v1/resources/offeringSchemaTemplate",
+    async ([Microsoft.AspNetCore.Mvc.FromQuery] long? offeringId, OfferingRepository repo) =>
+{
+    if (!offeringId.HasValue || offeringId.Value <= 0)
+        return Results.BadRequest(new { error = "offeringId query param required" });
+
+    var off = await repo.GetByIdAsync(offeringId.Value);
+    if (off is null)
+        return Results.NotFound(new { error = "offering_not_found", offeringId });
+
+    System.Text.Json.JsonElement? schema = null;
+    if (!string.IsNullOrEmpty(off.RequirementSchemaJson))
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(off.RequirementSchemaJson);
+            schema = doc.RootElement.Clone();
+        }
+        catch { /* malformed schema — surface as null */ }
+    }
+
+    return Results.Ok(new
+    {
+        offeringId          = off.Id,
+        offeringName        = off.OfferingName,
+        agentAddress        = off.AgentAddress,
+        marketplaceVersion  = off.MarketplaceVersion ?? "v1",
+        priceUsdc           = off.PriceUsdc,
+        requirementSchema   = schema,
+        note                = schema is null
+            ? "No requirement schema indexed for this offering — buyer should browse the offering's marketplace page directly."
+            : "Requirement schema as indexed by Metabot. Buyers can use this to pre-validate their requirement payload."
+    });
+});
+
+app.MapGet("/v1/resources/supportedChainsByCategory",
+    (CategoryService cats) =>
+{
+    return Results.Ok(new
+    {
+        description = "List of canonical marketplace categories plus the chain(s) they are predominantly offered on. v1 returns the canonical list; per-category live chain rollup is planned for v1.8 once the offerings GROUP BY is moved off the hot path.",
+        defaultChains = new[]
+        {
+            new { chainId = 8453, name = "Base mainnet" },
+            new { chainId = 84532, name = "Base Sepolia" }
+        },
+        categories = cats.Categories
+    });
+});
+
+// ===== v1.7 Bundle C — Seller-Success Coach + V1↔V2 portage =====
+
+app.MapGet("/v1/resources/sellerDiagnose",
+    async ([Microsoft.AspNetCore.Mvc.FromQuery] string? agent, OfferingRepository repo, AgentResourcesRepository resRepo, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(agent))
+        return Results.BadRequest(new { error = "agent query param required" });
+    var addr = agent.Trim().ToLowerInvariant();
+    if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+        return Results.BadRequest(new { error = "invalid_address" });
+
+    var offerings = await repo.ListByAgentAsync(addr);
+    if (offerings.Count == 0)
+        return Results.Ok(new
+        {
+            agentAddress = addr,
+            verdict = "NOT_INDEXED",
+            issues = new[]
+            {
+                "Agent address has zero indexed offerings on either V1 or V2. Verify the agent is provisioned on app.virtuals.io and run `npm run print-offerings` against the bot's acp-v2/ dir to confirm registration."
+            }
+        });
+
+    var issues = new List<string>();
+    foreach (var o in offerings)
+    {
+        if (string.IsNullOrEmpty(o.RequirementSchemaJson))
+            issues.Add($"offering `{o.OfferingName}` has no requirement_schema indexed — buyers can't pre-validate; re-register with a schema.");
+        if (o.OfferingName.Length > 20)
+            issues.Add($"offering `{o.OfferingName}` exceeds the 20-char marketplace name cap.");
+        if (o.PriceUsdc <= 0)
+            issues.Add($"offering `{o.OfferingName}` has non-positive price ({o.PriceUsdc}) — marketplace minimum is $0.01.");
+        if (string.IsNullOrEmpty(o.Description) || o.Description.Length < 30)
+            issues.Add($"offering `{o.OfferingName}` description is too short (< 30 chars) — buyer agents skip these in search.");
+    }
+
+    var resources = await resRepo.ListByAgentAsync(addr, ct);
+    if (resources.Count == 0)
+        issues.Add("Agent has not registered any free Resources. Resources are the demand-side primitive — buyer / orchestrator agents (Butler-style) discover you via Resources before paying. Add at least a `capabilities` Resource.");
+
+    return Results.Ok(new
+    {
+        agentAddress  = addr,
+        verdict       = issues.Count == 0 ? "HEALTHY" : "ISSUES_FOUND",
+        offeringCount = offerings.Count,
+        resourceCount = resources.Count,
+        issues
+    });
+});
+
+app.MapGet("/v1/resources/marketplaceVersionMap",
+    async ([Microsoft.AspNetCore.Mvc.FromQuery] string? agent, OfferingRepository repo) =>
+{
+    if (string.IsNullOrWhiteSpace(agent))
+        return Results.BadRequest(new { error = "agent query param required" });
+    var addr = agent.Trim().ToLowerInvariant();
+    if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+        return Results.BadRequest(new { error = "invalid_address" });
+
+    var offerings = await repo.ListByAgentAsync(addr);
+    var grouped = offerings
+        .GroupBy(o => o.MarketplaceVersion ?? "v1")
+        .ToDictionary(g => g.Key, g => g.Count());
+    var v1Count = grouped.TryGetValue("v1", out var v1) ? v1 : 0;
+    var v2Count = grouped.TryGetValue("v2", out var v2) ? v2 : 0;
+    return Results.Ok(new
+    {
+        agentAddress = addr,
+        v1OfferingCount = v1Count,
+        v2OfferingCount = v2Count,
+        dominantMarketplace = v1Count > v2Count ? "v1" : (v2Count > v1Count ? "v2" : (v1Count + v2Count == 0 ? "none" : "tied")),
+        migrationHint = v1Count > 0 && v2Count == 0
+            ? "Agent is V1-only. V2 marketplace (api.acp.virtuals.io) is the new generation; migrating brings access to V2-native features like Resources, Subscription tiers, and the new ACP escrow flow. See acp-find-plugin/docs."
+            : null
+    });
+});
 
 // R7-IDEA-C: cross-agent ACP v2 Resource index. AcpV2MarketplaceSource
 // persists each indexed agent's `resources` array into agent_resources as
@@ -958,6 +1214,160 @@ app.MapGet("/v1/agent/{address}/feed-address",
             notes             = "Reads conform to Chainlink AggregatorV3Interface (decimals=8, range 0..100*1e8). See ACP_ChainlinkBot/docs/REPUTATION_FEEDS.md."
         });
     }).RequireRateLimiting("public-marketplace-resources");
+
+// ===== v1.7 Bundle A — Arena marketplace integration =====
+
+// Single-agent Arena state. Returns the same envelope shape that
+// /v1/agentReputation's arenaParticipation sub-block would inline, but
+// exposed as a standalone endpoint for orchestrators that want only
+// the Arena slice without paying for full reputation evidence.
+app.MapGet("/v1/agent/{address}/arena",
+    async (string address, AgentArenaParticipationRepository repo) =>
+    {
+        if (string.IsNullOrWhiteSpace(address))
+            return Results.BadRequest(new { error = "invalid_address" });
+        var addr = address.Trim().ToLowerInvariant();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
+            return Results.BadRequest(new { error = "invalid_address" });
+
+        var row = await repo.GetByAddressAsync(addr);
+        if (row is null)
+            return Results.Ok(new
+            {
+                agentAddress  = addr,
+                isParticipant = false,
+                note          = "Agent not yet indexed against Degen Arena. Either not a participant, or ArenaSourceWorker hasn't ingested this address yet."
+            });
+        return Results.Ok(new
+        {
+            agentAddress       = row.AgentAddress,
+            isParticipant      = row.IsParticipant,
+            rankLifetime       = row.RankLifetime,
+            rank30d            = row.Rank30d,
+            pnlLifetimeUsd     = row.PnlLifetimeUsd,
+            pnl30dUsd          = row.Pnl30dUsd,
+            lastWeekPick       = row.LastWeekPick,
+            firstSeenInArenaAt = row.FirstSeenInArenaAt?.ToString("O"),
+            lastObservedAt     = row.LastObservedAt.ToString("O"),
+            source             = row.Source
+        });
+    }).RequireRateLimiting("public-marketplace-resources");
+
+// Bulk list of indexed Arena participants ordered by 30-day rank.
+app.MapGet("/v1/arena/agents",
+    async (int? limit, AgentArenaParticipationRepository repo) =>
+    {
+        var lim = Math.Clamp(limit ?? 100, 1, 500);
+        var rows = await repo.ListAsync(lim);
+        return Results.Ok(new
+        {
+            count = rows.Count,
+            agents = rows.Select(r => new
+            {
+                agentAddress = r.AgentAddress,
+                rankLifetime = r.RankLifetime,
+                rank30d      = r.Rank30d,
+                pnl30dUsd    = r.Pnl30dUsd,
+                lastWeekPick = r.LastWeekPick,
+                lastObservedAt = r.LastObservedAt.ToString("O")
+            }).ToArray()
+        });
+    }).RequireRateLimiting("public-marketplace-resources");
+
+// Recent council picks cached by Metabot for cohort-overlap queries.
+app.MapGet("/v1/arena/council-picks",
+    async (int? weeks, AgentArenaParticipationRepository repo) =>
+    {
+        var w = Math.Clamp(weeks ?? 4, 1, 26);
+        var rows = await repo.GetRecentCouncilCacheAsync(w);
+        var byWeek = rows.GroupBy(r => r.WeekStart)
+                          .OrderByDescending(g => g.Key)
+                          .Select(g => new
+                          {
+                              weekStart = g.Key.ToString("O"),
+                              picks = g.OrderBy(p => p.PickRank)
+                                       .Select(p => new { p.AgentAddress, p.PickRank })
+                                       .ToArray()
+                          }).ToArray();
+        return Results.Ok(new { weeks = w, data = byWeek });
+    }).RequireRateLimiting("public-marketplace-resources");
+
+// Marketplace cohort overlap — how many of the active Arena Top-N are ALSO
+// active ACP service sellers. Powers a quick metric: "does Arena talent
+// also sell offerings on app.virtuals.io?"
+app.MapGet("/v1/marketplace-overlap",
+    async (int? topN,
+        AgentArenaParticipationRepository arenaRepo,
+        OfferingRepository offRepo) =>
+    {
+        var n = Math.Clamp(topN ?? 50, 10, 500);
+        var arenaTop = await arenaRepo.ListAsync(n);
+        var matches = new List<object>();
+        foreach (var a in arenaTop)
+        {
+            var offerings = await offRepo.ListByAgentAsync(a.AgentAddress);
+            if (offerings.Count == 0) continue;
+            matches.Add(new
+            {
+                agentAddress  = a.AgentAddress,
+                arenaRank30d  = a.Rank30d,
+                offeringCount = offerings.Count
+            });
+        }
+        return Results.Ok(new
+        {
+            arenaTopN       = n,
+            arenaSampled    = arenaTop.Count,
+            sellingOnAcp    = matches.Count,
+            overlapFraction = arenaTop.Count == 0 ? 0 : Math.Round((double)matches.Count / arenaTop.Count, 3),
+            agents          = matches
+        });
+    }).RequireRateLimiting("public-marketplace-resources");
+
+// ===== v1.7 Bundle A Resources =====
+
+app.MapGet("/v1/resources/arenaParticipantCount",
+    async (AgentArenaParticipationRepository repo) =>
+    {
+        var count = await repo.CountParticipantsAsync();
+        var lastObs = await repo.GetLastObservedAtAsync();
+        return Results.Ok(new
+        {
+            count,
+            lastObservedAt = lastObs?.ToString("O"),
+            description = "Total ACP agents Metabot has cross-indexed against the Degen Arena leaderboard. Refreshed by ArenaSourceWorker (default 15-min cadence) from ArenaBot's free Resources surface."
+        });
+    });
+
+app.MapGet("/v1/resources/lastArenaPollAt",
+    async (AgentArenaParticipationRepository repo) =>
+    {
+        var last = await repo.GetLastObservedAtAsync();
+        return Results.Ok(new
+        {
+            lastObservedAt = last?.ToString("O"),
+            stale          = last is null || (DateTime.UtcNow - last.Value).TotalHours > 1
+        });
+    });
+
+app.MapGet("/v1/resources/cohortOverlap",
+    async (AgentArenaParticipationRepository arenaRepo, OfferingRepository offRepo) =>
+    {
+        var top50 = await arenaRepo.ListAsync(50);
+        var alsoSelling = 0;
+        foreach (var a in top50)
+        {
+            var offerings = await offRepo.ListByAgentAsync(a.AgentAddress);
+            if (offerings.Count > 0) alsoSelling++;
+        }
+        return Results.Ok(new
+        {
+            sampleSize      = top50.Count,
+            alsoSellOnAcp   = alsoSelling,
+            overlapFraction = top50.Count == 0 ? 0 : Math.Round((double)alsoSelling / top50.Count, 3),
+            description     = "Of the Top-50 Arena agents Metabot has indexed, how many also sell ACP offerings? A 'high' overlap means Arena performance correlates with marketplace presence."
+        });
+    });
 
 // Cross-agent Resource search. LIKE-based match on name + description +
 // agent_name. v1 is fine at the current ~500-row scale; v1.1 may upgrade
@@ -1380,6 +1790,13 @@ public record SearchAgentsRequest(
     int? Limit,
     [property: System.Text.Json.Serialization.JsonPropertyName("marketplace")] string? Marketplace);
 public record AgentReputationRequest(string AgentAddress);
+
+// v1.7 paid offerings DTOs
+public record ArenaParticipantsBulkRequest(string[] Addresses);
+public record BuyerOrchestrationRequest(string UseCase, double? BudgetUsdc, int? MaxOfferings);
+public record BudgetCheckRequest(long[] OfferingIds);
+public record SellerCoachingRequest(string Agent);
+public record V1Tov2MigrationRequest(string Agent);
 
 class HeaderedJsonResult : IResult
 {
