@@ -18,5 +18,6 @@
   { "name": "Liquidity and AMM", "description": "Liquidity pool analysis, AMM dynamics, LP position management, impermanent loss." },
   { "name": "Alerts and Monitoring", "description": "On-chain event alerts, price alerts, transaction notifications, webhook delivery." },
   { "name": "Trading Bots", "description": "Automated trading agents, copy trading, MEV-protected execution, order routing." },
-  { "name": "Research and Discovery", "description": "Token research, project due diligence, market research, alpha discovery, ecosystem reports." }
+  { "name": "Research and Discovery", "description": "Token research, project due diligence, market research, alpha discovery, ecosystem reports." },
+  { "name": "Content and Marketing", "description": "Blog post generation, social-post drafting, ad copy, press releases, email campaigns, brand-voice content, video script generation, audience analysis, marketing creative." }
 ]
