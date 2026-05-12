@@ -18,6 +18,9 @@ data/*.db-*
 # Environment
 .env
 
+# Scratch paste-blocks from `npm run print-offerings` / `print-resources`
+*-for-paste.txt
+
 # OS
 .DS_Store
 Thumbs.db
