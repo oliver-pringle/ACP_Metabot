@@ -87,6 +87,14 @@ services:
       # on app.virtuals.io. Unset → self-watch disabled.
       - Feeds__Sync__OwnAgentAddress=${FEEDS_SYNC_OWN_ADDRESS:-}
       - Feeds__Sync__OwnScoreThreshold=${FEEDS_SYNC_OWN_THRESHOLD:-30}
+      # v1.7 Bundle A — Arena indexer. Off until ArenaBot is reachable on
+      # acp-shared. Set ARENA_BASE_URL + ARENA_WORKER_ENABLED=true in the
+      # root .env, then `docker compose up -d acp-metabot-api`. Worker
+      # polls ArenaBot's free /v1/resources/* on a 15-min default cadence
+      # and upserts agent_arena_participation.
+      - Arena__BaseUrl=${ARENA_BASE_URL:-}
+      - Arena__Worker__Enabled=${ARENA_WORKER_ENABLED:-false}
+      - Arena__Worker__IntervalSeconds=${ARENA_WORKER_INTERVAL_SECONDS:-900}
     volumes:
       # Bind-mount must be writable by UID 1654 (the .NET 10 `app` user).
       # One-time setup on a fresh host: `mkdir -p data && sudo chown 1654:1654 data`.
