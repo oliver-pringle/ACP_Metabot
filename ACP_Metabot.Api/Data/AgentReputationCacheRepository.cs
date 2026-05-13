@@ -84,17 +84,37 @@ public class AgentReputationCacheRepository
         await cmd.ExecuteNonQueryAsync();
     }
 
-    // Returns the top-N agent addresses by lifetime job count, deduplicated.
+    // Returns the top-N V2-active agent addresses by V2 hire count, deduplicated.
     // Used by the warmer to pick its daily target set.
+    //
+    // v1.7.3 fix: previously ordered by MAX(agent_job_count) DESC across all
+    // marketplace versions. `agent_job_count` is populated by acpx.virtuals.io
+    // (V1 marketplace) but is always 0 for V2 registrations, so the prior query
+    // returned V1-only agents with high V1 job counts — but the ChainEventScanner
+    // reads V2 contract events on Base mainnet. Every "top" V1-only agent
+    // therefore scored as cold-start (totalJobs=0, isColdStart=true) and the
+    // warmer's effort produced no useful reputation signal.
+    //
+    // New query filters to agents with at least one non-tombstoned V2 offering
+    // and orders by V2 hire count (SUM of usage_count on V2 offerings), so
+    // the warmer prioritises agents the chain scanner can actually find events
+    // for. Tie-broken by V1 job count as a secondary signal (so cross-marketplace
+    // agents float above V2-only-with-zero-hires agents).
     public async Task<IReadOnlyList<(string AgentAddress, string AgentName)>> ListWarmAgentsAsync(int topN)
     {
         await using var conn = _db.OpenConnection();
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
-            SELECT agent_address, MAX(agent_name), MAX(agent_job_count) AS jobs
+            SELECT
+                agent_address,
+                MAX(agent_name) AS name,
+                SUM(CASE WHEN marketplace_version = 'v2' THEN usage_count ELSE 0 END) AS v2_hires,
+                MAX(agent_job_count) AS v1_jobs
             FROM offerings
+            WHERE is_removed = 0
             GROUP BY agent_address
-            ORDER BY jobs DESC
+            HAVING SUM(CASE WHEN marketplace_version = 'v2' THEN 1 ELSE 0 END) > 0
+            ORDER BY v2_hires DESC, v1_jobs DESC
             LIMIT $n;";
         cmd.Parameters.AddWithValue("$n", topN);
         await using var reader = await cmd.ExecuteReaderAsync();
