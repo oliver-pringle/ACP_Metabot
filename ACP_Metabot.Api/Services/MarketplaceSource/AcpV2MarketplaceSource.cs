@@ -83,6 +83,11 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
         "0x997163304142c3a3ff660ad03069b7d78485ca95", // ACP_DeFiEval
         "0xb97552998e7ee94ef2a260fdc25529ed93e4902b", // ACP_AgentEval
         "0x18362cdc11247ee9e37dea29a1cf21f378ec619f", // ACP_LiquidGuard
+        "0x827b2c1de0922314f62bc19554044fd649291ca3", // ACP_MEVProtect
+        "0x6f28f51743b912197caeadbc3113c955bb80e738", // TheChainlinkBot
+        "0xa524de81819e213e8bb181fa0b3747a4a6c3a7e3", // TheArenaBot
+        "0xbd9527bdbd61640f544bddd513ed9fcaf9387df8", // TheRevokeBot
+        "0xe9b0f88f8f27a7033f4f9679e93ebcfe1a78f7fd", // TheEASIssuerBot
     };
 
     public AcpV2MarketplaceSource(
