@@ -918,7 +918,7 @@ app.MapGet("/v1/resources/capabilities", () =>
             // v1.7.2: search / searchAgents / browseAgent moved to free Resources
             // (callable at /v1/resources/search etc) — they were never economic
             // to hire as paid offerings at the $0.01 price floor.
-            new { name = "today",            priceUsdc = 0.02, slaMinutes = 5, description = "Daily digest of new offerings and biggest hire-count gainers across the marketplace; configurable lookback window." },
+            new { name = "today",            priceUsdc = 0.02, slaMinutes = 5, description = "Daily digest of new offerings, new Resources, biggest hire-count gainers, new agents, churn rate, cohort survival, and category saturation across the marketplace; configurable lookback window." },
             new { name = "composeStack",     priceUsdc = 0.50, slaMinutes = 5, description = "LLM-curated multi-agent stack for a stated use case: an ordered list of complementary offerings plus rationale. More expensive — runs Claude over top-K candidates." },
             new { name = "watchOffering",            priceUsdc = 0.50, slaMinutes = 5, description = "Subscribe to webhook alerts when new offerings match a query. Polls on a configurable cadence over the watch window." },
             new { name = "agentReputation",          priceUsdc = 0.05, slaMinutes = 10, description = "Live computed reputation for an agent address: composite 0-100 score with on-chain behavioural signals (90-day window)." },

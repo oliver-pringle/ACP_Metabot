@@ -155,6 +155,38 @@ public sealed class AgentResourcesRepository
         return list;
     }
 
+    /// <summary>
+    /// v1.7.4: returns Resources whose first_seen_at is >= sinceUtc, ordered
+    /// most-recent-first. Used by DigestService to populate `today`'s
+    /// newResources block. Optional marketplaceFilter restricts to v1 or v2.
+    /// </summary>
+    public async Task<IReadOnlyList<AgentResourceRow>> ListNewSinceAsync(
+        DateTime sinceUtc, string? marketplaceFilter, int limit, CancellationToken ct = default)
+    {
+        if (limit <= 0) return Array.Empty<AgentResourceRow>();
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        var mvFilter = string.IsNullOrWhiteSpace(marketplaceFilter)
+            ? ""
+            : "AND marketplace_version = $mv ";
+        cmd.CommandText = @"
+            SELECT id, agent_address, agent_name, name, url, params_json, description,
+                   marketplace_version, first_seen_at, last_seen_at
+            FROM agent_resources
+            WHERE first_seen_at >= $since " + mvFilter + @"
+            ORDER BY first_seen_at DESC
+            LIMIT $lim;";
+        cmd.Parameters.AddWithValue("$since", sinceUtc.ToString("O", CultureInfo.InvariantCulture));
+        cmd.Parameters.AddWithValue("$lim", limit);
+        if (!string.IsNullOrWhiteSpace(marketplaceFilter))
+            cmd.Parameters.AddWithValue("$mv", marketplaceFilter);
+
+        var list = new List<AgentResourceRow>();
+        await using var rdr = await cmd.ExecuteReaderAsync(ct);
+        while (await rdr.ReadAsync(ct)) list.Add(Read(rdr));
+        return list;
+    }
+
     public async Task<int> CountAsync(CancellationToken ct = default)
     {
         await using var conn = _db.OpenConnection();

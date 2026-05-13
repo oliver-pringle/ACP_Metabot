@@ -4,7 +4,7 @@ import { requirePositiveIntOrNothing } from "../validators.js";
 export const today: Offering = {
   name: "today",
   description:
-    "Daily marketplace pulse. Returns new and trending ACP offerings, plus extended v1.7 fields: newAgents (agents that appeared for the first time in the window), churnRate (fraction of offerings that went inactive), cohortSurvival (weekly cohort survival curves, available only for windows ≥ 30 days — null otherwise), and saturationMap (per-category duplicate density). The days argument now accepts 1–90 (default 1). Optional marketplace filter ('v1' or 'v2').",
+    "Daily marketplace pulse. Returns new and trending ACP offerings, **newResources** (v1.7.4: free V2 Resources first seen in the window — buyer-orchestrator pre-hire surface that's growing in parallel with paid offerings), plus extended v1.7 fields: newAgents (agents that appeared for the first time in the window), churnRate (fraction of offerings that went inactive), cohortSurvival (weekly cohort survival curves, available only for windows ≥ 30 days — null otherwise), and saturationMap (per-category duplicate density). The days argument now accepts 1–90 (default 1). Optional marketplace filter ('v1' or 'v2').",
   requirementSchema: {
     type: "object",
     properties: {
@@ -29,7 +29,7 @@ export const today: Offering = {
   slaMinutes: 5,
   deliverableSchema: {
     type: "object",
-    required: ["windowDays", "windowStart", "snapshotComparison", "partial", "newOfferings", "gainers", "newAgents", "churnRate", "saturationMap", "computedAt"],
+    required: ["windowDays", "windowStart", "snapshotComparison", "partial", "newOfferings", "newResources", "gainers", "newAgents", "churnRate", "saturationMap", "computedAt"],
     properties: {
       windowDays: { type: "integer", description: "Lookback window in days." },
       windowStart: { type: "string", format: "date-time", description: "ISO-8601 UTC start of the window." },
@@ -39,6 +39,23 @@ export const today: Offering = {
         type: "array",
         description: "Offerings first seen within the window.",
         items: { type: "object" },
+      },
+      newResources: {
+        type: "array",
+        description: "v1.7.4: free V2 Resources (AcpAgentResource: name+url+params+description) first seen within the window across the indexed corpus. Resources are buyer-orchestrator pre-hire endpoints — discovery surface adjacent to paid offerings. V1 marketplace has no Resources surface so this is V2-only.",
+        items: {
+          type: "object",
+          required: ["agentName", "agentAddress", "name", "url", "description", "firstSeenAt", "marketplaceVersion"],
+          properties: {
+            agentName:          { type: "string", description: "Marketplace display name of the agent that publishes the Resource" },
+            agentAddress:       { type: "string", description: "Lowercased 0x-prefixed wallet address of the publishing agent" },
+            name:               { type: "string", description: "Resource name (≤30 chars per marketplace cap)" },
+            url:                { type: "string", description: "Absolute HTTPS endpoint buyers call to invoke the Resource" },
+            description:        { type: "string", description: "Resource description from the agent's app.virtuals.io registration" },
+            firstSeenAt:        { type: "string", format: "date-time", description: "ISO-8601 UTC timestamp the Resource was first observed in the indexer" },
+            marketplaceVersion: { type: "string", enum: ["v2"], description: "Always 'v2' in v1.7.4." },
+          },
+        },
       },
       gainers: {
         type: "array",
@@ -127,6 +144,17 @@ export const today: Offering = {
         priceType: "per-call",
         chain: "base",
         firstSeenAt: "2026-05-03T18:22:11Z",
+        marketplaceVersion: "v2",
+      },
+    ],
+    newResources: [
+      {
+        agentName: "TheMetaBot",
+        agentAddress: "0xecf9773b50f01f3a97b087a6ecdf12a71afc558c",
+        name: "search",
+        url: "https://api.acp-metabot.dev/v1/resources/search",
+        description: "Semantic search across every offering in the V1 + V2 ACP marketplaces. Returns ranked matches with prices, reputation, and marketplace URLs.",
+        firstSeenAt: "2026-05-13T00:18:00Z",
         marketplaceVersion: "v2",
       },
     ],

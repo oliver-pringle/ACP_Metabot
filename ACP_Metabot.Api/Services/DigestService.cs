@@ -16,9 +16,12 @@ public class DigestService
     private readonly OfferingRepository _repo;
     private readonly ReputationService _reputation;
     private readonly SaturationCalculator _saturation;
+    private readonly AgentResourcesRepository? _resourcesRepo;
 
     private const int MaxNewOfferings = 25;
     private const int MaxGainers = 25;
+    // v1.7.4: cap on new-Resources block size in the today/digest payload.
+    private const int MaxNewResources = 25;
 
     // Sub-task E: hourly per-filter-set cache
     private readonly Dictionary<string, (DateTime Bucket, DigestResult Result)> _cache = new();
@@ -31,11 +34,12 @@ public class DigestService
     }
 
     public DigestService(OfferingRepository repo, ReputationService reputation,
-        SaturationCalculator saturation)
+        SaturationCalculator saturation, AgentResourcesRepository? resourcesRepo = null)
     {
         _repo = repo;
         _reputation = reputation;
         _saturation = saturation;
+        _resourcesRepo = resourcesRepo;
     }
 
     // Backward-compat overload — delegate to 4-arg version.
@@ -169,6 +173,30 @@ public class DigestService
             .Select(c => new SaturationMapRow(c.Category, c.Total, c.SaturatedCount, c.SaturationPct))
             .ToList();
 
+        // v1.7.4: newResources — Resources observed for the first time within
+        // the window. Resources are V2-only today (V1 marketplace doesn't have
+        // a Resources surface), so the marketplaceFilter narrows to v2 OR is
+        // null; chain/price filters don't apply to Resources.
+        IReadOnlyList<NewResource> newResources = Array.Empty<NewResource>();
+        if (_resourcesRepo is not null)
+        {
+            var resourceMvFilter = marketplaceFilter is null ? null
+                : (marketplaceFilter == "v2" ? "v2" : null);
+            // If caller filtered to V1, return zero new Resources (correct — they don't exist there).
+            if (marketplaceFilter is null || marketplaceFilter == "v2")
+            {
+                var rows = await _resourcesRepo.ListNewSinceAsync(sinceUtc, resourceMvFilter, MaxNewResources);
+                newResources = rows.Select(r => new NewResource(
+                    AgentName:          r.AgentName,
+                    AgentAddress:       r.AgentAddress,
+                    Name:               r.Name,
+                    Url:                r.Url,
+                    Description:        r.Description,
+                    FirstSeenAt:        r.FirstSeenAt.ToString("O", CultureInfo.InvariantCulture),
+                    MarketplaceVersion: r.MarketplaceVersion)).ToArray();
+            }
+        }
+
         return new DigestResult
         {
             WindowDays         = windowDays,
@@ -176,6 +204,7 @@ public class DigestService
             SnapshotComparison = snapshotExists ? "available" : "insufficient_history",
             Partial            = !snapshotExists,
             NewOfferings       = newOfferingDtos,
+            NewResources       = newResources,
             Gainers            = gainers,
             NewAgents          = new NewAgentsBlock(newAgentsTotal, newAgentsTop),
             ChurnRate          = churnBaseline == 0

@@ -57,6 +57,17 @@ public record CohortSurvivalRow(
     [property: JsonPropertyName("surviving")]      int Surviving,
     [property: JsonPropertyName("survivalRate")]   double SurvivalRate);
 
+// ── New Resources (R7-IDEA-C cross-agent Resource index) ─────────────────────
+
+public record NewResource(
+    [property: JsonPropertyName("agentName")]     string AgentName,
+    [property: JsonPropertyName("agentAddress")]  string AgentAddress,
+    [property: JsonPropertyName("name")]          string Name,
+    [property: JsonPropertyName("url")]           string Url,
+    [property: JsonPropertyName("description")]   string Description,
+    [property: JsonPropertyName("firstSeenAt")]   string FirstSeenAt,
+    [property: JsonPropertyName("marketplaceVersion")] string MarketplaceVersion);
+
 // ── Saturation Map ────────────────────────────────────────────────────────────
 
 public record SaturationMapRow(
@@ -83,6 +94,11 @@ public class DigestResult
 
     [JsonPropertyName("newOfferings")]
     public IReadOnlyList<NewOffering> NewOfferings { get; set; } = Array.Empty<NewOffering>();
+
+    // v1.7.4: Resources observed for the first time within the window, across
+    // every indexed V2 agent. Backed by agent_resources (R7-IDEA-C).
+    [JsonPropertyName("newResources")]
+    public IReadOnlyList<NewResource> NewResources { get; set; } = Array.Empty<NewResource>();
 
     [JsonPropertyName("gainers")]
     public IReadOnlyList<OfferingGainer> Gainers { get; set; } = Array.Empty<OfferingGainer>();
