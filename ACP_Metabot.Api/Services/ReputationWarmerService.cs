@@ -69,13 +69,33 @@ public class ReputationWarmerService : BackgroundService
         var topN = _config.GetValue<int?>("Reputation:WarmerTopN") ?? 500;
         var budgetMin = _config.GetValue<int?>("Reputation:WarmerBudgetMinutes") ?? 60;
         var concurrency = _config.GetValue<int?>("Reputation:WarmerConcurrency") ?? 4;
+        // v1.7.6: priority agents are warmed before the top-N pass regardless
+        // of ListWarmAgentsAsync ranking. Used to guarantee the portfolio bots
+        // land in agent_reputation_cache even though their V2 usage_count is 0
+        // (which sorts them to the tail of the top-N) — v1.7.5's back-stamp
+        // has nothing to read until at least one cache row exists per agent.
+        var priority = (_config.GetSection("Reputation:WarmerPriorityAgents")
+                            .Get<string[]>() ?? Array.Empty<string>())
+            .Select(a => (a ?? "").Trim().ToLowerInvariant())
+            .Where(a => a.Length == 42 && a.StartsWith("0x"))
+            .Distinct()
+            .ToList();
 
-        var agents = await _cacheRepo.ListWarmAgentsAsync(topN);
+        var topAgents = await _cacheRepo.ListWarmAgentsAsync(topN);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var agents = new List<(string AgentAddress, string AgentName)>(priority.Count + topAgents.Count);
+        foreach (var addr in priority)
+            if (seen.Add(addr)) agents.Add((addr, ""));
+        foreach (var a in topAgents)
+            if (seen.Add(a.AgentAddress)) agents.Add(a);
+
         if (agents.Count == 0)
         {
             _logger.LogInformation("[warmer] no agents to warm");
             return;
         }
+        if (priority.Count > 0)
+            _logger.LogInformation("[warmer] priority agents prepended: {N}", priority.Count);
         var deadline = DateTime.UtcNow.AddMinutes(budgetMin);
         int done = 0, failed = 0, skipped = 0;
 
