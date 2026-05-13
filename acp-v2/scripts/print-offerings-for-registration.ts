@@ -20,6 +20,30 @@ import { priceFor } from "../src/pricing.js";
   }
 }
 
+// v1.7.4: app.virtuals.io ALSO caps offering descriptions at 500 chars. Same
+// pattern as the Resource Description cap (separate memory note); marketplace
+// rejects at registration time but doesn't surface the limit in the dashboard
+// hint. Trip caught by the `today` description bloating during the newResources
+// addition.
+{
+  const MAX_DESC_LEN = 500;
+  const violations = Object.values(OFFERINGS)
+    .filter(o => (o.description ?? "").length > MAX_DESC_LEN)
+    .map(o => ({
+      name: o.name,
+      len: o.description.length,
+      over: o.description.length - MAX_DESC_LEN
+    }));
+  if (violations.length > 0) {
+    console.error(`ERROR: ${violations.length} offering description(s) exceed the ${MAX_DESC_LEN}-char marketplace cap:`);
+    for (const v of violations) console.error(`  - ${v.name} (${v.len} chars, ${v.over} over)`);
+    console.error("");
+    console.error("Trim the description in acp-v2/src/offerings/<name>.ts.");
+    console.error("Keep core delivery info; move verbose rationale to the .md spec.");
+    process.exit(1);
+  }
+}
+
 function main() {
   const names = Object.keys(OFFERINGS).sort();
   if (names.length === 0) {

@@ -16,6 +16,29 @@ import { RESOURCES } from "../src/resources.js";
   }
 }
 
+// v1.7.4: Resource descriptions also cap at 500 chars on app.virtuals.io
+// (caught 2026-05-12 registering RevokeBot.quote at 540 chars — marketplace
+// rejects at registration time but the dashboard hint doesn't surface the
+// limit). Same guard pattern as offering descriptions in print-offerings-for-registration.
+{
+  const MAX_DESC_LEN = 500;
+  const violations = Object.values(RESOURCES)
+    .filter(r => (r.description ?? "").length > MAX_DESC_LEN)
+    .map(r => ({
+      name: r.name,
+      len: r.description.length,
+      over: r.description.length - MAX_DESC_LEN
+    }));
+  if (violations.length > 0) {
+    console.error(`ERROR: ${violations.length} resource description(s) exceed the ${MAX_DESC_LEN}-char marketplace cap:`);
+    for (const v of violations) console.error(`  - ${v.name} (${v.len} chars, ${v.over} over)`);
+    console.error("");
+    console.error("Trim the description in acp-v2/src/resources.ts.");
+    console.error("Keep core delivery info; move verbose rationale to the .md spec.");
+    process.exit(1);
+  }
+}
+
 function main() {
   const names = Object.keys(RESOURCES).sort();
   if (names.length === 0) {

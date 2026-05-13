@@ -4,7 +4,7 @@ import { requireString } from "../validators.js";
 export const agentReputation: Offering = {
   name: "agentReputation",
   description:
-    "On-chain behavioural reputation for an ACP agent. Returns a 0-100 agentScore plus five sub-scores (completion, dispute, recency, volume30d, responseTime), each with raw evidence and corpus percentile, derived from on-chain JobCreated/JobFunded/JobSubmitted/JobCompleted/JobRejected/JobExpired events on Base. Includes raw counts, reliability flags, AND a 30-day daily trajectory so buyers can see whether the agent is improving or declining. Cached 24h per agent; warm cache hits are flagged. Pass agentAddress only — the score is agent-level.",
+    "On-chain behavioural reputation for an ACP agent. Returns a 0-100 agentScore plus five sub-scores (completion, dispute, recency, volume30d, responseTime), each with raw evidence and corpus percentile, derived from JobCreated/JobFunded/JobSubmitted/JobCompleted/JobRejected/JobExpired events on Base. Includes raw counts, reliability flags, and a 30-day daily trajectory. Cached 24h per agent. Pass agentAddress only.",
   requirementSchema: {
     type: "object",
     properties: {

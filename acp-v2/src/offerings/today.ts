@@ -4,7 +4,7 @@ import { requirePositiveIntOrNothing } from "../validators.js";
 export const today: Offering = {
   name: "today",
   description:
-    "Daily marketplace pulse. Returns new and trending ACP offerings, **newResources** (v1.7.4: free V2 Resources first seen in the window — buyer-orchestrator pre-hire surface that's growing in parallel with paid offerings), plus extended v1.7 fields: newAgents (agents that appeared for the first time in the window), churnRate (fraction of offerings that went inactive), cohortSurvival (weekly cohort survival curves, available only for windows ≥ 30 days — null otherwise), and saturationMap (per-category duplicate density). The days argument now accepts 1–90 (default 1). Optional marketplace filter ('v1' or 'v2').",
+    "Daily marketplace pulse. Returns newOfferings, newResources (free V2 Resources first-seen in window), gainers (top hire-count growth), newAgents, churnRate, cohortSurvival (weekly survival curves for windows ≥30d, null otherwise), and saturationMap (per-category duplicate density). days argument 1–90 (default 1). Optional marketplace filter 'v1' or 'v2'.",
   requirementSchema: {
     type: "object",
     properties: {
