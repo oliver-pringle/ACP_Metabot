@@ -40,6 +40,7 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
     private readonly ILogger<AcpV2MarketplaceSource> _logger;
     private readonly V2KnownSellersRepository? _sellersRepo;
     private readonly AgentResourcesRepository? _resourcesRepo;
+    private readonly AgentReputationCacheRepository? _reputationCacheRepo;
     private readonly int _chainId;
     private readonly string[] _knownAgents;
     private readonly bool _keywordSweepEnabled;
@@ -95,11 +96,13 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
         IHttpClientFactory httpFactory,
         ILogger<AcpV2MarketplaceSource> logger,
         V2KnownSellersRepository? sellersRepo = null,
-        AgentResourcesRepository? resourcesRepo = null)
+        AgentResourcesRepository? resourcesRepo = null,
+        AgentReputationCacheRepository? reputationCacheRepo = null)
     {
         _logger = logger;
         _sellersRepo = sellersRepo;
         _resourcesRepo = resourcesRepo;
+        _reputationCacheRepo = reputationCacheRepo;
         var baseUrl = config["Indexer:V2:ApiBaseUrl"] ?? "https://api.acp.virtuals.io";
         if (baseUrl.EndsWith("/")) baseUrl = baseUrl.TrimEnd('/');
         _chainId = config.GetValue<int?>("Indexer:V2:ChainId") ?? 8453;
@@ -288,6 +291,32 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
                 }
             }
 
+            // v1.7.5: agent-level hire count from the reputation cache.
+            // The V2 marketplace API doesn't expose hire counts on offerings;
+            // ChainEventScanner is the authoritative source but it writes
+            // results only to agent_reputation_cache, never back to
+            // offerings.agent_job_count. Look up the cached TotalJobs once
+            // per agent and apply it to every DTO so the column finally
+            // carries a real number for V2-only agents.
+            //
+            // Falls back to 0 when the agent has never been warmed (same as
+            // pre-v1.7.5 behaviour). No TTL — a 7-day-stale count of 50 is
+            // strictly better than 0 for ranking.
+            long agentJobCount = 0;
+            if (_reputationCacheRepo is not null)
+            {
+                try
+                {
+                    var cached = await _reputationCacheRepo.GetCachedTotalJobsAsync(wallet);
+                    if (cached is long c && c >= 0) agentJobCount = c;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex,
+                        "[v2-source] reputation cache lookup failed for {Wallet}; defaulting to 0", wallet);
+                }
+            }
+
             var dtos = new List<MarketplaceOfferingDto>(agent.Offerings?.Count ?? 0);
             foreach (var o in agent.Offerings ?? Enumerable.Empty<V2Offering>())
             {
@@ -336,12 +365,16 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
                     PriceType = NormalizePriceType(o.PriceType),
                     IsPrivate = false, // V2 isHidden==true is filtered above
                     Chain = "base",
-                    // V2 has no usageCount/jobCount on the offering itself;
-                    // those are derived from on-chain events by the reputation
-                    // pipeline. Default to 0 here — the existing chain-event
-                    // path on `agent_address` is the authoritative source.
+                    // V2 has no usageCount on offerings; per-offering counts
+                    // require contract reads (deferred to a future revision).
                     UsageCount = 0,
-                    AgentJobCount = 0,
+                    // v1.7.5: agent-level total from the reputation cache
+                    // (warmer-populated, ChainEventScanner-sourced). The
+                    // per-agent value is repeated on every dto for this
+                    // agent — OfferingRepository writes it onto each row
+                    // and ReputationService.BuildSearchSummary reads it as
+                    // the agent's lifetime total.
+                    AgentJobCount = agentJobCount,
                 });
             }
             return dtos;

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using ACP_Metabot.Api.Models;
 using Microsoft.Data.Sqlite;
 
@@ -39,6 +40,37 @@ public class AgentReputationCacheRepository
             ComputedAt:       computedAt,
             LastScannedBlock: reader.GetInt64(7),
             Source:           reader.GetString(8));
+    }
+
+    // v1.7.5: returns the agent's on-chain TotalJobs from any prior compute
+    // (raw_counts_json.totalJobs), bypassing the 24h TTL — a stale count is
+    // strictly better than 0 for marketplace ranking. Returns null when the
+    // agent has never been warmed.
+    //
+    // The V2 marketplace API doesn't expose hire counts on offerings, and
+    // ChainEventScanner only writes results to this cache (not back to
+    // offerings.agent_job_count). AcpV2MarketplaceSource calls this per-wallet
+    // during indexer passes so V2 offering rows get the agent-level total
+    // populated, fixing agentReputation.agentTotalJobs, searchAgents agent
+    // percentile, and the warmer's V2-active secondary sort.
+    public async Task<long?> GetCachedTotalJobsAsync(string agentAddress)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT raw_counts_json FROM agent_reputation_cache WHERE agent_address = $a;";
+        cmd.Parameters.AddWithValue("$a", agentAddress);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()) return null;
+        var json = reader.GetString(0);
+        try
+        {
+            var counts = JsonSerializer.Deserialize<RawCounts>(json);
+            return counts?.TotalJobs;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     // Returns the highest block scanned for this agent on any prior compute,
