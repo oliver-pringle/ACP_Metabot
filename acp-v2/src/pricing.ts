@@ -18,6 +18,14 @@ const PRICE_USDC: Record<string, number> = {
   preHireBudgetCheck: 0.05,
   sellerCoachingPack: 1.00,
   v1Tov2Migration: 0.50,
+  // v1.8 Portfolio Risk Bot
+  risk_snapshot:    0.30,
+  risk_deep_dive:   1.00,
+  risk_compare:     0.20,
+  risk_attestation: 0.50,
+  // 30-day subscription. Per-tick price tracked separately; the marketplace
+  // registration is the flat $5.00 bundle.
+  daily_risk_watch: 5.00,
 };
 
 const DEFAULT_PRICE_USDC = 0.01;

@@ -179,6 +179,21 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ArenaSourceWorker>
 // clarity. See Services/V17PaidOfferingsService.cs.
 builder.Services.AddSingleton<V17PaidOfferingsService>();
 
+// ── v1.8 Portfolio Risk Bot — 5 cross-bot orchestrator offerings ─────────
+//
+// risk_snapshot fans out to LiquidGuard + RevokeBot + MEVProtect + the
+// internal reputation cache. risk_attestation also calls EASIssuer.
+// Cross-bot calls go over the acp-shared docker bridge; per-bot API keys
+// are loaded from the disambiguated *_API_KEY env vars per the
+// cross-bot-key-sync convention. RiskWatchWorker is default OFF (set
+// RiskWatch:Worker:Enabled=true to activate the daily push loop).
+builder.Services.AddSingleton<RiskSubscriptionRepository>();
+builder.Services.AddSingleton<IRiskPeerClients, RiskPeerClients>();
+builder.Services.AddSingleton<RiskSynthesisService>();
+builder.Services.AddSingleton<RiskOrchestrationService>();
+builder.Services.AddSingleton<RiskWatchWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<RiskWatchWorker>());
+
 builder.Services.AddOpenApi();
 
 // Trust X-Forwarded-* ONLY from the configured reverse-proxy network. Without
@@ -734,6 +749,82 @@ app.MapPost("/v1/seller/migration",
     if (!System.Text.RegularExpressions.Regex.IsMatch(addr, "^0x[0-9a-f]{40}$"))
         return Results.BadRequest(new { error = "invalid_address" });
     return Results.Ok(await svc.V1Tov2MigrationAsync(addr));
+}).RequireRateLimiting("public-compose");
+
+// ===== v1.8 Portfolio Risk Bot — 5 paid offerings =====
+//
+// All five share the public-compose rate-limit budget. The four one-shot
+// endpoints (snapshot/deep-dive/compare/attestation) are synchronous fans
+// out to peer bots; daily_risk_watch creates a subscription row and the
+// RiskWatchWorker (default OFF) drives the daily pushes.
+//
+// Validation: every wallet is regex-checked here too even though the
+// sidecar validators already do it — the C# tier must never trust the
+// sidecar to do its own input checks. chain defaults to "base" downstream.
+
+static bool IsAddr(string? s) =>
+    !string.IsNullOrWhiteSpace(s) && System.Text.RegularExpressions.Regex.IsMatch(s, "^0x[0-9a-fA-F]{40}$");
+
+app.MapPost("/v1/risk/snapshot",
+    async (RiskSnapshotRequest req, RiskOrchestrationService svc, CancellationToken ct) =>
+{
+    if (!IsAddr(req.Wallet)) return Results.BadRequest(new { error = "invalid_address", field = "wallet" });
+    if (req.Chain is not null && req.Chain is not ("base" or "ethereum"))
+        return Results.BadRequest(new { error = "chain must be 'base' or 'ethereum'" });
+    return Results.Ok(await svc.SnapshotAsync(req.Wallet!, req.Chain, ct));
+}).RequireRateLimiting("public-compose");
+
+app.MapPost("/v1/risk/deep-dive",
+    async (RiskSnapshotRequest req, RiskOrchestrationService svc, CancellationToken ct) =>
+{
+    if (!IsAddr(req.Wallet)) return Results.BadRequest(new { error = "invalid_address", field = "wallet" });
+    if (req.Chain is not null && req.Chain is not ("base" or "ethereum"))
+        return Results.BadRequest(new { error = "chain must be 'base' or 'ethereum'" });
+    return Results.Ok(await svc.DeepDiveAsync(req.Wallet!, req.Chain, ct));
+}).RequireRateLimiting("public-compose");
+
+app.MapPost("/v1/risk/compare",
+    async (RiskCompareRequest req, RiskOrchestrationService svc, CancellationToken ct) =>
+{
+    if (req.Wallets is null || req.Wallets.Length < 2 || req.Wallets.Length > 5)
+        return Results.BadRequest(new { error = "wallets must contain 2 to 5 addresses" });
+    foreach (var w in req.Wallets)
+        if (!IsAddr(w)) return Results.BadRequest(new { error = "invalid_address", value = w });
+    if (req.Chain is not null && req.Chain is not ("base" or "ethereum"))
+        return Results.BadRequest(new { error = "chain must be 'base' or 'ethereum'" });
+    return Results.Ok(await svc.CompareAsync(req.Wallets, req.Chain, ct));
+}).RequireRateLimiting("public-compose");
+
+app.MapPost("/v1/risk/attestation",
+    async (RiskSnapshotRequest req, RiskOrchestrationService svc, CancellationToken ct) =>
+{
+    if (!IsAddr(req.Wallet)) return Results.BadRequest(new { error = "invalid_address", field = "wallet" });
+    if (req.Chain is not null && req.Chain is not ("base" or "ethereum"))
+        return Results.BadRequest(new { error = "chain must be 'base' or 'ethereum'" });
+    return Results.Ok(await svc.AttestationAsync(req.Wallet!, req.Chain, ct));
+}).RequireRateLimiting("public-compose");
+
+app.MapPost("/v1/risk/watch",
+    async (RiskWatchRequest req, RiskOrchestrationService svc, CancellationToken ct) =>
+{
+    if (req.JobId <= 0) return Results.BadRequest(new { error = "jobId required" });
+    if (!IsAddr(req.BuyerAddress))
+        return Results.BadRequest(new { error = "invalid_address", field = "buyerAddress" });
+    if (!IsAddr(req.Wallet))
+        return Results.BadRequest(new { error = "invalid_address", field = "wallet" });
+    if (req.Chain is not null && req.Chain is not ("base" or "ethereum"))
+        return Results.BadRequest(new { error = "chain must be 'base' or 'ethereum'" });
+
+    // Full SSRF guard — was previously a `StartsWith("https://")` prefix-only
+    // check, which let an attacker register `https://attacker/redirect` that
+    // 302s into 169.254.169.254 / loopback / RFC1918. RiskWatchWorker's default
+    // HttpClient follows redirects, so the prefix check is not sufficient.
+    // Matches the gate `/watches` already applied (Program.cs:2036).
+    var urlCheck = await WebhookUrlValidator.ValidateAsync(req.WebhookUrl ?? "", ct);
+    if (!urlCheck.Ok)
+        return Results.BadRequest(new { error = urlCheck.Reason });
+
+    return Results.Ok(await svc.CreateWatchAsync(req.JobId, req.BuyerAddress!, req.Wallet!, req.WebhookUrl!, req.Chain));
 }).RequireRateLimiting("public-compose");
 app.MapGet("/v1/agentReputation", async ([FromQuery] string agent,
     ReputationService reputation) =>
@@ -1455,6 +1546,137 @@ app.MapGet("/v1/resources/cohortOverlap",
         });
     });
 
+// ===== v1.8 Portfolio Risk Bot Resources =====
+//
+// riskDataSourceHealth probes the four cross-bot data sources risk_snapshot
+// depends on. It calls each peer's cheapest free Resource (or /health) to
+// produce a status board so buyer agents can pre-check freshness before
+// hiring the paid offering.
+app.MapGet("/v1/resources/riskDataSourceHealth",
+    async (IRiskPeerClients peers, AgentReputationCacheRepository repCache, CancellationToken ct) =>
+    {
+        // Probe each peer with a known-cheap call. Use the well-known portfolio
+        // dev address 0x6939...4633 — any 0x-shaped address works for the
+        // probes since we only care about whether the peer responded, not the
+        // data itself.
+        const string probeAddress = "0x0000000000000000000000000000000000000001";
+        var hfTask  = peers.GetHealthFactorAsync(probeAddress, "base", ct);
+        var aprTask = peers.GetApprovalsQuoteAsync(probeAddress, "base", ct);
+        var mevTask = peers.GetMevScoreAsync(probeAddress, ct);
+        await Task.WhenAll(hfTask, aprTask, mevTask);
+
+        // Internal reputation cache freshness: latest computed_at across the cache.
+        // We don't probe the row for the probe address; reputation as a service is
+        // a local SQLite table — "fresh" if any row was computed within 48h.
+        DateTime? lastFreshAt = null;
+        try
+        {
+            await using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                builder.Configuration.GetConnectionString("Sqlite"));
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT MAX(computed_at) FROM agent_reputation_cache;";
+            var raw = await cmd.ExecuteScalarAsync(ct);
+            if (raw is string s && DateTime.TryParse(s, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind, out var dt))
+                lastFreshAt = dt;
+        }
+        catch { /* don't fail the Resource for a probe-side error */ }
+
+        string Status(System.Text.Json.JsonDocument? doc) => doc is null ? "unavailable" : "fresh";
+        string RepStatus() => lastFreshAt is null
+            ? "unavailable"
+            : (DateTime.UtcNow - lastFreshAt.Value).TotalHours <= 48 ? "fresh" : "stale";
+
+        var lg  = Status(hfTask.Result);
+        var rv  = Status(aprTask.Result);
+        var mev = Status(mevTask.Result);
+        var rep = RepStatus();
+
+        var anyDown = new[] { lg, rv, mev, rep }.Any(s => s == "unavailable");
+        return Results.Ok(new
+        {
+            description = "Cross-bot data source health for risk_snapshot. Each component reports fresh/stale/unavailable. Pre-check before paying when sub-fresh data would compromise the use case.",
+            verdict = anyDown ? "DEGRADED" : "HEALTHY",
+            liquidguard = new { status = lg, source = "LiquidGuard" },
+            revokebot   = new { status = rv, source = "RevokeBot" },
+            mevprotect  = new { status = mev, source = "MEVProtect" },
+            reputation  = new {
+                status = rep,
+                source = "TheMetaBot",
+                lastFreshAt = lastFreshAt?.ToString("O")
+            },
+            time = DateTime.UtcNow.ToString("O"),
+        });
+    }).RequireRateLimiting("public-resources");
+
+// riskScoreRubric — static methodology block. Lets buyer agents pre-validate
+// the score recipe before paying for a risk_snapshot.
+app.MapGet("/v1/resources/riskScoreRubric", () =>
+{
+    return Results.Ok(new
+    {
+        description = "Methodology for the risk_snapshot 0-100 score. Composite weighted blend across four components; unavailable peers are dropped from the blend and the remaining weights renormalised.",
+        weights = new
+        {
+            healthFactor = RiskSynthesisService.WeightHealthFactor,
+            approvals    = RiskSynthesisService.WeightApprovals,
+            mevExposure  = RiskSynthesisService.WeightMevExposure,
+            reputation   = RiskSynthesisService.WeightReputation,
+        },
+        grades = new[]
+        {
+            new { grade = "A", min = 85, label = "Strong" },
+            new { grade = "B", min = 70, label = "Healthy" },
+            new { grade = "C", min = 55, label = "Mixed" },
+            new { grade = "D", min = 40, label = "Elevated risk" },
+            new { grade = "F", min = 0,  label = "High risk" },
+        },
+        components = new
+        {
+            healthFactor = new {
+                source = "LiquidGuard",
+                buckets = new[]
+                {
+                    new { hfAtLeast = 3.0, score = 100 },
+                    new { hfAtLeast = 2.0, score = 90 },
+                    new { hfAtLeast = 1.5, score = 75 },
+                    new { hfAtLeast = 1.25, score = 55 },
+                    new { hfAtLeast = 1.1, score = 35 },
+                    new { hfAtLeast = 0.0, score = 10 },
+                },
+                noPositionsScore = 80
+            },
+            approvals = new
+            {
+                source = "RevokeBot",
+                buckets = new[]
+                {
+                    new { highRiskCount = 0, score = 100 },
+                    new { highRiskCount = 1, score = 70 },
+                    new { highRiskCount = 2, score = 55 },
+                    new { highRiskCount = 3, score = 40 },
+                    new { highRiskCount = 4, score = 25 },
+                    new { highRiskCount = 5, score = 10 },
+                }
+            },
+            mevExposure = new
+            {
+                source = "MEVProtect",
+                note   = "Peer returns a 0-100 mevScore directly (100 = lowest exposure). Passed through with bounds-check."
+            },
+            reputation = new
+            {
+                source = "TheMetaBot",
+                neutralBaselineScore = 50,
+                note = "When the wallet is also a registered ACP agent, uses the cached agentScore. Otherwise 50 (neutral)."
+            }
+        },
+        fallbackPolicy = "When a peer is unavailable, that component is marked 'unavailable' and its weight is renormalised across the remaining components. Recorded in deliverable.fallbacks[].",
+        time = DateTime.UtcNow.ToString("O")
+    });
+}).RequireRateLimiting("public-resources");
+
 // Cross-agent Resource search. LIKE-based match on name + description +
 // agent_name. v1 is fine at the current ~500-row scale; v1.1 may upgrade
 // to FTS5 + a new agent_resources_fts virtual table.
@@ -1883,6 +2105,12 @@ public record BuyerOrchestrationRequest(string UseCase, double? BudgetUsdc, int?
 public record BudgetCheckRequest(long[] OfferingIds);
 public record SellerCoachingRequest(string Agent);
 public record V1Tov2MigrationRequest(string Agent);
+
+// v1.8 Portfolio Risk Bot DTOs
+public record RiskSnapshotRequest(string? Wallet, string? Chain);
+public record RiskCompareRequest(string[] Wallets, string? Chain);
+public record RiskWatchRequest(long JobId, string? BuyerAddress, string? Wallet,
+    string WebhookUrl, string? Chain);
 
 class HeaderedJsonResult : IResult
 {

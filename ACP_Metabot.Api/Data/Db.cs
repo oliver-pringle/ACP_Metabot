@@ -401,6 +401,39 @@ public class Db
                 refreshed_at          TEXT NOT NULL,
                 PRIMARY KEY (week_start, agent_address)
             );
+
+            -- v1.8 Portfolio Risk Bot: subscription state for daily_risk_watch.
+            -- One row per active subscription. RiskWatchWorker (default OFF)
+            -- iterates rows where status='active' and next_run_at<=now, ticks
+            -- the subscription, persists the snapshot JSON for diffing, and
+            -- POSTs an HMAC-signed webhook payload. Schema follows the
+            -- BasicSubscriptionBot pattern validated by RevokeBot.
+            CREATE TABLE IF NOT EXISTS risk_subscriptions (
+                id                    TEXT    PRIMARY KEY,
+                job_id                INTEGER NOT NULL UNIQUE,
+                buyer_address         TEXT    NOT NULL,
+                wallet_address        TEXT    NOT NULL,
+                chain                 TEXT    NOT NULL,
+                webhook_url           TEXT    NOT NULL,
+                webhook_secret        TEXT    NOT NULL,
+                cadence               TEXT    NOT NULL DEFAULT 'daily',
+                ticks_purchased       INTEGER NOT NULL DEFAULT 30,
+                ticks_delivered       INTEGER NOT NULL DEFAULT 0,
+                consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+                status                TEXT    NOT NULL DEFAULT 'active',
+                created_at            TEXT    NOT NULL,
+                expires_at            TEXT    NOT NULL,
+                first_tick_at         TEXT    NOT NULL,
+                last_run_at           TEXT,
+                next_run_at           TEXT    NOT NULL,
+                last_snapshot_json    TEXT,
+                last_score            INTEGER
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_risk_subs_status_next
+                ON risk_subscriptions(status, next_run_at);
+            CREATE INDEX IF NOT EXISTS ix_risk_subs_wallet
+                ON risk_subscriptions(wallet_address);
             ";
         await cmd.ExecuteNonQueryAsync();
 

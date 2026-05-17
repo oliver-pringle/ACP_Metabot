@@ -237,6 +237,31 @@ export const RESOURCES: Record<string, Resource> = {
       "plus every offering with description, schema, price, hires, and " +
       "percentile. Free, public. Use this BEFORE paying for any of the " +
       "agent's offerings so you can pre-validate requirement schemas."
+  },
+
+  // ── v1.8 Portfolio Risk Bot Resources ─────────────────────────────────────
+  riskDataSourceHealth: {
+    name: "riskDataSourceHealth",
+    url: `${PUBLIC_BASE}/v1/resources/riskDataSourceHealth`,
+    params: { type: "object", properties: {} },
+    description:
+      "Status board of the four cross-bot data sources risk_snapshot " +
+      "depends on (LiquidGuard, RevokeBot, MEVProtect, internal reputation " +
+      "cache). Returns per-source { lastFreshAt, status: fresh|stale|" +
+      "unavailable } plus an overall verdict. Free, parameterless. Pre-check " +
+      "this before paying for risk_snapshot when sub-fresh data would " +
+      "compromise the use case."
+  },
+  riskScoreRubric: {
+    name: "riskScoreRubric",
+    url: `${PUBLIC_BASE}/v1/resources/riskScoreRubric`,
+    params: { type: "object", properties: {} },
+    description:
+      "Explains how the 0-100 wallet risk score is computed: per-component " +
+      "weights, score → grade thresholds (A/B/C/D/F), and the unavailable-" +
+      "peer fallback policy. Free, parameterless. Lets buyer agents pre-" +
+      "validate what risk_snapshot will tell them and decide whether the " +
+      "component weights match their use case."
   }
 };
 

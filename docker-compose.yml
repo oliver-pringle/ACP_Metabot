@@ -102,6 +102,28 @@ services:
       - Arena__BaseUrl=${ARENA_BASE_URL:-}
       - Arena__Worker__Enabled=${ARENA_WORKER_ENABLED:-false}
       - Arena__Worker__IntervalSeconds=${ARENA_WORKER_INTERVAL_SECONDS:-900}
+      # v1.7+ Portfolio Risk — cross-bot risk orchestrator (risk_snapshot,
+      # risk_deep_dive, risk_compare, risk_attestation, daily_risk_watch).
+      # Reaches sibling bots over the acp-shared external bridge. Each peer's
+      # ApiKey is that peer's own INTERNAL_API_KEY (or equivalent — see
+      # CLAUDE.md per-bot note: RevokeBot reads it as RevokeBot_API_KEY)
+      # exposed here under a disambiguated env var so each bot's own
+      # INTERNAL_API_KEY stays distinct. When ApiKey is empty, the peer is
+      # treated as unavailable and risk_snapshot lists it in `fallbacks[]`.
+      - LiquidGuard__BaseUrl=http://liquidguard-api:5000/
+      - LiquidGuard__ApiKey=${LIQUIDGUARD_API_KEY:-}
+      - RevokeBot__BaseUrl=http://revokebot-api:5000/
+      - RevokeBot__ApiKey=${REVOKEBOT_API_KEY:-}
+      - MEVProtect__BaseUrl=http://mevprotect-api:5000/
+      - MEVProtect__ApiKey=${MEVPROTECT_API_KEY:-}
+      - EASIssuer__BaseUrl=http://easissuer-api:5000/
+      - EASIssuer__ApiKey=${EASISSUER_API_KEY:-}
+      # daily_risk_watch subscription worker. Default OFF; flip
+      # RISK_WATCH_WORKER_ENABLED=true in the root .env after the 4 peer
+      # keys above are set AND verified reachable via the smoke-test in
+      # the runbook.
+      - RiskWatch__Worker__Enabled=${RISK_WATCH_WORKER_ENABLED:-false}
+      - RiskWatch__Worker__PollSeconds=${RISK_WATCH_POLL_SECONDS:-300}
     volumes:
       # Bind-mount must be writable by UID 1654 (the .NET 10 `app` user).
       # One-time setup on a fresh host: `mkdir -p data && sudo chown 1654:1654 data`.

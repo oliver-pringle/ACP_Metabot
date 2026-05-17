@@ -273,6 +273,19 @@ export interface ApiClient {
   budgetCheck(req: { offeringIds: number[] }): Promise<unknown>;
   sellerCoaching(req: { agent: string }): Promise<unknown>;
   v1Tov2Migration(req: { agent: string }): Promise<unknown>;
+
+  // v1.8 Portfolio Risk Bot — cross-bot orchestrator offerings
+  riskSnapshot(req: { wallet: string; chain?: "base" | "ethereum" }): Promise<unknown>;
+  riskDeepDive(req: { wallet: string; chain?: "base" | "ethereum" }): Promise<unknown>;
+  riskCompare(req: { wallets: string[]; chain?: "base" | "ethereum" }): Promise<unknown>;
+  riskAttestation(req: { wallet: string; chain?: "base" | "ethereum" }): Promise<unknown>;
+  dailyRiskWatch(req: {
+    jobId: number;
+    buyerAddress: string;
+    wallet: string;
+    webhookUrl: string;
+    chain?: "base" | "ethereum";
+  }): Promise<unknown>;
 }
 
 export function createApiClient(
@@ -372,5 +385,17 @@ export function createApiClient(
       request<unknown>("/v1/seller/coaching", { method: "POST", body: JSON.stringify(req) }),
     v1Tov2Migration: (req) =>
       request<unknown>("/v1/seller/migration", { method: "POST", body: JSON.stringify(req) }),
+
+    // v1.8 Portfolio Risk Bot — every endpoint is /v1/risk/*.
+    riskSnapshot: (req) =>
+      request<unknown>("/v1/risk/snapshot", { method: "POST", body: JSON.stringify(req) }),
+    riskDeepDive: (req) =>
+      request<unknown>("/v1/risk/deep-dive", { method: "POST", body: JSON.stringify(req) }),
+    riskCompare: (req) =>
+      request<unknown>("/v1/risk/compare", { method: "POST", body: JSON.stringify(req) }),
+    riskAttestation: (req) =>
+      request<unknown>("/v1/risk/attestation", { method: "POST", body: JSON.stringify(req) }),
+    dailyRiskWatch: (req) =>
+      request<unknown>("/v1/risk/watch", { method: "POST", body: JSON.stringify(req) }),
   };
 }
