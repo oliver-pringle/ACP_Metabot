@@ -434,6 +434,36 @@ public class Db
                 ON risk_subscriptions(status, next_run_at);
             CREATE INDEX IF NOT EXISTS ix_risk_subs_wallet
                 ON risk_subscriptions(wallet_address);
+
+            -- v1.9 marketplacePulseSub: 30-day daily marketplace digest push.
+            -- Mirrors risk_subscriptions exactly so the BasicSubscriptionBot
+            -- pattern stays uniform; the only difference is the payload (digest
+            -- JSON, not risk JSON). MarketplacePulseWorker (default OFF) does
+            -- the tick loop.
+            CREATE TABLE IF NOT EXISTS pulse_subscriptions (
+                id                    TEXT    PRIMARY KEY,
+                job_id                INTEGER NOT NULL UNIQUE,
+                buyer_address         TEXT    NOT NULL,
+                webhook_url           TEXT    NOT NULL,
+                webhook_secret        TEXT    NOT NULL,
+                cadence               TEXT    NOT NULL DEFAULT 'daily',
+                marketplace           TEXT    NOT NULL DEFAULT 'both',
+                ticks_purchased       INTEGER NOT NULL DEFAULT 30,
+                ticks_delivered       INTEGER NOT NULL DEFAULT 0,
+                consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+                status                TEXT    NOT NULL DEFAULT 'active',
+                created_at            TEXT    NOT NULL,
+                expires_at            TEXT    NOT NULL,
+                first_tick_at         TEXT    NOT NULL,
+                last_run_at           TEXT,
+                next_run_at           TEXT    NOT NULL,
+                last_payload_hash     TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_pulse_subs_status_next
+                ON pulse_subscriptions(status, next_run_at);
+            CREATE INDEX IF NOT EXISTS ix_pulse_subs_buyer
+                ON pulse_subscriptions(buyer_address);
             ";
         await cmd.ExecuteNonQueryAsync();
 

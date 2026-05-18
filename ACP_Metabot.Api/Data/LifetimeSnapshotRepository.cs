@@ -46,6 +46,51 @@ public class LifetimeSnapshotRepository
         await cmd.ExecuteNonQueryAsync();
     }
 
+    // v1.9 self-tuning warmer support: returns the top-N agents by job-count
+    // delta over the past `windowDays`. Used by ReputationWarmerService to
+    // surface "trending" agents — agents whose V2 hire count is growing
+    // recently regardless of where they rank by lifetime totals. Brand-new
+    // agents (no past snapshot) count their FULL current total as delta —
+    // they're maximally trending.
+    //
+    // Returns empty when fewer than 2 distinct snapshot dates exist (cold
+    // boot, before the second day's snapshot). The warmer falls back to the
+    // existing lifetime-ranked path in that case.
+    public async Task<IReadOnlyList<(string AgentAddress, long Delta)>>
+        ListTopByDeltaAsync(int topN, int windowDays, DateTime nowUtc)
+    {
+        var current = FormatDate(nowUtc);
+        var pastCutoff = FormatDate(nowUtc.AddDays(-windowDays));
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT cur.agent_address,
+                   (cur.total_jobs - COALESCE(past.total_jobs, 0)) AS delta
+            FROM agent_lifetime_snapshot cur
+            LEFT JOIN agent_lifetime_snapshot past
+                ON  cur.agent_address  = past.agent_address
+                AND past.snapshot_date = (
+                    SELECT MAX(snapshot_date)
+                    FROM agent_lifetime_snapshot
+                    WHERE snapshot_date <= $past_cut
+                      AND agent_address  = cur.agent_address
+                )
+            WHERE cur.snapshot_date = $cur
+              AND (cur.total_jobs - COALESCE(past.total_jobs, 0)) > 0
+            ORDER BY delta DESC
+            LIMIT $n;";
+        cmd.Parameters.AddWithValue("$cur",      current);
+        cmd.Parameters.AddWithValue("$past_cut", pastCutoff);
+        cmd.Parameters.AddWithValue("$n",        topN);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        var list = new List<(string, long)>(capacity: topN);
+        while (await reader.ReadAsync())
+        {
+            list.Add((reader.GetString(0), reader.GetInt64(1)));
+        }
+        return list;
+    }
+
     // Bulk UPSERT used by the daily snapshot service. Wraps in a transaction
     // so we either get all rows for the day or none.
     public async Task UpsertManyAsync(IReadOnlyDictionary<string, long> agentTotals, DateTime snapshotDate)

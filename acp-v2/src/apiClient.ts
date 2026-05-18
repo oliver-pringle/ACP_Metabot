@@ -286,6 +286,17 @@ export interface ApiClient {
     webhookUrl: string;
     chain?: "base" | "ethereum";
   }): Promise<unknown>;
+
+  // v1.9 marketplaceGap — "where should I build?"
+  marketplaceGap(req: { category?: string; limit?: number }): Promise<unknown>;
+
+  // v1.9 marketplacePulseSub — daily digest subscription create
+  marketplacePulseSub(req: {
+    jobId: number;
+    buyerAddress: string;
+    webhookUrl: string;
+    marketplace?: "v1" | "v2" | "both";
+  }): Promise<unknown>;
 }
 
 export function createApiClient(
@@ -397,5 +408,16 @@ export function createApiClient(
       request<unknown>("/v1/risk/attestation", { method: "POST", body: JSON.stringify(req) }),
     dailyRiskWatch: (req) =>
       request<unknown>("/v1/risk/watch", { method: "POST", body: JSON.stringify(req) }),
+
+    // v1.9 marketplaceGap
+    marketplaceGap: (req) =>
+      request<unknown>("/v1/marketplace/gap", { method: "POST", body: JSON.stringify(req) }),
+
+    // v1.9 marketplacePulseSub
+    marketplacePulseSub: (req) =>
+      request<unknown>("/v1/marketplace/pulse/subscribe", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
   };
 }

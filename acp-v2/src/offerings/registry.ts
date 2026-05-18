@@ -16,6 +16,13 @@ import { riskDeepDive } from "./riskDeepDive.js";
 import { riskCompare } from "./riskCompare.js";
 import { riskAttestation } from "./riskAttestation.js";
 import { dailyRiskWatch } from "./dailyRiskWatch.js";
+// v1.9 marketplace gap finder — "where should I build?". Repackages the
+// saturationMap that /digest already exposes for free into an opportunity-
+// ranked, recommendation-tagged response.
+import { marketplaceGap } from "./marketplaceGap.js";
+// v1.9 TheMetaBot's first recurring tier — daily marketplace digest pushed
+// via HMAC webhook on the BasicSubscriptionBot pattern.
+import { marketplacePulseSub } from "./marketplacePulseSub.js";
 
 // v1.7.2: search / searchAgents / browseAgent moved from paid offerings to
 // free Resources (see acp-v2/src/resources.ts). The $0.01 price floor was
@@ -43,6 +50,10 @@ export const OFFERINGS: Record<string, Offering> = {
   risk_compare:     riskCompare,
   risk_attestation: riskAttestation,
   daily_risk_watch: dailyRiskWatch,
+  // v1.9 marketplace gap finder ($0.30 one-shot)
+  marketplaceGap,
+  // v1.9 marketplace pulse subscription ($4.00 / 30 days daily digest)
+  marketplacePulseSub,
 };
 
 export function getOffering(name: string): Offering | undefined {

@@ -49,6 +49,13 @@ services:
       # mainnet.base.org (Coinbase) has higher limits but we keep concurrency=1
       # as a defence in depth. Bump back up if we move to paid RPC.
       - Reputation__WarmerConcurrency=${REPUTATION_WARMER_CONCURRENCY:-1}
+      # v1.9 self-tuning trending overlay. Set TrendingTopN=0 to disable.
+      # Default: top 25 agents by 7-day total_jobs delta land in the warmer's
+      # priority queue alongside the hardcoded floor in appsettings.json. The
+      # overlay is a no-op until at least 2 days of agent_lifetime_snapshot
+      # rows exist.
+      - Reputation__WarmerTrendingTopN=${REPUTATION_WARMER_TRENDING_TOP_N:-25}
+      - Reputation__WarmerTrendingWindowDays=${REPUTATION_WARMER_TRENDING_WINDOW_DAYS:-7}
       # X-Forwarded-* trust list. ForwardedHeaders middleware only honours these
       # headers from peers inside one of these CIDRs; everyone else's headers are
       # ignored (RemoteIpAddress falls back to the direct connection). Default to

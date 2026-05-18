@@ -12,6 +12,7 @@ public class ReputationWarmerService : BackgroundService
     private readonly ReputationService            _reputation;
     private readonly AgentReputationCacheRepository _cacheRepo;
     private readonly AgentReputationHistoryRepository _historyRepo;
+    private readonly LifetimeSnapshotRepository   _snapshotRepo;
     private readonly MarketplaceIndexerService    _indexer;
     private readonly IConfiguration               _config;
     private readonly ILogger<ReputationWarmerService> _logger;
@@ -24,6 +25,7 @@ public class ReputationWarmerService : BackgroundService
         ReputationService reputation,
         AgentReputationCacheRepository cacheRepo,
         AgentReputationHistoryRepository historyRepo,
+        LifetimeSnapshotRepository snapshotRepo,
         MarketplaceIndexerService indexer,
         IConfiguration config,
         ILogger<ReputationWarmerService> logger)
@@ -31,6 +33,7 @@ public class ReputationWarmerService : BackgroundService
         _reputation  = reputation;
         _cacheRepo   = cacheRepo;
         _historyRepo = historyRepo;
+        _snapshotRepo = snapshotRepo;
         _indexer     = indexer;
         _config      = config;
         _logger      = logger;
@@ -81,11 +84,38 @@ public class ReputationWarmerService : BackgroundService
             .Distinct()
             .ToList();
 
+        // v1.9 self-tuning trending overlay: insert agents whose total_jobs
+        // delta over the last N days is in the top of all agents BEFORE the
+        // lifetime-ranked tail. This makes the warmer respond automatically
+        // to newly-hot agents (e.g. a bot that ships and starts trending on
+        // day 1) without needing a manual bump to WarmerPriorityAgents.
+        // Returns empty when fewer than 2 snapshot dates exist (cold boot),
+        // so the existing lifetime-only path is used until the second daily
+        // snapshot lands.
+        var trendingTopN = Math.Max(0, _config.GetValue<int?>("Reputation:WarmerTrendingTopN") ?? 25);
+        var trendingWindowDays = Math.Max(1, _config.GetValue<int?>("Reputation:WarmerTrendingWindowDays") ?? 7);
+        IReadOnlyList<(string AgentAddress, long Delta)> trending = Array.Empty<(string, long)>();
+        if (trendingTopN > 0)
+        {
+            try
+            {
+                trending = await _snapshotRepo.ListTopByDeltaAsync(
+                    trendingTopN, trendingWindowDays, DateTime.UtcNow);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[warmer] trending overlay query failed; continuing without it");
+            }
+        }
+
         var topAgents = await _cacheRepo.ListWarmAgentsAsync(topN);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var agents = new List<(string AgentAddress, string AgentName)>(priority.Count + topAgents.Count);
+        var agents = new List<(string AgentAddress, string AgentName)>(
+            priority.Count + trending.Count + topAgents.Count);
         foreach (var addr in priority)
             if (seen.Add(addr)) agents.Add((addr, ""));
+        foreach (var t in trending)
+            if (seen.Add(t.AgentAddress)) agents.Add((t.AgentAddress, ""));
         foreach (var a in topAgents)
             if (seen.Add(a.AgentAddress)) agents.Add(a);
 
@@ -96,6 +126,10 @@ public class ReputationWarmerService : BackgroundService
         }
         if (priority.Count > 0)
             _logger.LogInformation("[warmer] priority agents prepended: {N}", priority.Count);
+        if (trending.Count > 0)
+            _logger.LogInformation(
+                "[warmer] trending overlay added: {N} agents (window={W}d, top delta={D})",
+                trending.Count, trendingWindowDays, trending[0].Delta);
         var deadline = DateTime.UtcNow.AddMinutes(budgetMin);
         int done = 0, failed = 0, skipped = 0;
 

@@ -179,6 +179,19 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<ArenaSourceWorker>
 // clarity. See Services/V17PaidOfferingsService.cs.
 builder.Services.AddSingleton<V17PaidOfferingsService>();
 
+// v1.9 marketplaceGap ($0.30) — repackages the saturationMap that today/digest
+// already computes into a structured opportunity ranking with recommendation
+// tags. See Services/MarketplaceGapService.cs.
+builder.Services.AddSingleton<MarketplaceGapService>();
+
+// v1.9 marketplacePulseSub ($4 / 30-day daily digest subscription). HMAC-
+// signed webhook tick loop on the BasicSubscriptionBot pattern. Default OFF;
+// flip MarketplacePulse:Worker:Enabled=true after first hire.
+builder.Services.AddSingleton<PulseSubscriptionRepository>();
+builder.Services.AddSingleton<MarketplacePulseService>();
+builder.Services.AddSingleton<MarketplacePulseWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<MarketplacePulseWorker>());
+
 // ── v1.8 Portfolio Risk Bot — 5 cross-bot orchestrator offerings ─────────
 //
 // risk_snapshot fans out to LiquidGuard + RevokeBot + MEVProtect + the
@@ -750,6 +763,41 @@ app.MapPost("/v1/seller/migration",
         return Results.BadRequest(new { error = "invalid_address" });
     return Results.Ok(await svc.V1Tov2MigrationAsync(addr));
 }).RequireRateLimiting("public-compose");
+
+// ===== v1.9 marketplaceGap ($0.30) =====
+//
+// "Where should I build a new ACP bot?" — ranks every canonical marketplace
+// category by an opportunity score derived from the existing saturationMap.
+// No new data computed; the saturation snapshot is reused. The added value
+// is the score formula + per-row recommendation_tag taxonomy.
+app.MapPost("/v1/marketplace/gap",
+    async (MarketplaceGapRequest req, MarketplaceGapService svc) =>
+{
+    var limit = req?.Limit ?? 5;
+    return Results.Ok(svc.Analyze(req?.Category, limit));
+}).RequireRateLimiting("public-compose");
+
+// ===== v1.9 marketplacePulseSub ($4 / 30-day daily digest subscription) =====
+//
+// HMAC-signed webhook push. Buyer hires once, receives daily digest snapshots
+// over the 30-day window. Tick scheduler is MarketplacePulseWorker (default
+// OFF) — flip MarketplacePulse:Worker:Enabled=true after first hire and the
+// docker compose up. /admin/pulse/tick-now lets the operator drive a one-shot
+// tick for verification without waiting 24h.
+app.MapPost("/v1/marketplace/pulse/subscribe",
+    async (CreatePulseSubscriptionRequest req, MarketplacePulseService svc,
+        CancellationToken ct) =>
+{
+    try { return Results.Ok(await svc.CreateAsync(req, ct)); }
+    catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
+}).RequireRateLimiting("public-compose");
+
+app.MapPost("/admin/pulse/tick-now",
+    async (MarketplacePulseWorker worker, CancellationToken ct) =>
+{
+    var delivered = await worker.TickOnceAsync(ct);
+    return Results.Ok(new { ok = true, delivered });
+});
 
 // ===== v1.8 Portfolio Risk Bot — 5 paid offerings =====
 //

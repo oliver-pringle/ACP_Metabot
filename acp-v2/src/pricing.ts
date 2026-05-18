@@ -26,6 +26,14 @@ const PRICE_USDC: Record<string, number> = {
   // 30-day subscription. Per-tick price tracked separately; the marketplace
   // registration is the flat $5.00 bundle.
   daily_risk_watch: 5.00,
+  // v1.9 marketplace gap finder. Positioned between arenaParticipants ($0.05
+  // raw lookup) and composeStack ($0.50 stack synthesis): structured ranking
+  // + recommendation tags over already-computed saturation data.
+  marketplaceGap: 0.30,
+  // v1.9 marketplace pulse subscription. $4.00 = 30 daily ticks ≈ $0.13/tick,
+  // ~15% above today's per-call price (per the portfolio subscription
+  // gradient principle in memory project_acp_pricing_review_shipped.md).
+  marketplacePulseSub: 4.00,
 };
 
 const DEFAULT_PRICE_USDC = 0.01;
