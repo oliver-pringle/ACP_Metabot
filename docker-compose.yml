@@ -193,7 +193,8 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    networks: [acp-metabot]
+      - ./caddy-logs:/var/log/caddy
+    networks: [acp-metabot, acp-shared, caddy_proxy]
     logging:
       driver: json-file
       options:
@@ -211,6 +212,8 @@ networks:
       config:
         - subnet: 172.28.0.0/16
   acp-shared:
+    external: true
+  caddy_proxy:
     external: true
 
 volumes:

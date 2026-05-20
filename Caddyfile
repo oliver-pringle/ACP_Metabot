@@ -1,27 +1,131 @@
-# Caddy config for the ACP_Metabot public gateway.
+# Caddy config for the ACP_Metabot public gateway, sharing the hostname
+# with path-routed Resources surfaces for sidecar-only bots that never
+# got their own DNS (ChainlinkBot, DeFiEval, AgentEval, LiquidGuard,
+# MEVProtect).
 #
-# ACP_METABOT_DOMAIN is supplied at runtime via docker-compose env. When unset,
-# Caddy falls back to `localhost` (uses its internal CA, no Let's Encrypt
-# attempt) so the container is harmless before a real domain is wired up.
-#
-# Caddy automatically obtains and renews a Let's Encrypt cert via the HTTP-01
-# challenge on port 80. Persistence (certs + ACME account) lives on the
-# `caddy_data` volume so a `docker compose down && up` doesn't re-issue.
+# Each bot's api container must be on the caddy_proxy external docker
+# network so the upstream name resolves. handle_path strips the matched
+# prefix so /<botname>/v1/resources/<name> is forwarded as
+# /v1/resources/<name>. Each bot must also include api.acp-metabot.dev
+# in its ASP.NET AllowedHosts via the ALLOWED_HOSTS env override.
 
 {$ACP_METABOT_DOMAIN:localhost} {
 	encode gzip
 
-	reverse_proxy acp-metabot-api:5000 {
-		# Increase from default 30s — composeStack can take ~15s for the
-		# Claude call + a buffer for slow upstream responses.
-		transport http {
-			read_timeout 60s
-			write_timeout 60s
+	handle_path /chainlinkbot/* {
+		reverse_proxy acp-chainlinkbot-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+	handle_path /defieval/* {
+		reverse_proxy acp-defieval-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+	handle_path /agenteval/* {
+		reverse_proxy acp-agenteval-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+	handle_path /liquidguard/* {
+		reverse_proxy liquidguard-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+	handle_path /mevprotect/* {
+		reverse_proxy mevprotect-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+	handle_path /arenabot/* {
+		reverse_proxy arenabot-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+	handle_path /revokebot/* {
+		reverse_proxy revokebot-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+	handle_path /easissuer/* {
+		reverse_proxy easissuer-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+
+	handle_path /oraclebot/* {
+		reverse_proxy oraclebot-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy acp-metabot-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
 		}
 	}
 
 	log {
-		output stdout
-		format console
+		output file /var/log/caddy/access.log {
+			roll_size 100MiB
+			roll_keep 14
+			mode 0644
+		}
+		format json
 	}
+}
+
+
+# Append this block to /root/ACP_Metabot/Caddyfile on the droplet.
+# Reload after editing:  docker exec acp-metabot-caddy caddy reload --config /etc/caddy/Caddyfile
+
+acp-metabot.dev {
+	encode gzip zstd
+	header {
+		defer
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "interest-cohort=()"
+		Content-Security-Policy "script-src 'self'" "script-src 'self' 'unsafe-inline'"
+	}
+	reverse_proxy acp-website:5000
 }
