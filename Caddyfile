@@ -94,6 +94,33 @@
 		}
 	}
 
+	handle_path /butlerbridgebot/* {
+		reverse_proxy butlerbridgebot-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+	handle_path /solanabot/* {
+		reverse_proxy solanabot-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
+	handle_path /witnessbot/* {
+		reverse_proxy witnessbot-api:5000 {
+			transport http {
+				read_timeout 60s
+				write_timeout 60s
+			}
+		}
+	}
+
 	handle {
 		reverse_proxy acp-metabot-api:5000 {
 			transport http {
