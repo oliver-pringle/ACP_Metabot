@@ -813,6 +813,231 @@ app.MapPost("/admin/pulse/tick-now",
 static bool IsAddr(string? s) =>
     !string.IsNullOrWhiteSpace(s) && System.Text.RegularExpressions.Regex.IsMatch(s, "^0x[0-9a-fA-F]{40}$");
 
+// R12 Tier 1.3 — agent_smoke_check ($0.10)
+// Static-analysis smoke test for any V2 ACP agent's offering. v1 ships a
+// schema-validation verdict; v0.2 will invoke ACP_Tester via docker-ops to
+// actually hire and time-the-deliverable.
+app.MapPost("/v1/smoke/check",
+    async (AgentSmokeCheckRequest req,
+           OfferingRepository offRepo,
+           AgentReputationCacheRepository repRepo,
+           CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(req.TargetAgent) ||
+        !System.Text.RegularExpressions.Regex.IsMatch(req.TargetAgent, "^0x[a-fA-F0-9]{40}$"))
+    {
+        return Results.BadRequest(new { error = "invalid_address", field = "targetAgent" });
+    }
+    var target = req.TargetAgent.ToLowerInvariant();
+    var nowUtc = DateTime.UtcNow;
+
+    // Look up the agent's offerings.
+    var allOfferings = await offRepo.ListByAgentAsync(target);
+    var liveOfferings = allOfferings.Where(o => !o.IsRemoved).ToList();
+    if (liveOfferings.Count == 0)
+    {
+        return Results.Ok(new
+        {
+            verdict = "AGENT_NOT_FOUND",
+            targetAgent = target,
+            offeringName = req.OfferingName ?? string.Empty,
+            offeringPriceUsdc = (double?)null,
+            confidence = 0.0,
+            findings = new[]
+            {
+                new { severity = "error", check = "agent_indexed", message = "Agent has no offerings in TheMetaBot's index. Either the agent is brand-new and the indexer hasn't seen it, or the address doesn't correspond to a V2 ACP agent." }
+            },
+            reputation = (object?)null,
+            checkedAt = nowUtc.ToString("O"),
+            v1Note = "v1 static analysis only. v0.2 will run a real ACP_Tester hire via docker-ops-sidecar."
+        });
+    }
+
+    // Select the offering: explicit name if given, otherwise the cheapest.
+    ACP_Metabot.Api.Models.Offering? offering = null;
+    if (!string.IsNullOrWhiteSpace(req.OfferingName))
+    {
+        offering = liveOfferings.FirstOrDefault(o =>
+            string.Equals(o.OfferingName, req.OfferingName, StringComparison.OrdinalIgnoreCase));
+        if (offering is null)
+        {
+            return Results.Ok(new
+            {
+                verdict = "OFFERING_NOT_FOUND",
+                targetAgent = target,
+                offeringName = req.OfferingName,
+                offeringPriceUsdc = (double?)null,
+                confidence = 0.0,
+                findings = new[]
+                {
+                    new { severity = "error", check = "offering_indexed", message = $"Agent has no offering named '{req.OfferingName}'. Available: {string.Join(", ", liveOfferings.Take(10).Select(o => o.OfferingName))}." }
+                },
+                reputation = (object?)null,
+                checkedAt = nowUtc.ToString("O"),
+                v1Note = "v1 static analysis."
+            });
+        }
+    }
+    else
+    {
+        offering = liveOfferings.OrderBy(o => o.PriceUsdc).First();
+    }
+
+    // Run structural checks against the offering.
+    var findings = new List<object>();
+    int errors = 0, warns = 0;
+
+    // 1. Schema present + parseable.
+    System.Text.Json.JsonElement? reqSchema = null;
+    if (!string.IsNullOrWhiteSpace(offering.RequirementSchemaJson))
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(offering.RequirementSchemaJson);
+            reqSchema = doc.RootElement.Clone();
+            findings.Add(new { severity = "info", check = "schema_present", message = "requirementSchema present and well-formed JSON." });
+        }
+        catch
+        {
+            findings.Add(new { severity = "error", check = "schema_parseable", message = "requirementSchema is present but malformed JSON. Buyer-orchestrators will fail to derive sample requirements." });
+            errors++;
+        }
+    }
+    else
+    {
+        findings.Add(new { severity = "warn", check = "schema_present", message = "requirementSchema missing. Buyer agents cannot pre-validate or auto-fill sample requirements." });
+        warns++;
+    }
+
+    // 2. Required fields list (if schema is present).
+    if (reqSchema is not null)
+    {
+        try
+        {
+            if (reqSchema.Value.TryGetProperty("required", out var reqArr) && reqArr.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                var reqList = reqArr.EnumerateArray().Select(e => e.GetString() ?? "?").ToList();
+                findings.Add(new { severity = "info", check = "required_fields", message = $"Required fields ({reqList.Count}): {string.Join(", ", reqList)}." });
+            }
+            else
+            {
+                findings.Add(new { severity = "info", check = "required_fields", message = "No required-fields list (all params optional)." });
+            }
+        }
+        catch { /* swallow */ }
+    }
+
+    // 3. Price floor — portfolio convention is $0.01 minimum.
+    if (offering.PriceUsdc < 0.01)
+    {
+        findings.Add(new { severity = "error", check = "price_floor", message = $"priceUsdc = {offering.PriceUsdc:F4} (below portfolio $0.01 floor — sub-floor offerings are structurally uneconomic)." });
+        errors++;
+    }
+    else if (offering.PriceUsdc < 0.02)
+    {
+        findings.Add(new { severity = "warn", check = "price_floor", message = $"priceUsdc = {offering.PriceUsdc:F4} (at $0.01 floor — recheck whether the hire-lifecycle overhead justifies this price)." });
+        warns++;
+    }
+    else
+    {
+        findings.Add(new { severity = "info", check = "price_floor", message = $"priceUsdc = {offering.PriceUsdc:F4} (above portfolio floor)." });
+    }
+
+    // 4. Marketplace version.
+    if (string.Equals(offering.MarketplaceVersion, "v2", StringComparison.OrdinalIgnoreCase))
+    {
+        findings.Add(new { severity = "info", check = "marketplace_v2", message = "Offering registered on V2 marketplace." });
+    }
+    else
+    {
+        findings.Add(new { severity = "warn", check = "marketplace_v2", message = $"Offering on {offering.MarketplaceVersion} marketplace — V2 buyer-orchestrators may skip." });
+        warns++;
+    }
+
+    // 5. Description quality.
+    if (string.IsNullOrWhiteSpace(offering.Description) || offering.Description.Length < 80)
+    {
+        findings.Add(new { severity = "warn", check = "description_length", message = $"Description is short ({offering.Description?.Length ?? 0} chars) — Hermes/Butler/Suede rank by description quality." });
+        warns++;
+    }
+    else
+    {
+        findings.Add(new { severity = "info", check = "description_length", message = $"Description length OK ({offering.Description.Length} chars)." });
+    }
+
+    // 6. Sample requirement check (if buyer supplied).
+    if (req.SampleRequirement is not null && reqSchema is not null)
+    {
+        try
+        {
+            if (reqSchema.Value.TryGetProperty("required", out var requiredArr) && requiredArr.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                var missing = new List<string>();
+                foreach (var rf in requiredArr.EnumerateArray())
+                {
+                    var fname = rf.GetString();
+                    if (fname is null) continue;
+                    if (!req.SampleRequirement.ContainsKey(fname)) missing.Add(fname);
+                }
+                if (missing.Count > 0)
+                {
+                    findings.Add(new { severity = "error", check = "sample_required_fields", message = $"Buyer's sampleRequirement is missing required fields: {string.Join(", ", missing)}." });
+                    errors++;
+                }
+                else
+                {
+                    findings.Add(new { severity = "info", check = "sample_required_fields", message = "Buyer's sampleRequirement covers all required fields." });
+                }
+            }
+        }
+        catch { /* swallow */ }
+    }
+
+    // 7. Reputation pull (cached).
+    object? reputation = null;
+    try
+    {
+        var rep = await repRepo.GetAsync(target, nowUtc);
+        if (rep is not null)
+        {
+            reputation = new
+            {
+                score = rep.AgentScore,
+                source = rep.Source,
+                computedAt = rep.ComputedAt.ToString("O")
+            };
+            findings.Add(new { severity = "info", check = "reputation_cached", message = $"Reputation cache score={rep.AgentScore}, computedAt={rep.ComputedAt:O}." });
+        }
+        else
+        {
+            findings.Add(new { severity = "warn", check = "reputation_cached", message = "No cached reputation. Either too new or the warmer hasn't reached this agent." });
+            warns++;
+        }
+    }
+    catch { /* graceful degrade */ }
+
+    // Verdict synthesis.
+    string verdict;
+    double confidence;
+    if (errors > 0)       { verdict = "FAIL"; confidence = 0.7; }
+    else if (warns >= 3)  { verdict = "WARN"; confidence = 0.6; }
+    else if (warns > 0)   { verdict = "WARN"; confidence = 0.7; }
+    else                  { verdict = "PASS"; confidence = 0.82; }
+
+    return Results.Ok(new
+    {
+        verdict,
+        targetAgent = target,
+        offeringName = offering.OfferingName,
+        offeringPriceUsdc = (double?)offering.PriceUsdc,
+        confidence,
+        findings,
+        reputation,
+        checkedAt = nowUtc.ToString("O"),
+        v1Note = "v1 static analysis. v0.2 wires real ACP_Tester hire via docker-ops-sidecar for end-to-end PASS/FAIL with latency + actual deliverable shape match."
+    });
+}).RequireRateLimiting("public-compose");
+
 app.MapPost("/v1/risk/snapshot",
     async (RiskSnapshotRequest req, RiskOrchestrationService svc, CancellationToken ct) =>
 {
@@ -821,6 +1046,66 @@ app.MapPost("/v1/risk/snapshot",
         return Results.BadRequest(new { error = "chain must be 'base' or 'ethereum'" });
     return Results.Ok(await svc.SnapshotAsync(req.Wallet!, req.Chain, ct));
 }).RequireRateLimiting("public-compose");
+
+// R12 Tier PT-P0 — internal cross-bot risk bundle. NOT a marketplace
+// offering, NOT in resources.ts. X-API-Key gated via the /v1/internal
+// path-prefix in the middleware above. Used by ACP_PrivateTrader and any
+// other cross-bot consumer that wants a one-shot reputation + risk + arena
+// participation pack without three round-trips. Fan-out is fire-and-forget
+// on the failure axis — whichever sub-call faults is returned as null and
+// the bundle still serves.
+app.MapPost("/v1/internal/agentRiskBundle", async (
+    AgentRiskBundleRequest req,
+    RiskOrchestrationService riskSvc,
+    AgentReputationCacheRepository repRepo,
+    AgentArenaParticipationRepository arenaRepo,
+    CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Wallet) ||
+        !System.Text.RegularExpressions.Regex.IsMatch(req.Wallet, "^0x[a-fA-F0-9]{40}$"))
+        return Results.BadRequest(new { error = "invalid_address", field = "wallet" });
+    if (req.Chain is not null && req.Chain is not ("base" or "ethereum"))
+        return Results.BadRequest(new { error = "chain must be 'base' or 'ethereum'" });
+
+    var wallet = req.Wallet.ToLowerInvariant();
+    var chain  = req.Chain ?? "base";
+    var nowUtc = DateTime.UtcNow;
+
+    // Fan out: reputation cache read + risk snapshot + arena participation in parallel.
+    // - repRepo.GetAsync returns null for unwarmed agents (≤24h TTL) — that's expected.
+    // - riskSvc.SnapshotAsync runs the full RiskSynthesisService pipeline; can be slow
+    //   (peer fan-out) but errors are surfaced as a degraded payload rather than throwing.
+    // - arenaRepo.GetByAddressAsync returns null for non-Arena-participants.
+    var repTask   = repRepo.GetAsync(wallet, nowUtc);
+    var riskTask  = riskSvc.SnapshotAsync(wallet, chain, ct);
+    var arenaTask = arenaRepo.GetByAddressAsync(wallet);
+
+    try
+    {
+        await Task.WhenAll(repTask, riskTask, arenaTask);
+    }
+    catch
+    {
+        // Per-task status is checked below; bundle still serves with whatever succeeded.
+    }
+
+    return Results.Ok(new
+    {
+        wallet,
+        chain,
+        reputation = repTask.IsCompletedSuccessfully && repTask.Result is not null
+            ? new
+            {
+                score      = repTask.Result.AgentScore,
+                source     = repTask.Result.Source,
+                computedAt = repTask.Result.ComputedAt.ToString("O")
+            }
+            : (object?)null,
+        risk      = riskTask.IsCompletedSuccessfully  ? riskTask.Result  : null,
+        arena     = arenaTask.IsCompletedSuccessfully ? arenaTask.Result : null,
+        bundledAt = nowUtc.ToString("O")
+    });
+});
 
 app.MapPost("/v1/risk/deep-dive",
     async (RiskSnapshotRequest req, RiskOrchestrationService svc, CancellationToken ct) =>
@@ -1725,6 +2010,150 @@ app.MapGet("/v1/resources/riskScoreRubric", () =>
     });
 }).RequireRateLimiting("public-resources");
 
+// ─── R12 Tier 1.1 — witnessedCatalogue ──────────────────────────────────────
+// Pointer to TheWitnessBot's signed manifest of THIS agent's offering catalogue.
+// Free, public, parameterless. Activates the cross-portfolio trust moat.
+const string MetabotAgentAddress   = "0xecf9773b50f01f3a97b087a6ecdf12a71afc558c";
+const string WitnessBotAddress     = "0xc834e81ebe0921fdf9458ac422861df441a6caf9";
+const string WitnessGatewayBase    = "https://api.acp-metabot.dev/witnessbot/v1/resources/manifestByAgent";
+
+app.MapGet("/v1/resources/witnessedCatalogue", () =>
+{
+    return Results.Ok(new
+    {
+        agentAddress = MetabotAgentAddress,
+        agentName = "TheMetaBot",
+        witnessAgent = WitnessBotAddress,
+        witnessGateway = $"{WitnessGatewayBase}?agentAddress={MetabotAgentAddress}",
+        signedManifestUid = (string?)null,
+        signedAt = (string?)null,
+        verificationGuide = "Call witnessGateway. If 200 OK, recover signer with " +
+            "ethers.utils.verifyMessage(catalogueHash, signatureHex) and check " +
+            "the recovered address matches TheWitnessBot's witnessKeyDirectory. " +
+            "If 404, this catalogue has not been witnessed yet (v1 state).",
+        snapshotRefs = new
+        {
+            offerings = "https://app.virtuals.io/acp/agents/" + MetabotAgentAddress,
+            resources = "https://api.acp-metabot.dev/v1/resources"
+        },
+        notes = "v1 returns null signedManifestUid until the first manifest_sign " +
+            "hire is made against TheWitnessBot. v1.1 will populate via " +
+            "cross-bot client.",
+        time = DateTime.UtcNow.ToString("O")
+    });
+}).RequireRateLimiting("public-resources");
+
+// ─── R12 Tier 1.2 — portfolioRollup ─────────────────────────────────────────
+// Single endpoint listing every Oliver-portfolio offering with reputation
+// badges. Halves orchestrator latency vs probing 13 separate agents. Cached
+// in-process for 5 min via a small holder class to keep it cheap.
+{
+    object? cachedRollup = null;
+    DateTime cachedAt = DateTime.MinValue;
+    var rollupLock = new object();
+    const int RollupTtlSeconds = 300;
+
+    app.MapGet("/v1/resources/portfolioRollup", async (
+        AgentReputationCacheRepository repRepo,
+        OfferingRepository offRepo,
+        AgentResourcesRepository resRepo,
+        CancellationToken ct) =>
+    {
+        // Try cache first (read outside lock).
+        var snap = cachedRollup;
+        if (snap is not null && (DateTime.UtcNow - cachedAt).TotalSeconds < RollupTtlSeconds)
+            return Results.Ok(snap);
+
+        // Portfolio addresses — 13 bot agents on V2 marketplace as of 2026-05-20.
+        // Wallet 1 (5/5) + Wallet 2 (5/5) + Wallet 3 (3/5).
+        var portfolio = new (string Name, string Addr, string Bio)[]
+        {
+            ("TheMetaBot",          "0xecf9773b50f01f3a97b087a6ecdf12a71afc558c", "indexer + search + risk orchestrator"),
+            ("TheChainlinkBot",     "0x6f28f51743b912197caeadbc3113c955bb80e738", "Chainlink primitives + reputation feeds"),
+            ("TheOracleBot",        "0x935e97046b10832664d007430c7b7fd310a6236e", "cross-source price-oracle deviation"),
+            ("TheWitnessBot",       "0xc834e81ebe0921fdf9458ac422861df441a6caf9", "cryptographic catalogue provenance"),
+            ("TheSolanaBot",        "0x34235a877ee2da8dc9649d46af6f7463bc2206c2", "first Solana-native ACP agent"),
+            ("TheButlerBridgeBot",  "0xbbd08418d78c0fd4b26117c15221c4cee015f492", "x402 ↔ ACP bridge"),
+            ("EASissuerBot",        "0xe9b0f88f8f27a7033f4f9679e93ebcfe1a78f7fd", "EAS attestation issuer (Base mainnet)"),
+            // Canonical addresses verified 2026-05-20 by per-bot codebase scan.
+            ("TheArenaBot",         "0xa524de81819e213e8bb181fa0b3747a4a6c3a7e3", "Degen Arena leaderboard mirror"),
+            ("TheRevokeBot",        "0xbd9527bdbd61640f544bddd513ed9fcaf9387df8", "wallet approvals scanner + revoke"),
+            ("LiquidGuard",         "0x18362cdc11247ee9e37dea29a1cf21f378ec619f", "Aave/Compound/Morpho HF + LpGuard + PauseSentinel"),
+            ("MEVProtect",          "0x827b2c1de0922314f62bc19554044fd649291ca3", "private mempool + forensics"),
+            ("DeFiEval",            "0x997163304142c3a3ff660ad03069b7d78485ca95", "DeFi-agent evaluator"),
+            ("AgentEval",           "0xb97552998e7ee94ef2a260fdc25529ed93e4902b", "3-niche agent evaluator")
+        };
+
+        var now = DateTime.UtcNow;
+        var rows = new List<object>(portfolio.Length);
+        foreach (var bot in portfolio)
+        {
+            object? rep = null;
+            try
+            {
+                var r = await repRepo.GetAsync(bot.Addr, now);
+                if (r is not null)
+                    rep = new { score = r.AgentScore, computedAt = r.ComputedAt.ToString("O"), source = r.Source };
+            }
+            catch { /* graceful degrade */ }
+
+            List<object> offerings = new();
+            try
+            {
+                var offs = await offRepo.ListByAgentAsync(bot.Addr);
+                offerings = offs
+                    .Where(o => !o.IsRemoved)
+                    .Take(30)
+                    .Select(o => (object)new
+                    {
+                        name = o.OfferingName,
+                        priceUsdc = o.PriceUsdc,
+                        marketplaceVersion = o.MarketplaceVersion
+                    }).ToList();
+            }
+            catch { /* graceful degrade */ }
+
+            List<object> resources = new();
+            try
+            {
+                var ress = await resRepo.ListByAgentAsync(bot.Addr, ct);
+                resources = ress.Take(20).Select(rs => (object)new
+                {
+                    name = rs.Name,
+                    url = rs.Url
+                }).ToList();
+            }
+            catch { /* graceful degrade */ }
+
+            rows.Add(new
+            {
+                botName = bot.Name,
+                agentAddress = bot.Addr,
+                bio = bot.Bio,
+                marketplaceUrl = $"https://app.virtuals.io/acp/agents/{bot.Addr}",
+                reputation = rep,
+                offerings,
+                resources
+            });
+        }
+
+        var view = new
+        {
+            portfolioSize = portfolio.Length,
+            generatedAt = DateTime.UtcNow.ToString("O"),
+            cachedTtlSeconds = RollupTtlSeconds,
+            agents = rows
+        };
+
+        lock (rollupLock)
+        {
+            cachedRollup = view;
+            cachedAt = DateTime.UtcNow;
+        }
+        return Results.Ok(view);
+    }).RequireRateLimiting("public-resources");
+}
+
 // Cross-agent Resource search. LIKE-based match on name + description +
 // agent_name. v1 is fine at the current ~500-row scale; v1.1 may upgrade
 // to FTS5 + a new agent_resources_fts virtual table.
@@ -2159,6 +2588,16 @@ public record RiskSnapshotRequest(string? Wallet, string? Chain);
 public record RiskCompareRequest(string[] Wallets, string? Chain);
 public record RiskWatchRequest(long JobId, string? BuyerAddress, string? Wallet,
     string WebhookUrl, string? Chain);
+
+// R12 Tier PT-P0 — internal cross-bot risk-bundle request. Consumed by
+// /v1/internal/agentRiskBundle; not part of the marketplace surface.
+public record AgentRiskBundleRequest(string Wallet, string? Chain);
+
+// R12 Tier 1.3 — agent_smoke_check DTO
+public record AgentSmokeCheckRequest(
+    string TargetAgent,
+    string? OfferingName,
+    Dictionary<string, object?>? SampleRequirement);
 
 class HeaderedJsonResult : IResult
 {

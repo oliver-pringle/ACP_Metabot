@@ -262,6 +262,35 @@ export const RESOURCES: Record<string, Resource> = {
       "peer fallback policy. Free, parameterless. Lets buyer agents pre-" +
       "validate what risk_snapshot will tell them and decide whether the " +
       "component weights match their use case."
+  },
+
+  // ── R12 Tier 1.1 — Cross-portfolio witness pointer ───────────────────────
+  witnessedCatalogue: {
+    name: "witnessedCatalogue",
+    url: `${PUBLIC_BASE}/v1/resources/witnessedCatalogue`,
+    params: { type: "object", properties: {} },
+    description:
+      "Pointer to TheWitnessBot's signed manifest of this agent's offering " +
+      "catalogue. Returns agentAddress, witnessAgent (TheWitnessBot's address), " +
+      "witnessGateway URL (manifestByAgent prefilled), signedManifestUid (null " +
+      "until first manifest_sign hire), and verificationGuide. Free, public. " +
+      "Lets buyer agents verify this agent's catalogue is witnessed BEFORE " +
+      "paying for any of its offerings."
+  },
+
+  // ── R12 Tier 1.2 — Portfolio rollup for orchestrators ────────────────────
+  portfolioRollup: {
+    name: "portfolioRollup",
+    url: `${PUBLIC_BASE}/v1/resources/portfolioRollup`,
+    params: { type: "object", properties: {} },
+    description:
+      "Single endpoint listing every Oliver-portfolio offering keyed by bot " +
+      "with reputation/Arena badges. Hermes / Butler / Orion crawl this " +
+      "instead of probing 13 separate agents. Includes 13 portfolio bots " +
+      "(TheMetaBot, TheChainlinkBot, TheOracleBot, TheWitnessBot, TheSolanaBot, " +
+      "TheButlerBridgeBot, EASissuerBot, TheArenaBot, TheRevokeBot, " +
+      "LiquidGuard, MEVProtect, DeFiEval, AgentEval). Free, public, " +
+      "parameterless. Cached 5 min."
   }
 };
 

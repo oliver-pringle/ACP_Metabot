@@ -23,6 +23,8 @@ import { marketplaceGap } from "./marketplaceGap.js";
 // v1.9 TheMetaBot's first recurring tier — daily marketplace digest pushed
 // via HMAC webhook on the BasicSubscriptionBot pattern.
 import { marketplacePulseSub } from "./marketplacePulseSub.js";
+// R12 Tier 1.3 — productises ACP_Tester test-hire primitive as $0.10 offering.
+import { agentSmokeCheck } from "./agentSmokeCheck.js";
 
 // v1.7.2: search / searchAgents / browseAgent moved from paid offerings to
 // free Resources (see acp-v2/src/resources.ts). The $0.01 price floor was
@@ -54,6 +56,9 @@ export const OFFERINGS: Record<string, Offering> = {
   marketplaceGap,
   // v1.9 marketplace pulse subscription ($4.00 / 30 days daily digest)
   marketplacePulseSub,
+  // R12 Tier 1.3 — agent_smoke_check ($0.10) — static-analysis smoke test
+  // for any V2 agent's offering. v0.2 wires real-hire via docker-ops-sidecar.
+  agent_smoke_check: agentSmokeCheck,
 };
 
 export function getOffering(name: string): Offering | undefined {

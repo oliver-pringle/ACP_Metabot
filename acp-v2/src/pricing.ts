@@ -34,6 +34,9 @@ const PRICE_USDC: Record<string, number> = {
   // ~15% above today's per-call price (per the portfolio subscription
   // gradient principle in memory project_acp_pricing_review_shipped.md).
   marketplacePulseSub: 4.00,
+  // R12 Tier 1.3 — static-analysis smoke check. $0.10 = 2× preHireBudgetCheck
+  // because this returns a verdict, not just a price tally.
+  agent_smoke_check: 0.10,
 };
 
 const DEFAULT_PRICE_USDC = 0.01;

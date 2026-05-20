@@ -297,6 +297,14 @@ export interface ApiClient {
     webhookUrl: string;
     marketplace?: "v1" | "v2" | "both";
   }): Promise<unknown>;
+
+  // R12 Tier 1.3 — agent_smoke_check: static-analysis smoke test for any
+  // V2 ACP agent's offering. v0.2 wires real-hire via docker-ops-sidecar.
+  agentSmokeCheck(req: {
+    targetAgent: string;
+    offeringName?: string;
+    sampleRequirement?: Record<string, unknown>;
+  }): Promise<unknown>;
 }
 
 export function createApiClient(
@@ -416,6 +424,13 @@ export function createApiClient(
     // v1.9 marketplacePulseSub
     marketplacePulseSub: (req) =>
       request<unknown>("/v1/marketplace/pulse/subscribe", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+
+    // R12 Tier 1.3 — agentSmokeCheck
+    agentSmokeCheck: (req) =>
+      request<unknown>("/v1/smoke/check", {
         method: "POST",
         body: JSON.stringify(req),
       }),
