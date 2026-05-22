@@ -17,6 +17,11 @@ namespace ACP_Metabot.Api.Services;
 // Default OFF (`RiskWatch:Worker:Enabled=true` flag) — same flip-on-when-
 // ready convention as ReputationFeedPublisherWorker so the offering can be
 // callable / hireable before the worker is activated.
+//
+// Delivery goes through SafeWebhookHttpClient — every tick re-validates the
+// webhook URL (defends DNS rebinding between registration and N-hours-later
+// delivery) and disables auto-redirects so a buyer-supplied 302 cannot
+// escape into 169.254.169.254 / RFC1918 / loopback.
 public sealed class RiskWatchWorker : BackgroundService
 {
     private static readonly TimeSpan DefaultPollInterval = TimeSpan.FromMinutes(5);
@@ -60,8 +65,7 @@ public sealed class RiskWatchWorker : BackgroundService
         await using var scope = _scopes.CreateAsyncScope();
         var subs = scope.ServiceProvider.GetRequiredService<RiskSubscriptionRepository>();
         var synth = scope.ServiceProvider.GetRequiredService<RiskSynthesisService>();
-        var http = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>().CreateClient();
-        http.Timeout = TimeSpan.FromSeconds(10);
+        var safeHttp = scope.ServiceProvider.GetRequiredService<SafeWebhookHttpClient>();
 
         var due = await subs.GetDueAsync(DateTime.UtcNow, BatchSize);
         if (due.Count == 0) return;
@@ -69,14 +73,14 @@ public sealed class RiskWatchWorker : BackgroundService
 
         foreach (var sub in due)
         {
-            try { await ProcessOneAsync(sub, subs, synth, http, ct); }
+            try { await ProcessOneAsync(sub, subs, synth, safeHttp, ct); }
             catch (Exception ex) { _log.LogError(ex, "[risk-watch] sub {Id} failed", sub.Id); }
         }
     }
 
     private async Task ProcessOneAsync(
         RiskSubscription sub, RiskSubscriptionRepository subs,
-        RiskSynthesisService synth, HttpClient http, CancellationToken ct)
+        RiskSynthesisService synth, SafeWebhookHttpClient safeHttp, CancellationToken ct)
     {
         var snap = await synth.ComputeAsync(sub.WalletAddress, sub.Chain, ct);
         var snapJson = JsonSerializer.Serialize(RiskOrchestrationService.SerialiseSnapshot(snap));
@@ -122,19 +126,27 @@ public sealed class RiskWatchWorker : BackgroundService
         string? error = null;
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Post, sub.WebhookUrl);
-            req.Content = new StringContent(payload, Encoding.UTF8);
-            req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-            req.Headers.Add("X-Subscription-Id", sub.Id);
-            req.Headers.Add("X-Subscription-Tick", tickNumber.ToString());
-            req.Headers.Add("X-Subscription-Timestamp", ts.ToString());
-            req.Headers.Add("X-Subscription-Signature", sig);
-            using var resp = await http.SendAsync(req, ct);
-            ok = (int)resp.StatusCode is >= 200 and < 300;
-            if (!ok) error = $"HTTP {(int)resp.StatusCode}";
+            ok = await safeHttp.SendWithValidatedRedirectsAsync(
+                sub.WebhookUrl,
+                hopUrl =>
+                {
+                    var req = new HttpRequestMessage(HttpMethod.Post, hopUrl)
+                    {
+                        Content = new StringContent(payload, Encoding.UTF8),
+                    };
+                    req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+                    req.Headers.Add("X-Subscription-Id", sub.Id);
+                    req.Headers.Add("X-Subscription-Tick", tickNumber.ToString());
+                    req.Headers.Add("X-Subscription-Timestamp", ts.ToString());
+                    req.Headers.Add("X-Subscription-Signature", sig);
+                    return req;
+                },
+                requestTimeout: TimeSpan.FromSeconds(10),
+                ct: ct);
+            if (!ok) error = "delivery failed (SSRF guard, non-2xx, or timeout)";
         }
-        catch (TaskCanceledException) when (!ct.IsCancellationRequested) { error = "timeout"; }
         catch (HttpRequestException ex) { error = $"http: {ex.Message}"; }
+        catch (TaskCanceledException) when (!ct.IsCancellationRequested) { error = "timeout"; }
 
         var nextRunAt = DateTime.UtcNow.AddDays(1);
         var windowComplete = tickNumber >= sub.TicksPurchased;

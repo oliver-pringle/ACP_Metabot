@@ -12,7 +12,7 @@ namespace ACP_Metabot.Api.Services;
 // /digest snapshot instead of a /risk-snapshot.
 //
 // Workflow:
-//   1. Buyer hires marketplacePulseSub → /v1/marketplace/pulse/subscribe
+//   1. Buyer hires marketplacePulseSub → /v1/internal/marketplace/pulse/subscribe
 //      with jobId + buyerAddress + webhookUrl.
 //   2. CreateAsync persists the row, generates a one-shot webhookSecret
 //      (returned in the response; sidecar surfaces it to the buyer ONCE).
@@ -25,18 +25,18 @@ public class MarketplacePulseService
 
     private readonly PulseSubscriptionRepository _repo;
     private readonly DigestService _digests;
-    private readonly IHttpClientFactory _httpFactory;
+    private readonly SafeWebhookHttpClient _safeHttp;
     private readonly ILogger<MarketplacePulseService> _log;
 
     public MarketplacePulseService(
         PulseSubscriptionRepository repo,
         DigestService digests,
-        IHttpClientFactory httpFactory,
+        SafeWebhookHttpClient safeHttp,
         ILogger<MarketplacePulseService> log)
     {
         _repo = repo;
         _digests = digests;
-        _httpFactory = httpFactory;
+        _safeHttp = safeHttp;
         _log = log;
     }
 
@@ -48,9 +48,16 @@ public class MarketplacePulseService
             throw new ArgumentException("buyerAddress required");
         if (string.IsNullOrWhiteSpace(req.WebhookUrl))
             throw new ArgumentException("webhookUrl required");
-        if (!Uri.TryCreate(req.WebhookUrl, UriKind.Absolute, out var uri) ||
-            uri.Scheme != Uri.UriSchemeHttps)
-            throw new ArgumentException("webhookUrl must be https://");
+
+        // Full SSRF guard at registration — was previously only a scheme
+        // check, which allowed `https://attacker.example/redirect` that 302s
+        // into 169.254.169.254 / RFC1918 / loopback. The named HttpClient at
+        // delivery time used to follow redirects by default, so the prefix
+        // check was not sufficient. Delivery now also re-validates each hop
+        // via SafeWebhookHttpClient (defends DNS rebinding too).
+        var urlCheck = await WebhookUrlValidator.ValidateAsync(req.WebhookUrl, ct);
+        if (!urlCheck.Ok)
+            throw new ArgumentException(urlCheck.Reason ?? "webhookUrl rejected by SSRF guard");
 
         var marketplace = NormalizeMarketplace(req.Marketplace);
         var now = DateTime.UtcNow;
@@ -143,6 +150,10 @@ public class MarketplacePulseService
     //   t=<unix-seconds>,v1=<hex-hmac-sha256(t + "." + body, secret)>
     // RevokeBot and v1.8 risk_watch use the same shape, so buyer-side
     // verifiers written once work across every Metabot/portfolio subscription.
+    //
+    // Delivery goes through SafeWebhookHttpClient so the URL + every redirect
+    // hop is re-validated through WebhookUrlValidator (catches DNS rebinding
+    // between registration and tick time, and 302s into private IPs).
     private async Task<bool> PostSignedAsync(string url, string secret, string body,
         CancellationToken ct)
     {
@@ -152,29 +163,20 @@ public class MarketplacePulseService
             Encoding.UTF8.GetBytes($"{ts}.{body}"));
         var sigHex = Convert.ToHexString(sigBytes).ToLowerInvariant();
 
-        using var http = _httpFactory.CreateClient("pulse-sub-webhook");
-        http.Timeout = TimeSpan.FromSeconds(15);
-        using var content = new StringContent(body, Encoding.UTF8, "application/json");
-        using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
-        req.Headers.TryAddWithoutValidation("X-Signature", $"t={ts},v1={sigHex}");
-        req.Headers.UserAgent.TryParseAdd("ACP_Metabot/1.9 (marketplacePulseSub)");
-
-        try
-        {
-            using var resp = await http.SendAsync(req, ct);
-            if (!resp.IsSuccessStatusCode)
+        return await _safeHttp.SendWithValidatedRedirectsAsync(
+            url,
+            hopUrl =>
             {
-                _log.LogWarning("[pulse-sub] webhook {Url} returned {Status}", url, resp.StatusCode);
-                return false;
-            }
-            return true;
-        }
-        catch (TaskCanceledException) { return false; }
-        catch (HttpRequestException ex)
-        {
-            _log.LogWarning(ex, "[pulse-sub] webhook {Url} threw", url);
-            return false;
-        }
+                var req = new HttpRequestMessage(HttpMethod.Post, hopUrl)
+                {
+                    Content = new StringContent(body, Encoding.UTF8, "application/json"),
+                };
+                req.Headers.TryAddWithoutValidation("X-Signature", $"t={ts},v1={sigHex}");
+                req.Headers.UserAgent.TryParseAdd("ACP_Metabot/1.9 (marketplacePulseSub)");
+                return req;
+            },
+            requestTimeout: TimeSpan.FromSeconds(15),
+            ct: ct);
     }
 
     public static string ComputeSha256(string s)

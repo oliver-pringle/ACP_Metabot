@@ -414,16 +414,20 @@ export function createApiClient(
       request<unknown>("/v1/risk/compare", { method: "POST", body: JSON.stringify(req) }),
     riskAttestation: (req) =>
       request<unknown>("/v1/risk/attestation", { method: "POST", body: JSON.stringify(req) }),
+    // /v1/internal/* — INTERNAL_API_KEY gated. The sidecar already sends
+    // X-API-Key on every call (see request() default headers). Moved out of
+    // the public /v1/* surface to refuse subscription creation from anyone
+    // who can't prove they paid escrow.
     dailyRiskWatch: (req) =>
-      request<unknown>("/v1/risk/watch", { method: "POST", body: JSON.stringify(req) }),
+      request<unknown>("/v1/internal/risk/watch", { method: "POST", body: JSON.stringify(req) }),
 
     // v1.9 marketplaceGap
     marketplaceGap: (req) =>
       request<unknown>("/v1/marketplace/gap", { method: "POST", body: JSON.stringify(req) }),
 
-    // v1.9 marketplacePulseSub
+    // v1.9 marketplacePulseSub — /v1/internal/* (escrow-gated, see above).
     marketplacePulseSub: (req) =>
-      request<unknown>("/v1/marketplace/pulse/subscribe", {
+      request<unknown>("/v1/internal/marketplace/pulse/subscribe", {
         method: "POST",
         body: JSON.stringify(req),
       }),

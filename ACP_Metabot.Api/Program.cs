@@ -136,6 +136,12 @@ builder.Services.AddSingleton<SearchService>();
 builder.Services.AddSingleton<CrossPresenceBuilder>();
 builder.Services.AddSingleton<AgentSearchService>();
 builder.Services.AddSingleton<StackComposerService>();
+// SSRF-safe outbound HTTP primitive — shared by WebhookDeliveryService,
+// MarketplacePulseService, and RiskWatchWorker. Owns one HttpClient with
+// AllowAutoRedirect=false and per-hop WebhookUrlValidator. Must be a
+// singleton: HttpClient instances are intended to be long-lived, and the
+// SocketsHttpHandler connection pool is what makes per-tick delivery fast.
+builder.Services.AddSingleton<SafeWebhookHttpClient>();
 builder.Services.AddSingleton<WebhookDeliveryService>();
 builder.Services.AddSingleton<WatchService>();
 
@@ -395,6 +401,21 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseForwardedHeaders();
+
+// Defence-in-depth HSTS. Caddy is the only public ingress (terminates TLS
+// at api.acp-metabot.dev) and the C# API never publishes ports to the host,
+// so the practical attack surface is "someone misconfigures the reverse
+// proxy to forward HTTP". HSTS is a header — it cannot make the app
+// downgrade-safe by itself, but once a browser-style buyer client has seen
+// it once, it pins the host to HTTPS for the max-age window. UseHttpsRedirection
+// is intentionally NOT added because the container only listens on the HTTP
+// loopback port (Caddy does TLS) — calling it would be a no-op or worse,
+// loop.
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHsts();
+}
+
 app.UseRateLimiter();
 
 // Operator metrics: record every request (including 429s and 401s) into
@@ -409,12 +430,20 @@ app.UseMiddleware<RequestMetricsMiddleware>();
 // auth'd requests. Set INTERNAL_API_KEY in the environment for both this
 // container and the sidecar.
 //
-// Exception within /v1/*: /v1/agents/active and /v1/internal/* are internal
-// cross-bot endpoints (consumed over the acp-shared docker network — e.g.
-// ACP_ChainlinkBot calls /v1/agents/active to enumerate agents and
-// /v1/internal/agentReputation to read cached scores without hitting the
-// per-IP public rate limiter). They MUST require X-API-Key — unlike the
-// other /v1/* paths they are never reached from the public Caddy gateway.
+// Exception within /v1/*: /v1/agents/active and /v1/internal/* are
+// authenticated endpoints. /v1/internal/* covers two kinds of caller:
+//
+//   1. Cross-bot reads over the acp-shared docker bridge (e.g.
+//      ChainlinkBot reads /v1/internal/agentReputation without hitting
+//      the per-IP public rate limit).
+//   2. Sidecar-driven subscription creation
+//      (/v1/internal/marketplace/pulse/subscribe,
+//       /v1/internal/risk/watch). These mutate state and schedule
+//      background work; only the ACP sidecar — which has proven escrow
+//      lock — should be allowed to call them. Treating them as public
+//      /v1/* would be a cost-abuse + free-subscription bypass.
+//
+// All /v1/internal/* paths require X-API-Key.
 var apiKey = builder.Configuration["INTERNAL_API_KEY"];
 var apiKeyBytes = string.IsNullOrEmpty(apiKey)
     ? Array.Empty<byte>()
@@ -784,13 +813,19 @@ app.MapPost("/v1/marketplace/gap",
 // OFF) — flip MarketplacePulse:Worker:Enabled=true after first hire and the
 // docker compose up. /admin/pulse/tick-now lets the operator drive a one-shot
 // tick for verification without waiting 24h.
-app.MapPost("/v1/marketplace/pulse/subscribe",
+//
+// Sub-creation is /v1/internal/* — gated by INTERNAL_API_KEY so only the ACP
+// sidecar (which knows the buyer paid escrow before invoking) can create a
+// subscription row. The previous /v1/marketplace/pulse/subscribe route was
+// publicly callable and would let anyone schedule a 30-day daily-tick worker
+// against an arbitrary webhookUrl without payment proof (cost-abuse risk).
+app.MapPost("/v1/internal/marketplace/pulse/subscribe",
     async (CreatePulseSubscriptionRequest req, MarketplacePulseService svc,
         CancellationToken ct) =>
 {
     try { return Results.Ok(await svc.CreateAsync(req, ct)); }
     catch (ArgumentException ex) { return Results.BadRequest(new { error = ex.Message }); }
-}).RequireRateLimiting("public-compose");
+});
 
 app.MapPost("/admin/pulse/tick-now",
     async (MarketplacePulseWorker worker, CancellationToken ct) =>
@@ -1137,7 +1172,12 @@ app.MapPost("/v1/risk/attestation",
     return Results.Ok(await svc.AttestationAsync(req.Wallet!, req.Chain, ct));
 }).RequireRateLimiting("public-compose");
 
-app.MapPost("/v1/risk/watch",
+// Sub-creation is /v1/internal/* — gated by INTERNAL_API_KEY so only the ACP
+// sidecar (which knows the buyer paid escrow before invoking) can create a
+// risk-watch subscription. The previous /v1/risk/watch route was publicly
+// callable and would let anyone schedule a 30-day daily-tick worker against
+// an arbitrary wallet+webhookUrl without payment proof.
+app.MapPost("/v1/internal/risk/watch",
     async (RiskWatchRequest req, RiskOrchestrationService svc, CancellationToken ct) =>
 {
     if (req.JobId <= 0) return Results.BadRequest(new { error = "jobId required" });
@@ -1150,15 +1190,16 @@ app.MapPost("/v1/risk/watch",
 
     // Full SSRF guard — was previously a `StartsWith("https://")` prefix-only
     // check, which let an attacker register `https://attacker/redirect` that
-    // 302s into 169.254.169.254 / loopback / RFC1918. RiskWatchWorker's default
-    // HttpClient follows redirects, so the prefix check is not sufficient.
-    // Matches the gate `/watches` already applied (Program.cs:2036).
+    // 302s into 169.254.169.254 / loopback / RFC1918. RiskWatchWorker now
+    // delivers through SafeWebhookHttpClient which re-validates each hop,
+    // but registration-time fail-fast is still the right place to refuse
+    // bad URLs before persisting state.
     var urlCheck = await WebhookUrlValidator.ValidateAsync(req.WebhookUrl ?? "", ct);
     if (!urlCheck.Ok)
         return Results.BadRequest(new { error = urlCheck.Reason });
 
     return Results.Ok(await svc.CreateWatchAsync(req.JobId, req.BuyerAddress!, req.Wallet!, req.WebhookUrl!, req.Chain));
-}).RequireRateLimiting("public-compose");
+});
 app.MapGet("/v1/agentReputation", async ([FromQuery] string agent,
     ReputationService reputation) =>
 {
