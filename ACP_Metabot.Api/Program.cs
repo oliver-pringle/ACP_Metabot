@@ -405,15 +405,21 @@ app.UseForwardedHeaders();
 // Defence-in-depth HSTS. Caddy is the only public ingress (terminates TLS
 // at api.acp-metabot.dev) and the C# API never publishes ports to the host,
 // so the practical attack surface is "someone misconfigures the reverse
-// proxy to forward HTTP". HSTS is a header — it cannot make the app
-// downgrade-safe by itself, but once a browser-style buyer client has seen
-// it once, it pins the host to HTTPS for the max-age window. UseHttpsRedirection
-// is intentionally NOT added because the container only listens on the HTTP
-// loopback port (Caddy does TLS) — calling it would be a no-op or worse,
-// loop.
+// proxy to forward HTTP". Emitted unconditionally on non-Development —
+// app.UseHsts() defers to Request.IsHttps, which depends on
+// ForwardedHeaders applying X-Forwarded-Proto from Caddy at the right
+// point in the pipeline; safer to just always emit, since this container
+// is never directly exposed without TLS termination upstream.
+// UseHttpsRedirection is intentionally NOT added because the container only
+// listens on plain HTTP inside the docker bridge — a redirect would loop.
 if (!app.Environment.IsDevelopment())
 {
-    app.UseHsts();
+    app.Use(async (ctx, next) =>
+    {
+        ctx.Response.Headers["Strict-Transport-Security"]
+            = "max-age=31536000; includeSubDomains";
+        await next();
+    });
 }
 
 app.UseRateLimiter();
