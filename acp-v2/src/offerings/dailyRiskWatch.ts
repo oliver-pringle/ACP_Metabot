@@ -41,13 +41,27 @@ export const dailyRiskWatch: Offering = {
   slaMinutes: 5,
   deliverableSchema: {
     type: "object",
-    required: ["subscriptionId", "walletAddress", "cadence", "chain", "firstTickAt"],
+    required: [
+      "subscriptionId",
+      "webhookSecret",
+      "walletAddress",
+      "cadence",
+      "chain",
+      "firstTickAt",
+      "ticksPurchased",
+      "expiresAt",
+    ],
     description:
-      "Subscription receipt returned at hire time. Daily push payloads are POSTed to the buyer's webhookUrl by the RiskWatchWorker, NOT included in this payload. The webhook body includes { tick, snapshot, diff, alert } and is signed with HMAC-SHA256 using the secret returned alongside this receipt out-of-band.",
+      "Subscription receipt returned at hire time. Includes the webhookSecret (returned ONCE — store securely; not retrievable later). Daily push payloads are POSTed to the buyer's webhookUrl by the RiskWatchWorker, NOT included in this payload. Webhook body shape: { subscriptionId, tick, cadence, snapshot, diff }. Signed with HMAC-SHA256(webhookSecret, `${tick}.${timestamp}.${body}`) and surfaced on the X-Subscription-Signature header (prefix 'sha256=').",
     properties: {
       subscriptionId: {
         type: "string",
-        description: "Opaque id used to look up the subscription on /v1/risk-watch/{id}.",
+        description: "Opaque id (riskwatch_<32hex>). Use for later lookups.",
+      },
+      webhookSecret: {
+        type: "string",
+        description:
+          "Per-subscription HMAC secret (64-hex chars). Returned ONCE on the hire receipt. Verify each push with HMAC-SHA256(webhookSecret, `${tick}.${timestamp}.${body}`); compare hex-equal to the X-Subscription-Signature header value (strip the 'sha256=' prefix).",
       },
       walletAddress: {
         type: "string",
@@ -68,14 +82,26 @@ export const dailyRiskWatch: Offering = {
         format: "date-time",
         description: "ISO-8601 UTC moment when the first webhook push is scheduled.",
       },
+      ticksPurchased: {
+        type: "integer",
+        description: "Number of daily ticks included in the $5 bundle. Fixed at 30 in v1.",
+      },
+      expiresAt: {
+        type: "string",
+        format: "date-time",
+        description: "ISO-8601 UTC moment when the subscription window ends.",
+      },
     },
   },
   deliverableExample: {
     subscriptionId: "riskwatch_01HF8K9R3X2Y4Z6N7M5P9Q8B1V",
+    webhookSecret: "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
     walletAddress: "0x693a237221e760bc7ff4968b74e25dca17234633",
     cadence: "daily",
     chain: "base",
     firstTickAt: "2026-05-14T02:00:00Z",
+    ticksPurchased: 30,
+    expiresAt: "2026-06-13T16:09:05Z",
   },
   validate(req) {
     const w = requireString(req.wallet, "wallet", 128);

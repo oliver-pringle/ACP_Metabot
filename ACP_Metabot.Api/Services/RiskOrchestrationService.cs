@@ -279,9 +279,11 @@ public sealed class RiskOrchestrationService
         return new
         {
             subscriptionId = id,
-            // Buyer is given the secret on the receipt only — it is never
-            // serialised again to the DB readout endpoints.
-            secret,
+            // Field name `webhookSecret` matches marketplacePulseSub for buyer
+            // verifier code-reuse across portfolio subscription tiers. Buyer
+            // gets it on the receipt only — never serialised to readout
+            // endpoints (SubscriptionView omits it).
+            webhookSecret = secret,
             walletAddress = wallet.ToLowerInvariant(),
             cadence = "daily",
             chain = chainNorm,
