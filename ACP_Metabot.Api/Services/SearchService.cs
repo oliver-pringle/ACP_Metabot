@@ -14,6 +14,7 @@ public class SearchService
     private readonly SaturationCalculator _saturation;
     private readonly PricePercentileCalculator _pricePercentile;
     private readonly QueryExpander _expander;
+    private readonly LlmQueryRewriter _rewriter;
     private readonly ILogger<SearchService> _logger;
 
     // Pool size for the rerank pass. The reranker is much more expensive
@@ -103,6 +104,7 @@ public class SearchService
         SaturationCalculator saturation,
         PricePercentileCalculator pricePercentile,
         QueryExpander expander,
+        LlmQueryRewriter rewriter,
         ILogger<SearchService> logger)
     {
         _repo = repo;
@@ -114,6 +116,7 @@ public class SearchService
         _saturation = saturation;
         _pricePercentile = pricePercentile;
         _expander = expander;
+        _rewriter = rewriter;
         _logger = logger;
     }
 
@@ -267,15 +270,44 @@ public class SearchService
     {
         var expansion = _expander.Expand(query ?? string.Empty);
         var safeFilters = filters ?? new SearchFilters();
+
+        // v1.10 Phase 3: LLM query rewriter — opt-in via filters.Expand=true.
+        // Degraded paths in the rewriter (cap breached, key missing, LLM error)
+        // return passthrough + empty synonyms so the glossary-only expanded set
+        // is left intact. When synonyms ARE returned, they're merged with the
+        // Phase 1 glossary expander's synonym set using the same union pattern
+        // Phase 1 T3 used for the BM25 per-term lookup — the inner SearchAsync
+        // overload picks them up.
+        if (safeFilters.Expand)
+        {
+            var rewriterResult = await _rewriter.RewriteAsync(query ?? string.Empty, ct);
+            if (rewriterResult.Synonyms.Count > 0)
+            {
+                var merged = new List<string>(expansion.Synonyms);
+                foreach (var s in rewriterResult.Synonyms)
+                {
+                    if (!merged.Contains(s, StringComparer.OrdinalIgnoreCase))
+                        merged.Add(s);
+                }
+                var mergedHits = new List<string>(expansion.GlossaryHits);
+                foreach (var s in rewriterResult.Synonyms)
+                    mergedHits.Add($"rewriter → {s}");
+                expansion = new ExpandedQuery(expansion.Primary, merged, mergedHits);
+            }
+        }
+
         var effectivePriceMax = safeFilters.MaxPriceUsd is double mp
             ? Math.Min(priceMaxUsdc, mp)
             : priceMaxUsdc;
         // Fetch a generous candidate pool pre-filter so that negative filters
         // applied below don't starve the paginated window. 200 mirrors
         // DensePoolSize so we never lose ranking signal we already paid for.
+        // Pass the pre-computed expansion (with any rewriter synonyms merged in)
+        // so the BM25 leg picks them up — avoids re-expanding the query inside
+        // SearchAsync and losing the rewriter's contribution.
         var raw = await SearchAsync(query ?? string.Empty, limit: 200, offset: 0,
             minScore, effectivePriceMax, staleAfterDays, rerank, categoryFilter,
-            chainFilter, minReputation, marketplaceFilter, ct);
+            chainFilter, minReputation, marketplaceFilter, expansion, ct);
         IReadOnlyList<OfferingMatch> filtered = ApplyNegativeFilters(raw, safeFilters);
 
         // v1.10 Phase 2: schema-facet intersection. Drops offerings whose
@@ -306,11 +338,29 @@ public class SearchService
     /// taking <paramref name="limit"/>. The blended-and-reranked ordering is
     /// preserved: pagination operates on the final, sorted candidate list.
     /// </summary>
-    public async Task<IReadOnlyList<OfferingMatch>> SearchAsync(
+    public Task<IReadOnlyList<OfferingMatch>> SearchAsync(
         string query, int limit, int offset, double minScore, double priceMaxUsdc,
         int? staleAfterDays, bool rerank, string? categoryFilter,
         HashSet<string>? chainFilter, int? minReputation,
         string? marketplaceFilter,
+        CancellationToken ct)
+        => SearchAsync(query, limit, offset, minScore, priceMaxUsdc, staleAfterDays,
+            rerank, categoryFilter, chainFilter, minReputation, marketplaceFilter,
+            preComputedExpansion: null, ct);
+
+    /// <summary>
+    /// v1.10 Phase 3 overload — accepts a pre-computed ExpandedQuery so the
+    /// caller (typically SearchWithFiltersAsync) can merge LLM-rewriter
+    /// synonyms into the BM25 per-term lookup. When null, the expander is
+    /// invoked internally exactly as in Phase 1 — preserving backwards
+    /// compatibility for the public SearchAsync entry points.
+    /// </summary>
+    private async Task<IReadOnlyList<OfferingMatch>> SearchAsync(
+        string query, int limit, int offset, double minScore, double priceMaxUsdc,
+        int? staleAfterDays, bool rerank, string? categoryFilter,
+        HashSet<string>? chainFilter, int? minReputation,
+        string? marketplaceFilter,
+        ExpandedQuery? preComputedExpansion,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query))
@@ -323,7 +373,12 @@ public class SearchService
         // queries (e.g. "ape" → "yield farming") surface relevant offerings
         // even when the original term isn't in the offering text.
         // glossaryHits will be surfaced by T5 in the response envelope.
-        var expanded = _expander.Expand(query);
+        //
+        // v1.10 Phase 3: when SearchWithFiltersAsync supplied a pre-computed
+        // expansion (containing rewriter-merged synonyms), use it directly so
+        // the BM25 per-term loop picks up the LLM's contribution. Otherwise
+        // expand the query in-place as before.
+        var expanded = preComputedExpansion ?? _expander.Expand(query);
 
         var queryEmb = await _embedder.EmbedQueryAsync(query, ct);
         var corpus = Volatile.Read(ref _corpus);

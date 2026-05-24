@@ -150,6 +150,11 @@ builder.Services.AddSingleton<QueryExpander>(_ =>
     }
     return QueryExpander.LoadFromFile(path);
 });
+// v1.10 Phase 3: Claude-backed query rewriter. Opt-in via filters.Expand=true
+// on /search; falls through to passthrough on degraded paths (cap breached,
+// key missing, LLM error). All deps already registered: IClaudeClient (line 101),
+// Db (default container), IConfiguration (framework-provided).
+builder.Services.AddSingleton<LlmQueryRewriter>();
 builder.Services.AddSingleton<SearchService>();
 builder.Services.AddSingleton<CrossPresenceBuilder>();
 builder.Services.AddSingleton<AgentSearchService>();
@@ -708,6 +713,13 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc,
         {
             glossaryHits = expansion.GlossaryHits,
             synonymQueries = expansion.Synonyms,
+            // v1.10 Phase 3: best-effort echo of the rewriter cost when
+            // filters.Expand=true. Estimated per-call cost (Haiku 4.5,
+            // ~250 in + ~150 out tokens). When the rewriter degrades
+            // (daily cap breached / key missing / LLM error) the call is
+            // skipped and the actual cost is $0 — this field is a hint
+            // for callers, not a billing source of truth.
+            rewriterCostUsd = filters.Expand ? 0.0008 : 0.0,
         },
         filtersApplied = new
         {
