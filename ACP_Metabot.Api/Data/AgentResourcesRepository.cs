@@ -156,6 +156,74 @@ public sealed class AgentResourcesRepository
     }
 
     /// <summary>
+    /// v1.10 Phase 1: FTS5-aware search. Uses the resources_fts mirror table
+    /// (kept fresh by triggers on agent_resources INSERT/UPDATE/DELETE — see
+    /// Db.cs migration). Falls back to LIKE-based <see cref="SearchAsync"/>
+    /// when the FTS table is empty (cold-start before the trigger backfill
+    /// takes effect) or when the query parses badly under FTS5 syntax.
+    ///
+    /// The user query is phrase-quoted before being passed to FTS5 to prevent
+    /// caller input from being interpreted as FTS operators (NEAR/AND/OR,
+    /// column filters etc.). On any SqliteException raised by the MATCH —
+    /// e.g. a residual parse error from a pathological input — we degrade
+    /// gracefully to the LIKE path so the caller always gets a sane result
+    /// set.
+    /// </summary>
+    public async Task<IReadOnlyList<AgentResourceRow>> SearchHybridAsync(
+        string query, int limit, string? marketplaceFilter, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query) || limit <= 0) return Array.Empty<AgentResourceRow>();
+
+        await using var conn = _db.OpenConnection();
+
+        // Cheap probe: is resources_fts populated? If not, take the LIKE path.
+        // This handles the cold-start window before the v1.10 backfill has run
+        // (and is a no-op safety net forever after).
+        await using (var probe = conn.CreateCommand())
+        {
+            probe.CommandText = "SELECT COUNT(*) FROM resources_fts;";
+            var n = Convert.ToInt64(await probe.ExecuteScalarAsync(ct) ?? 0L);
+            if (n == 0)
+                return await SearchAsync(query, limit, marketplaceFilter, ct);
+        }
+
+        // Phrase-quote the query to neutralise FTS5 operator parsing on
+        // caller input. Internal double-quotes are escaped by doubling.
+        var safe = "\"" + query.Trim().Replace("\"", "\"\"") + "\"";
+        var mvFilter = string.IsNullOrWhiteSpace(marketplaceFilter)
+            ? ""
+            : "AND r.marketplace_version = $mv ";
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT r.id, r.agent_address, r.agent_name, r.name, r.url, r.params_json,
+                   r.description, r.marketplace_version, r.first_seen_at, r.last_seen_at
+            FROM resources_fts
+            JOIN agent_resources r ON r.id = resources_fts.resource_id
+            WHERE resources_fts MATCH $q " + mvFilter + @"
+            ORDER BY rank
+            LIMIT $lim;";
+        cmd.Parameters.AddWithValue("$q", safe);
+        cmd.Parameters.AddWithValue("$lim", limit);
+        if (!string.IsNullOrWhiteSpace(marketplaceFilter))
+            cmd.Parameters.AddWithValue("$mv", marketplaceFilter);
+
+        var list = new List<AgentResourceRow>();
+        try
+        {
+            await using var rdr = await cmd.ExecuteReaderAsync(ct);
+            while (await rdr.ReadAsync(ct)) list.Add(Read(rdr));
+        }
+        catch (SqliteException)
+        {
+            // Bad FTS5 syntax in the user query (operator parse error etc.) —
+            // graceful fallback to LIKE-based search rather than 500ing the
+            // caller. The phrase-quoting above makes this very rare.
+            return await SearchAsync(query, limit, marketplaceFilter, ct);
+        }
+        return list;
+    }
+
+    /// <summary>
     /// v1.7.4: returns Resources whose first_seen_at is >= sinceUtc, ordered
     /// most-recent-first. Used by DigestService to populate `today`'s
     /// newResources block. Optional marketplaceFilter restricts to v1 or v2.

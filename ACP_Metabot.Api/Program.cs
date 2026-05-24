@@ -522,7 +522,8 @@ app.MapGet("/health", () => Results.Ok(new
 const int MaxQueryLen = 1000;
 const int MaxUseCaseLen = 2000;
 
-async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, CancellationToken ct)
+async Task<IResult> HandleSearch(SearchRequest req, SearchService svc,
+    AgentResourcesRepository resourcesRepo, CancellationToken ct)
 {
     if (string.IsNullOrWhiteSpace(req.Query))
         return Results.BadRequest(new { error = "query is required" });
@@ -594,6 +595,25 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, Cancellat
     var (results, expansion) = await svc.SearchWithFiltersAsync(req.Query, limit, offset, minScore, priceMax,
         staleAfterDays, rerank, category, chainFilter, req.MinReputation, marketplace, filters, ct);
 
+    // v1.10 Phase 1 (T6): unified search returns free Resources alongside
+    // paid offerings when includeResources is true (default). The sub-limit
+    // is derived from the caller's `limit` so Resources never crowd out
+    // offerings — the offerings list is still the primary surface.
+    IReadOnlyList<ResourceMatch> resources = Array.Empty<ResourceMatch>();
+    if (filters.IncludeResources)
+    {
+        var resLimit = Math.Max(1, limit / 2);
+        var raw = await resourcesRepo.SearchHybridAsync(req.Query, resLimit, marketplace, ct);
+        resources = raw.Select(r => new ResourceMatch(
+            Id: r.Id,
+            AgentAddress: r.AgentAddress,
+            AgentName: r.AgentName,
+            Name: r.Name,
+            Description: r.Description,
+            Url: r.Url,
+            MarketplaceVersion: r.MarketplaceVersion)).ToList();
+    }
+
     object? bestMatch = null;
     if (results.Count > 0 && results[0].Score >= 0.7)
     {
@@ -611,6 +631,7 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, Cancellat
         query = req.Query,
         count = results.Count,
         results,
+        resources,
         bestMatch,
         expansion = new
         {
