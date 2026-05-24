@@ -20,6 +20,7 @@ public class AgentSearchService
     private readonly IRerankProvider? _rerank;
     private readonly ReputationService _reputation;
     private readonly CrossPresenceBuilder _crossPresence;
+    private readonly QueryExpander _expander;
 
     public AgentSearchService(
         Db db,
@@ -27,6 +28,7 @@ public class AgentSearchService
         IEmbeddingProvider embed,
         ReputationService reputation,
         CrossPresenceBuilder crossPresence,
+        QueryExpander expander,
         IRerankProvider? rerank = null)
     {
         _db = db;
@@ -34,14 +36,84 @@ public class AgentSearchService
         _embed = embed;
         _reputation = reputation;
         _crossPresence = crossPresence;
+        _expander = expander;
         _rerank = rerank;
     }
 
     public async Task<IReadOnlyList<AgentSearchHit>> SearchAsync(
         string query, int limit, string? marketplaceFilter, CancellationToken ct)
     {
+        // v1.10 Phase 1: glossary expansion. The dense leg still embeds the
+        // verbatim user query — synonym-aware embeddings are deferred to
+        // Phase 3. The BM25 (agent-grouped FTS) leg below OR-merges canonical
+        // synonyms via per-term lookups, mirroring SearchService's pattern.
+        // GlossaryHits is plumbed for T5's response-envelope surfacing.
+        var expanded = _expander.Expand(query);
+
         // ── 1. BM25 leg ──────────────────────────────────────────────────────
-        var bm25Hits = await _offeringRepo.SearchAgentsAsync(query, limit: 200, marketplaceFilter);
+        // When the glossary fired, run SearchAgentsAsync once per term
+        // (primary + each canonical synonym) and union the agent hits by
+        // address, keeping the entry with the best (highest) Score and
+        // merging unique TopOfferingNames up to a cap of 3. Concatenating
+        // tokens into a single FTS query would collapse into a phrase match
+        // via SanitizeFtsQuery's quote-wrapping (same footgun as the
+        // SearchService leg) — per-term + union avoids it. Cost is N+1 FTS
+        // reads (typically N≤3 in Phase 1).
+        IReadOnlyList<AgentSearchHit> bm25Hits;
+        if (expanded.Synonyms.Count > 0)
+        {
+            var merged = new Dictionary<string, AgentSearchHit>(StringComparer.OrdinalIgnoreCase);
+            var terms = new List<string> { query };
+            terms.AddRange(expanded.Synonyms);
+            foreach (var term in terms)
+            {
+                var hits = await _offeringRepo.SearchAgentsAsync(term, limit: 200, marketplaceFilter);
+                foreach (var h in hits)
+                {
+                    if (!merged.TryGetValue(h.AgentAddress, out var prev))
+                    {
+                        merged[h.AgentAddress] = h;
+                    }
+                    else if (h.Score > prev.Score)
+                    {
+                        // Higher Score wins; union the top-offering names so the
+                        // enrichment pass still sees synonym-surfaced offerings.
+                        var unioned = prev.TopOfferingNames
+                            .Concat(h.TopOfferingNames)
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .Take(3)
+                            .ToArray();
+                        merged[h.AgentAddress] = h with
+                        {
+                            TopOfferingNames = unioned,
+                            TopOfferings = unioned
+                                .Select(n => new AgentSearchHitOffering(n, 0.0, ""))
+                                .ToArray(),
+                        };
+                    }
+                    else
+                    {
+                        var unioned = prev.TopOfferingNames
+                            .Concat(h.TopOfferingNames)
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .Take(3)
+                            .ToArray();
+                        merged[h.AgentAddress] = prev with
+                        {
+                            TopOfferingNames = unioned,
+                            TopOfferings = unioned
+                                .Select(n => new AgentSearchHitOffering(n, 0.0, ""))
+                                .ToArray(),
+                        };
+                    }
+                }
+            }
+            bm25Hits = merged.Values.OrderByDescending(h => h.Score).Take(200).ToList();
+        }
+        else
+        {
+            bm25Hits = await _offeringRepo.SearchAgentsAsync(query, limit: 200, marketplaceFilter);
+        }
 
         // ── 2. Dense leg — embed query; cosine-rank agent_profiles.embedding ─
         var qVec = (await _embed.EmbedAsync(new[] { query }, ct))[0];

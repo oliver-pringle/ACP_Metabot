@@ -99,6 +99,7 @@ public class AgentSearchServiceIntegrationTests : IDisposable
             new StubEmbedderForSearch(),
             _reputation,
             _crossPresence,
+            new QueryExpander(Array.Empty<GlossaryEntry>()),  // empty glossary — no expansion in tests.
             rerank: null);  // No reranker — falls back to RRF order.
     }
 
