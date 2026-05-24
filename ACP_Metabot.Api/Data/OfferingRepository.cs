@@ -1428,4 +1428,89 @@ public class OfferingRepository
             RemovedAt: removedAt,
             DeliverableSchemaJson: reader.IsDBNull(6) ? null : reader.GetString(6));
     }
+
+    /// <summary>
+    /// v1.10 Phase 2 (T3b): total <c>schema_facets</c> row count. Used by the
+    /// boot path in Program.cs to decide whether to run the one-shot backfill
+    /// (<see cref="BackfillSchemaFacetsAsync"/>). When this returns 0 (fresh
+    /// database) or a very small number (legacy DB pre-T1), the backfill runs;
+    /// otherwise it skips. Cheap COUNT(*) — sub-millisecond even on the
+    /// production corpus.
+    /// </summary>
+    public async Task<long> CountSchemaFacetsAsync(CancellationToken ct = default)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM schema_facets;";
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is null ? 0 : Convert.ToInt64(result);
+    }
+
+    /// <summary>
+    /// v1.10 Phase 2 (T3b): one-time backfill — iterate every offering and
+    /// write its facets to <c>schema_facets</c> for BOTH the requirement and
+    /// deliverable roles. Idempotent via the UNIQUE(offering_id, field_name,
+    /// role) constraint on <c>schema_facets</c> established by T1, so
+    /// re-running on a warm DB is a no-op.
+    ///
+    /// Batched (500 offerings per transaction) via keyset pagination
+    /// (<c>WHERE id &gt; $lastId ORDER BY id LIMIT $lim</c>) to bound memory
+    /// on the production corpus and keep each write transaction short enough
+    /// that incoming UpsertAsync calls don't pile up on the writer lock.
+    ///
+    /// Returns an upper-bound estimate of the facet rows written: 2 per
+    /// offering visited (one per role). The actual inserts may be fewer
+    /// because INSERT OR IGNORE silently drops duplicates and offerings with
+    /// no schema JSON contribute zero facets — see the comment on the
+    /// `processed` accumulator. This is good enough for the boot log line;
+    /// downstream tests measure outcomes by querying <c>schema_facets</c>
+    /// directly.
+    /// </summary>
+    public async Task<long> BackfillSchemaFacetsAsync(CancellationToken ct = default)
+    {
+        long processed = 0;
+        await using var conn = _db.OpenConnection();
+        const int BatchSize = 500;
+        long lastId = 0;
+
+        while (!ct.IsCancellationRequested)
+        {
+            var batch = new List<(long Id, string? Req, string? Del)>();
+            await using (var read = conn.CreateCommand())
+            {
+                read.CommandText = @"
+                    SELECT id, requirement_schema_json, deliverable_schema_json
+                    FROM offerings
+                    WHERE id > $lastId
+                    ORDER BY id
+                    LIMIT $lim;";
+                read.Parameters.AddWithValue("$lastId", lastId);
+                read.Parameters.AddWithValue("$lim", BatchSize);
+                await using var rdr = await read.ExecuteReaderAsync(ct);
+                while (await rdr.ReadAsync(ct))
+                {
+                    batch.Add((
+                        rdr.GetInt64(0),
+                        rdr.IsDBNull(1) ? null : rdr.GetString(1),
+                        rdr.IsDBNull(2) ? null : rdr.GetString(2)));
+                }
+            }
+            if (batch.Count == 0) break;
+            lastId = batch[^1].Id;
+
+            await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+            foreach (var (id, req, del) in batch)
+            {
+                // Reuse the T3a helper. deleteFirst=false because the backfill
+                // is purely additive — the UNIQUE constraint handles dedupe and
+                // we don't want to wipe rows that arrived via the steady-state
+                // UpsertAsync path between boot and this loop's commit.
+                await WriteSchemaFacetsAsync(conn, tx, id, req, "requirement", deleteFirst: false);
+                await WriteSchemaFacetsAsync(conn, tx, id, del, "deliverable", deleteFirst: false);
+            }
+            await tx.CommitAsync(ct);
+            processed += batch.Count * 2;
+        }
+        return processed;
+    }
 }

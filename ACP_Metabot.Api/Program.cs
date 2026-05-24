@@ -428,6 +428,42 @@ var app = builder.Build();
 var db = app.Services.GetRequiredService<Db>();
 await db.InitializeSchemaAsync();
 
+// v1.10 Phase 2 (T3b): one-time schema_facets backfill if the index is sparse.
+// Idempotent — re-running on a warm DB is a no-op via the UNIQUE constraint
+// on schema_facets (offering_id, field_name, role). Non-fatal: a failed
+// backfill logs a warning but doesn't block startup, since sub-offering
+// filters degrade to "return empty results for that filter" rather than
+// crashing the service. The < 10 threshold treats both a truly empty index
+// AND a tiny dev DB as "needs backfill"; production warm DBs will skip.
+try
+{
+    using var scope = app.Services.CreateScope();
+    var bfRepo = scope.ServiceProvider.GetRequiredService<OfferingRepository>();
+    var bfLogger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+    var existing = await bfRepo.CountSchemaFacetsAsync();
+    if (existing < 10)
+    {
+        bfLogger.LogInformation(
+            "[schema-facets] backfill starting (existing={n})", existing);
+        var written = await bfRepo.BackfillSchemaFacetsAsync();
+        bfLogger.LogInformation(
+            "[schema-facets] backfill wrote up to {n} facet rows", written);
+    }
+    else
+    {
+        bfLogger.LogInformation(
+            "[schema-facets] skipping backfill ({n} rows already present)",
+            existing);
+    }
+}
+catch (Exception ex)
+{
+    using var scope = app.Services.CreateScope();
+    var bfLogger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+    bfLogger.LogWarning(ex,
+        "[schema-facets] backfill failed; sub-offering filters may return empty");
+}
+
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
