@@ -1,23 +1,23 @@
 import type { Offering } from "./types.js";
 import { requireString } from "../validators.js";
 
-// v1.10 Phase 3 T5: agentRiskCheck ($0.05) — defensive scam-risk score for a
-// single agent on a single chain. Four signals × 25 = 100 binned to
+// v1.10 Phase 3 T5: agentRiskCheck ($0.05) - defensive scam-risk score for a
+// single agent on a single chain. Four signals x 25 = 100 binned to
 // low / medium / high / critical. Cached per (agent_address, chain_id) for
 // 6h (configurable via Search:AgentRiskCacheTtlSeconds). NEVER throws on
-// signal evaluation — any per-signal lookup failure degrades to score 0
+// signal evaluation - any per-signal lookup failure degrades to score 0
 // with a "lookup failed" detail; only invalid agent addresses produce a 400.
 // Suspicious-funder matching is exact-string against the curated OFAC-sourced
 // Data/SuspiciousFunderPatterns.json (51 entries at v0.6 spec).
 //
-// Offering name 14 chars — under marketplace 20-char cap.
+// Offering name 14 chars - under marketplace 20-char cap.
 export const agentRiskCheck: Offering = {
   name: "agentRiskCheck",
   description:
     "Defensive scam-risk assessment for one ACP agent. Returns a 4-signal score (reputationDepth + " +
-    "pricingOutlier + walletProvenance via OFAC sanctions match + footprintAnomaly via V1↔V2 impersonation " +
+    "pricingOutlier + walletProvenance via OFAC sanctions match + footprintAnomaly via V1/V2 impersonation " +
     "heuristics), 0-100 binned to low/medium/high/critical. Cached 6h per (agent, chain). Hire this before " +
-    "paying a new or unfamiliar agent — catches impersonation + sanctioned-wallet patterns.",
+    "paying a new or unfamiliar agent - catches impersonation + sanctioned-wallet patterns.",
   requirementSchema: {
     type: "object",
     properties: {
