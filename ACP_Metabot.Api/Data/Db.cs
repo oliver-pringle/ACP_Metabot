@@ -350,6 +350,45 @@ public class Db
             CREATE INDEX IF NOT EXISTS ix_agent_resources_agent     ON agent_resources(agent_address);
             CREATE INDEX IF NOT EXISTS ix_agent_resources_last_seen ON agent_resources(last_seen_at);
 
+            -- v1.10 Phase 1: resources_embeddings + resources_fts mirror.
+            -- Lazy-populated by ResourcesEmbeddingsWorker (default OFF) for the embedding
+            -- blob; FTS5 mirror kept fresh via triggers on agent_resources INSERT/UPDATE/DELETE.
+            CREATE TABLE IF NOT EXISTS resources_embeddings (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                resource_id     INTEGER NOT NULL,
+                embedding       BLOB NOT NULL,
+                embedded_at     TEXT NOT NULL,
+                FOREIGN KEY (resource_id) REFERENCES agent_resources(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS ix_resources_embed_res ON resources_embeddings(resource_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS resources_fts USING fts5(
+                resource_id UNINDEXED,
+                name,
+                description,
+                tokenize='unicode61 remove_diacritics 2'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS trg_agent_resources_ai
+            AFTER INSERT ON agent_resources BEGIN
+                INSERT INTO resources_fts(resource_id, name, description)
+                VALUES (new.id, new.name, new.description);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_agent_resources_au
+            AFTER UPDATE OF name, description ON agent_resources BEGIN
+                INSERT INTO resources_fts(resources_fts, resource_id, name, description)
+                VALUES('delete', old.id, old.name, old.description);
+                INSERT INTO resources_fts(resource_id, name, description)
+                VALUES (new.id, new.name, new.description);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_agent_resources_ad
+            AFTER DELETE ON agent_resources BEGIN
+                INSERT INTO resources_fts(resources_fts, resource_id, name, description)
+                VALUES('delete', old.id, old.name, old.description);
+            END;
+
             -- v1.6 #1 v0.1: reputation_feeds tracks ReputationAggregator
             -- contracts deployed by ChainlinkBot's POST /feed-address on behalf
             -- of high-reputation agents in our corpus. One row per agent; the
@@ -466,6 +505,21 @@ public class Db
                 ON pulse_subscriptions(buyer_address);
             ";
         await cmd.ExecuteNonQueryAsync();
+
+        // v1.10 Phase 1: backfill resources_fts from any existing agent_resources rows
+        // missing a mirror. Idempotent — uses NOT EXISTS check so re-runs no-op.
+        // Required because pre-v1.10 boots populated agent_resources before the
+        // trg_agent_resources_ai trigger existed, so the FTS mirror is empty for
+        // every row inserted before this migration runs. The trigger handles every
+        // row inserted after.
+        await using (var backfill = conn.CreateCommand())
+        {
+            backfill.CommandText = @"
+                INSERT INTO resources_fts(resource_id, name, description)
+                SELECT id, name, description FROM agent_resources
+                WHERE id NOT IN (SELECT resource_id FROM resources_fts);";
+            await backfill.ExecuteNonQueryAsync();
+        }
 
         // Idempotent column additions for databases created before later
         // columns existed. SQLite has no `ADD COLUMN IF NOT EXISTS`, so each

@@ -543,6 +543,33 @@ public class DbMigrationTests : IDisposable
         Assert.Equal("0xabc", hit);
     }
 
+    // -----------------------------------------------------------------
+    // v1.10 Phase 1 — resources_embeddings + resources_fts schema tests
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task Migration_creates_resources_embeddings_and_resources_fts()
+    {
+        await _db.InitializeSchemaAsync();
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT name FROM sqlite_master
+            WHERE type IN ('table','index','trigger')
+              AND name IN ('resources_embeddings', 'resources_fts',
+                           'ix_resources_embed_res',
+                           'trg_agent_resources_ai', 'trg_agent_resources_au',
+                           'trg_agent_resources_ad')
+            ORDER BY name;";
+        var found = new List<string>();
+        await using var rdr = await cmd.ExecuteReaderAsync();
+        while (await rdr.ReadAsync()) found.Add(rdr.GetString(0));
+        Assert.Equal(
+            new[] { "ix_resources_embed_res", "resources_embeddings", "resources_fts",
+                    "trg_agent_resources_ad", "trg_agent_resources_ai", "trg_agent_resources_au" },
+            found.OrderBy(x => x, StringComparer.Ordinal).ToArray());
+    }
+
     private async Task InsertOfferingWithLastSeen(string addr, string agentName,
         string offeringName, string mv, DateTime lastSeenUtc)
     {
