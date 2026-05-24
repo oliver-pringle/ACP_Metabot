@@ -1,6 +1,5 @@
 using ACP_Metabot.Api.Data;
 using ACP_Metabot.Api.Models;
-using Microsoft.Data.Sqlite;
 
 namespace ACP_Metabot.Api.Services;
 
