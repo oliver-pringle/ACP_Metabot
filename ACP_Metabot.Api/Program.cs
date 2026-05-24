@@ -132,6 +132,24 @@ builder.Services.AddSingleton<SaturationCalculator>(_ => new SaturationCalculato
     threshold: builder.Configuration.GetValue<double?>("Saturation:Threshold") ?? 0.85));
 builder.Services.AddSingleton<PricePercentileCalculator>(_ => new PricePercentileCalculator(
     lowNThreshold: builder.Configuration.GetValue<int?>("PricePercentile:LowNThreshold") ?? 5));
+// v1.10 Phase 1: DeFi glossary loaded once at boot. The Content Update entry
+// in ACP_Metabot.Api.csproj copies Data/DeFiGlossary.json into the publish
+// output (/app/Data/... on the droplet, bin/Debug/.../Data/... under
+// dotnet test). The walk-up fallback covers `dotnet run` invocations whose
+// AppContext.BaseDirectory diverges from the project layout (rare, but
+// cheap to handle).
+builder.Services.AddSingleton<QueryExpander>(_ =>
+{
+    var path = Path.Combine(AppContext.BaseDirectory, "Data", "DeFiGlossary.json");
+    if (!File.Exists(path))
+    {
+        var root = AppContext.BaseDirectory;
+        for (int i = 0; i < 6 && !File.Exists(Path.Combine(root, "Data", "DeFiGlossary.json")); i++)
+            root = Path.GetDirectoryName(root) ?? root;
+        path = Path.Combine(root, "Data", "DeFiGlossary.json");
+    }
+    return QueryExpander.LoadFromFile(path);
+});
 builder.Services.AddSingleton<SearchService>();
 builder.Services.AddSingleton<CrossPresenceBuilder>();
 builder.Services.AddSingleton<AgentSearchService>();

@@ -13,6 +13,7 @@ public class SearchService
     private readonly CategoryService _categories;
     private readonly SaturationCalculator _saturation;
     private readonly PricePercentileCalculator _pricePercentile;
+    private readonly QueryExpander _expander;
     private readonly ILogger<SearchService> _logger;
 
     // Pool size for the rerank pass. The reranker is much more expensive
@@ -101,6 +102,7 @@ public class SearchService
         CategoryService categories,
         SaturationCalculator saturation,
         PricePercentileCalculator pricePercentile,
+        QueryExpander expander,
         ILogger<SearchService> logger)
     {
         _repo = repo;
@@ -111,6 +113,7 @@ public class SearchService
         _categories = categories;
         _saturation = saturation;
         _pricePercentile = pricePercentile;
+        _expander = expander;
         _logger = logger;
     }
 
@@ -171,6 +174,15 @@ public class SearchService
     {
         if (string.IsNullOrWhiteSpace(query))
             return Array.Empty<OfferingMatch>();
+
+        // v1.10 Phase 1: glossary expansion. The dense leg still embeds the
+        // verbatim user query — synonym-aware embeddings are deferred until
+        // the Phase 3 LLM rewriter ships. The BM25 leg below OR-merges the
+        // canonical synonyms into the FTS5 MATCH string so jargon/alias
+        // queries (e.g. "ape" → "yield farming") surface relevant offerings
+        // even when the original term isn't in the offering text.
+        // glossaryHits will be surfaced by T5 in the response envelope.
+        var expanded = _expander.Expand(query);
 
         var queryEmb = await _embedder.EmbedQueryAsync(query, ct);
         var corpus = Volatile.Read(ref _corpus);
@@ -247,7 +259,40 @@ public class SearchService
         IReadOnlyList<long> lexicalRanking;
         try
         {
-            var bm25Raw = await _repo.SearchBm25Async(query, LexicalPoolSize);
+            // Lexical leg. When the glossary fired, run BM25 once per term
+            // (primary + each canonical synonym) and union the rowids,
+            // keeping the lowest (best) BM25 score per id. SanitizeFtsQuery
+            // wraps multi-token inputs in phrase quotes, so naively
+            // concatenating "primary synonym1 synonym2" would collapse the
+            // FTS leg into a strict phrase match and regress the dense+BM25
+            // hybrid for any glossary-hit query. Per-term BM25 + union
+            // gives the OR-merge the brief asks for without that footgun.
+            // Cost is N+1 cheap FTS reads (typically N≤3 in Phase 1).
+            IReadOnlyList<(long Id, double Bm25)> bm25Raw;
+            if (expanded.Synonyms.Count > 0)
+            {
+                var merged = new Dictionary<long, double>(LexicalPoolSize);
+                var terms = new List<string> { query };
+                terms.AddRange(expanded.Synonyms);
+                foreach (var term in terms)
+                {
+                    var hits = await _repo.SearchBm25Async(term, LexicalPoolSize);
+                    foreach (var (id, score) in hits)
+                    {
+                        if (!merged.TryGetValue(id, out var prev) || score < prev)
+                            merged[id] = score;
+                    }
+                }
+                bm25Raw = merged
+                    .OrderBy(kv => kv.Value)
+                    .Take(LexicalPoolSize)
+                    .Select(kv => (kv.Key, kv.Value))
+                    .ToList();
+            }
+            else
+            {
+                bm25Raw = await _repo.SearchBm25Async(query, LexicalPoolSize);
+            }
             // BM25 results aren't filtered by price/category/freshness — intersect
             // with the already-filtered candidate set so excluded offerings can't
             // sneak back in via the lexical leg.
