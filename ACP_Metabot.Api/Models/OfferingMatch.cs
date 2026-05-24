@@ -30,4 +30,11 @@ public record OfferingMatch(
     [property: JsonPropertyName("saturation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         SaturationDto? Saturation = null,
     [property: JsonPropertyName("pricePercentile"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        PricePercentileDto? PricePercentile = null);
+        PricePercentileDto? PricePercentile = null,
+    // v1.10 Phase 3 T6: per-hit risk tier surfaced when filters.IncludeRisk=true.
+    // Populated by SearchService.SearchWithFiltersAsync via AgentRiskScorer.GetTierAsync
+    // (cheap cached read; null when no cached entry — buyer can trigger a paid
+    // /v1/agentRiskCheck call to populate). Values: "low" / "medium" / "high" /
+    // "critical" matching the AgentRiskResult.RiskTier bins.
+    [property: JsonPropertyName("riskFlag"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        string? RiskFlag = null);

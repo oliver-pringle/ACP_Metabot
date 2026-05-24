@@ -15,6 +15,13 @@ public class SearchService
     private readonly PricePercentileCalculator _pricePercentile;
     private readonly QueryExpander _expander;
     private readonly LlmQueryRewriter _rewriter;
+    // v1.10 Phase 3 T6: AgentRiskScorer ctor depends on SearchService (for in-corpus
+    // category lookup used by the pricing-outlier signal). Resolving it directly
+    // here would close a DI cycle. Lazy-resolve via the service provider — the
+    // riskFlag decoration only fires when filters.IncludeRisk=true, so the cycle
+    // is broken at construction time and only paid on demand. Mirrors the
+    // IServiceProvider pattern used by MarketplaceIndexerService / V2SellerScannerService.
+    private readonly IServiceProvider _services;
     private readonly ILogger<SearchService> _logger;
 
     // Pool size for the rerank pass. The reranker is much more expensive
@@ -105,6 +112,7 @@ public class SearchService
         PricePercentileCalculator pricePercentile,
         QueryExpander expander,
         LlmQueryRewriter rewriter,
+        IServiceProvider services,
         ILogger<SearchService> logger)
     {
         _repo = repo;
@@ -117,6 +125,7 @@ public class SearchService
         _pricePercentile = pricePercentile;
         _expander = expander;
         _rewriter = rewriter;
+        _services = services;
         _logger = logger;
     }
 
@@ -330,6 +339,76 @@ public class SearchService
         }
 
         var paged = filtered.Skip(Math.Max(0, offset)).Take(Math.Max(0, limit)).ToList();
+
+        // v1.10 Phase 3 T6: surface per-hit risk tier when includeRisk=true.
+        // GetTierAsync is a cheap cached read — returns null when no cached entry
+        // exists (the buyer can trigger a paid /v1/agentRiskCheck call to populate).
+        // Batched by unique agent address so M hits across N agents = N cache
+        // reads, not M. Per-call failures degrade to null + a warning log so a
+        // pathological SQLite hiccup can't take the search endpoint with it.
+        //
+        // chainId resolution is best-effort. OfferingMatch carries Chain as a
+        // string label ("base" / "ethereum" / "polygon"), not the integer
+        // chainId; we default to 8453 (Base) and only switch when the caller
+        // restricted the search to Ethereum. Per-hit precise chain handling is
+        // a Phase 4 concern — see commit message for the follow-up rationale.
+        if (filters?.IncludeRisk == true && paged.Count > 0)
+        {
+            var defaultChainId = 8453;
+            if (chainFilter is { Count: > 0 }
+                && chainFilter.Contains("ethereum")
+                && !chainFilter.Contains("base"))
+            {
+                defaultChainId = 1;
+            }
+
+            // Lazy-resolve AgentRiskScorer (see _services field doc — DI cycle
+            // through SearchService prevents constructor injection).
+            AgentRiskScorer? riskScorer = null;
+            try
+            {
+                riskScorer = _services.GetService(typeof(AgentRiskScorer)) as AgentRiskScorer;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[search] AgentRiskScorer resolve failed; skipping riskFlag decoration");
+            }
+
+            if (riskScorer is not null)
+            {
+                var uniqueAgents = paged
+                    .Select(h => (h.AgentAddress ?? string.Empty).ToLowerInvariant())
+                    .Where(a => a.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                var tierMap = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                foreach (var addr in uniqueAgents)
+                {
+                    try
+                    {
+                        tierMap[addr] = await riskScorer.GetTierAsync(addr, defaultChainId, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "[search] risk-tier lookup failed for {Addr}", addr);
+                        tierMap[addr] = null;
+                    }
+                }
+
+                paged = paged
+                    .Select(h =>
+                    {
+                        var addr = (h.AgentAddress ?? string.Empty).ToLowerInvariant();
+                        if (addr.Length == 0) return h;
+                        return tierMap.TryGetValue(addr, out var tier) && tier is not null
+                            ? h with { RiskFlag = tier }
+                            : h;
+                    })
+                    .ToList();
+            }
+        }
+
         return (paged, expansion);
     }
 
