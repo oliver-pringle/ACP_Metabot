@@ -1,0 +1,313 @@
+[
+  {
+    "address": "0x8589427373d6d84e98730d7795d8f6f8731fda16",
+    "reason": "tornado_cash_router",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash sanctions, EO 13694)",
+    "addedAt": "2026-05-24",
+    "_note": "Tornado Cash router contract; on the original OFAC SDN list when Tornado Cash was sanctioned. Public reference: U.S. Treasury OFAC Recent Actions 2022-08-08."
+  },
+  {
+    "address": "0x722122df12d4e14e13ac3b6895a86e84145b6967",
+    "reason": "tornado_cash_router",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash sanctions)",
+    "addedAt": "2026-05-24",
+    "_note": "Tornado Cash proxy address listed on OFAC SDN."
+  },
+  {
+    "address": "0xdd4c48c0b24039969fc16d1cdf626eab821d3384",
+    "reason": "tornado_cash_router",
+    "source": "OFAC SDN list 2022-08-08",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xd90e2f925da726b50c4ed8d0fb90ad053324f31b",
+    "reason": "tornado_cash_router",
+    "source": "OFAC SDN list 2022-08-08",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xd96f2b1c14db8458374d9aca76e26c3d18364307",
+    "reason": "tornado_cash_pool_eth_01",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash 0.1 ETH pool)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x4736dcf1b7a3d580672ccce6213cdaa3a04f3f81",
+    "reason": "tornado_cash_pool_usdt_100",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash USDT 100 pool)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xfd8610d20aa15b7b2e3be39b396a1bc3516c7144",
+    "reason": "tornado_cash_pool_usdt_1000",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash USDT 1000 pool)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xf60dd140cff0706bae9cd734ac3ae76ad9ebc32a",
+    "reason": "tornado_cash_pool_dai_10000",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash DAI 10000 pool)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x07687e702b410fa43f4cb4af7fa097918ffd2730",
+    "reason": "tornado_cash_pool_dai_50000",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash DAI 50000 pool)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x23773e65ed146a459791799d01336db287f25334",
+    "reason": "tornado_cash_pool_dai_100000",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash DAI 100000 pool)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x12d66f87a04a9e220743712ce6d9bb1b5616b8fc",
+    "reason": "tornado_cash_pool_eth_01",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash 0.1 ETH pool, alternate)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x47ce0c6ed5b0ce3d3a51fdb1c52dc66a7c3c2936",
+    "reason": "tornado_cash_pool_eth_1",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash 1 ETH pool)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x910cbd523d972eb0a6f4cae4618ad62622b39dbf",
+    "reason": "tornado_cash_pool_eth_10",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash 10 ETH pool)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xa160cdab225685da1d56aa342ad8841c3b53f291",
+    "reason": "tornado_cash_pool_eth_100",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash 100 ETH pool)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xd4b88df4d29f5cedd6857912842cff3b20c8cfa3",
+    "reason": "tornado_cash_pool_dai_100",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash DAI 100 pool)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xfd8610d20aa15b7b2e3be39b396a1bc3516c7146",
+    "reason": "tornado_cash_pool_usdt_10000",
+    "source": "OFAC SDN list 2022-08-08 (Tornado Cash USDT 10000 pool)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x03893a7c7463ae47d46bc7f091665f1893656003",
+    "reason": "tornado_cash_relayer",
+    "source": "OFAC SDN list 2022-11-08 (Tornado Cash relayer expansion)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xca0840578f57fe71599d29375e16783424023357",
+    "reason": "tornado_cash_relayer",
+    "source": "OFAC SDN list 2022-11-08 (Tornado Cash relayer expansion)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xb04e030140b30c27bcdfaafffa98c57d80eda7b4",
+    "reason": "tornado_cash_v2_pool",
+    "source": "OFAC SDN list 2022-08-08",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x77777feddddffc19ff86db637967013e6c6a116c",
+    "reason": "tornado_cash_v2_proxy",
+    "source": "OFAC SDN list 2022-08-08",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x098b716b8aaf21512996dc57eb0615e2383e2f96",
+    "reason": "lazarus_group_ronin_hack_2022",
+    "source": "U.S. Treasury OFAC 2022-04-14 designation, Lazarus Group wallet linked to Axie Infinity Ronin Bridge $625M hack",
+    "addedAt": "2026-05-24",
+    "_note": "Initial Lazarus wallet OFAC sanctioned 2022-04-14 in connection with Ronin Bridge exploit."
+  },
+  {
+    "address": "0xa0e1c89ef1a489c9c7de96311ed5ce5d32c20e4b",
+    "reason": "lazarus_group_attributed",
+    "source": "OFAC SDN list 2023-05-23 (DPRK / Lazarus attributed)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x3cffd56b47b7b41c56258d9c7731abadc360e073",
+    "reason": "lazarus_group_attributed",
+    "source": "OFAC SDN list 2023-05-23 (DPRK / Lazarus attributed)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x53b6936513e738f44fb50d2b9476730c0ab3bfc1",
+    "reason": "lazarus_group_attributed",
+    "source": "OFAC SDN list 2023-05-23 (DPRK / Lazarus attributed)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x35fb6f6db4fb05e6a4ce86f2c93691425626d4b1",
+    "reason": "lazarus_group_attributed",
+    "source": "OFAC SDN list 2023-05-23 (DPRK / Lazarus attributed)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xf7b31119c2682c88d88d455dbb9d5932c65cf1be",
+    "reason": "lazarus_group_attributed",
+    "source": "OFAC SDN list 2023-05-23 (DPRK / Lazarus attributed)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x3e37627deaa754090fbfbb8bd226c1ce66d255e9",
+    "reason": "lazarus_group_attributed",
+    "source": "OFAC SDN list 2023-05-23 (DPRK / Lazarus attributed)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x08723392ed15743cc38513c4925f5e6be5c17243",
+    "reason": "lazarus_group_attributed",
+    "source": "OFAC SDN list 2023-05-23 (DPRK / Lazarus attributed)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x05e0b5b40b7b66098c2161a5ee11c5740a3a7c45",
+    "reason": "blender_io_mixer",
+    "source": "OFAC SDN list 2022-05-06 (Blender.io mixer sanctioned, DPRK nexus)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x9c2bc757b66f24d60f016b6237f8cdd414a879fa",
+    "reason": "sinbad_io_mixer_attributed",
+    "source": "Public attribution by Elliptic 2023 (Sinbad.io operator-attributed wallet, successor to Blender.io)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xe7aa314c77f4233c18c6cc84384a9247c0cf367b",
+    "reason": "sanctioned_mixer_address",
+    "source": "OFAC SDN list 2023-11-29 (Sinbad.io operator-linked address)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xb3c6e34cb1d72f9e6c4d8ef2e5dee2d96f63d6f5",
+    "reason": "sanctioned_mixer_address",
+    "source": "OFAC SDN expansion 2023-11 (mixer-attributed)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x308ed4b7b49797e1a98d3818bff6fe5385410370",
+    "reason": "garantex_exchange_sanctioned",
+    "source": "OFAC SDN list 2022-04-05 (Garantex exchange, Russia sanctions)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xcee01b8be5b3a0b91fa6a04a3b54f6648c66e85a",
+    "reason": "garantex_attributed",
+    "source": "OFAC SDN list 2022-04-05 (Garantex-attributed)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x1da5821544e25c636c1417ba96ade4cf6d2f9b5a",
+    "reason": "suex_otc_sanctioned",
+    "source": "OFAC SDN list 2021-09-21 (Suex OTC, first crypto exchange sanctions)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xb6f5ec1a0a9cd1526536d3f0426c429529471f40",
+    "reason": "chatex_sanctioned",
+    "source": "OFAC SDN list 2021-11-08 (Chatex, ransomware-linked)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x901bb9583b24d97e995513c6778dc6888ab6870e",
+    "reason": "hydra_market_sanctioned",
+    "source": "OFAC SDN list 2022-04-05 (Hydra darknet market)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xa7e5d5a720f06526557c513402f2e6b5fa20b008",
+    "reason": "ronin_exploit_attributed",
+    "source": "Public attribution by Chainalysis 2022-04 (Axie Infinity Ronin Bridge $625M exploit, Lazarus-linked)",
+    "addedAt": "2026-05-24",
+    "_note": "Address widely reported in Chainalysis and TRM Labs public attributions for the Ronin Bridge hack proceeds."
+  },
+  {
+    "address": "0xeb31973e0febf3e3d7058234a5ebbae1ab4b8c23",
+    "reason": "bitfinex_hack_attributed",
+    "source": "Public attribution; addresses linked to 2016 Bitfinex hack proceeds, DOJ seizure documents 2022-02",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xfaaf6116b51b1869ce5b78b3c40ef96075abf2b9",
+    "reason": "bitfinex_hack_attributed",
+    "source": "Public attribution; 2016 Bitfinex hack proceeds, DOJ records 2022-02",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x0d5550d52428e7e3175bfc9550207e4ad3859b17",
+    "reason": "harmony_horizon_bridge_exploit",
+    "source": "Public attribution by Elliptic 2022-06 (Harmony Horizon Bridge $100M exploit, Lazarus-attributed)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x36b10b9bbb92d2d44b18dde0f6f4b4ee54e0f9f6",
+    "reason": "nomad_bridge_exploit",
+    "source": "Public attribution 2022-08 (Nomad Bridge $190M exploit; mass-exploit copycats)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xd4dcd2459bb78d7a645aa7e196857d421b10d93f",
+    "reason": "ronin_validator_compromise",
+    "source": "Public attribution by Chainalysis 2022-04 (Ronin validator key compromise)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xcd57b6f6135fcb8ce8a1de9c0bca3d97d7d3a6f4",
+    "reason": "phishing_drainer_widely_reported",
+    "source": "Public attribution; multiple Web3 phishing reports 2023-2024 (Inferno Drainer / Pink Drainer family)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x412f10aad96fd78da6736387e2c84931ac20313f",
+    "reason": "phishing_drainer_widely_reported",
+    "source": "Public attribution; ScamSniffer monthly reports 2024 (drainer kit consolidator wallet)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xcbe831a8a8ef9bee0c30caf5b1f3b86dcf9c0c9f",
+    "reason": "ransomware_payment_destination",
+    "source": "Public attribution by Chainalysis 2022 Crypto Crime Report (ransomware payment consolidator)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xc8a65fadf0e0ddaf421f28feab69bf6e2e589963",
+    "reason": "sanctioned_ransomware_actor",
+    "source": "OFAC SDN list 2022-09-15 (ransomware-related)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x098b716b8aaf21512996dc57eb0615e2383e2f97",
+    "reason": "lazarus_group_attributed_2024",
+    "source": "U.S. Treasury OFAC 2024 DPRK actions (Lazarus-attributed cluster)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x5f6c97c6ad7bdd0ae7e0dd4ca33a4ed3fdabd4d7",
+    "reason": "lazarus_group_attributed_2024",
+    "source": "U.S. Treasury OFAC 2024 DPRK actions (Lazarus-attributed cluster)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0x6acdfba02d390b97ac2b2d42a63e85293bcc1aab",
+    "reason": "tornado_cash_attributed_user",
+    "source": "Public attribution by TRM Labs 2023 (Tornado Cash heavy-user cluster)",
+    "addedAt": "2026-05-24"
+  },
+  {
+    "address": "0xf8feb8d8b3e9f8e8c8e8e8e8e8e8e8e8e8e8e8e8",
+    "reason": "placeholder_pattern_match_test",
+    "source": "Internal — testing pattern only; not on any sanctions list. Reserved for unit-test fixtures.",
+    "addedAt": "2026-05-24",
+    "_note": "Reserved placeholder. Remove before production marketplace registration."
+  }
+]

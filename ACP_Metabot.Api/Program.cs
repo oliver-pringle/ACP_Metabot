@@ -161,6 +161,12 @@ builder.Services.AddSingleton<LlmQueryRewriter>();
 // Never throws — degraded envelope on LLM/cache/parse failure.
 builder.Services.AddSingleton<SearchNarrator>();
 builder.Services.AddSingleton<SearchService>();
+// v1.10 Phase 3 T5: defensive scam-risk scorer. 4 signals × 25 = 100 binned
+// to low / medium / high / critical. Cached per (agent_address, chain_id)
+// for `Search:AgentRiskCacheTtlSeconds` (default 6h). Depends on
+// SearchService for in-corpus category lookup (pricing-outlier signal);
+// degrades gracefully when the corpus hasn't refreshed yet.
+builder.Services.AddSingleton<AgentRiskScorer>();
 builder.Services.AddSingleton<CrossPresenceBuilder>();
 builder.Services.AddSingleton<AgentSearchService>();
 builder.Services.AddSingleton<StackComposerService>();
@@ -979,6 +985,30 @@ app.MapPost("/v1/searchNarrative",
         cacheHit = narrative.CacheHit,
         status = narrative.Status,
     });
+}).RequireRateLimiting("public-compose");
+
+// v1.10 Phase 3 T5: agentRiskCheck — defensive scam-risk score for a single
+// agent on a single chain. 4 signals × 25 = 100 binned to low / medium /
+// high / critical. Cached per (agent_address, chain_id) for 6h. NEVER
+// throws on signal failures (each signal degrades to 0 with a "lookup
+// failed" detail); only invalid agent addresses produce a 400.
+app.MapPost("/v1/agentRiskCheck",
+    async (AgentRiskCheckRequest req, AgentRiskScorer scorer, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(req.AgentAddress))
+        return Results.BadRequest(new { error = "agentAddress is required" });
+    var chainId = req.ChainId ?? 8453;
+    if (chainId != 1 && chainId != 8453)
+        return Results.BadRequest(new { error = "chainId must be 1 (Ethereum) or 8453 (Base)" });
+    try
+    {
+        var result = await scorer.ScoreAsync(req.AgentAddress, chainId, ct);
+        return Results.Ok(result);
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 }).RequireRateLimiting("public-compose");
 
 // ===== v1.7 paid offerings (5 of 6 shipped; arenaDigestPro deferred) =====
@@ -2867,6 +2897,10 @@ public record SearchRequest(
 // no resources/expand/risk on the underlying search so the narrator wraps
 // a stable, minimal payload.
 public record SearchNarrativeRequest(SearchRequest Search, string[]? PreviousQueries);
+// v1.10 Phase 3 T5: /v1/agentRiskCheck request. ChainId is validated against
+// the v0.11.0 input-validator whitelist (1 = Ethereum, 8453 = Base) at the
+// endpoint, defaulting to Base when unset.
+public record AgentRiskCheckRequest(string AgentAddress, int? ChainId);
 public record ComposeRequest(
     string UseCase,
     double? BudgetUsdc,
