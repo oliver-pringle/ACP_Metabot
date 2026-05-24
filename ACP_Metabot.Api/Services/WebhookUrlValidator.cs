@@ -93,11 +93,19 @@ public static class WebhookUrlValidator
             if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;
             // 192.0.0.0/24 — IETF Protocol Assignments (includes 192.0.0.0/29)
             if (b[0] == 192 && b[1] == 0 && b[2] == 0) return true;
+            // 192.0.2.0/24 — TEST-NET-1 documentation (RFC 5737)
+            if (b[0] == 192 && b[1] == 0 && b[2] == 2) return true;
+            // 198.51.100.0/24 — TEST-NET-2 documentation (RFC 5737)
+            if (b[0] == 198 && b[1] == 51 && b[2] == 100) return true;
+            // 203.0.113.0/24 — TEST-NET-3 documentation (RFC 5737)
+            if (b[0] == 203 && b[1] == 0 && b[2] == 113) return true;
+            // 198.18.0.0/15 — benchmark testing (RFC 2544)
+            if (b[0] == 198 && (b[1] == 18 || b[1] == 19)) return true;
             // 192.168.0.0/16 — RFC1918 private
             if (b[0] == 192 && b[1] == 168) return true;
             // 224.0.0.0/4 — multicast
             if (b[0] >= 224 && b[0] <= 239) return true;
-            // 240.0.0.0/4 — reserved
+            // 240.0.0.0/4 — reserved (includes broadcast 255.255.255.255)
             if (b[0] >= 240) return true;
             return false;
         }
@@ -113,9 +121,13 @@ public static class WebhookUrlValidator
             {
                 return IsPrivateOrInternal(ip.MapToIPv4());
             }
-            // Unique-local fc00::/7
             var b = ip.GetAddressBytes();
+            // Unique-local fc00::/7
             if ((b[0] & 0xFE) == 0xFC) return true;
+            // 2001:db8::/32 documentation (RFC 3849)
+            if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8) return true;
+            // 64:ff9b::/96 IPv4/IPv6 translation (RFC 6052)
+            if (b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b) return true;
             return false;
         }
 
