@@ -81,6 +81,7 @@ public class Db
                 offering_name            TEXT    NOT NULL,
                 description              TEXT    NOT NULL,
                 requirement_schema_json  TEXT,
+                deliverable_schema_json  TEXT,
                 price_usdc               REAL    NOT NULL,
                 price_type               TEXT    NOT NULL,
                 is_private               INTEGER NOT NULL DEFAULT 0,
@@ -555,6 +556,13 @@ public class Db
             // reappearance via the upsert touch/update path.
             "ALTER TABLE offerings ADD COLUMN is_removed INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE offerings ADD COLUMN removed_at TEXT",
+            // v1.10 Phase 2 T3a: deliverable schema column. Paired with the
+            // existing requirement_schema_json; populated by the V2 marketplace
+            // source from the AcpAgentOffering.deliverable shape (V1's
+            // /api/metrics/skills endpoint doesn't expose it, so V1 rows stay
+            // NULL). Added as ALTER for legacy DBs that completed v1.3's
+            // composite-UNIQUE rebuild before this column existed.
+            "ALTER TABLE offerings ADD COLUMN deliverable_schema_json TEXT",
         })
         {
             try
@@ -714,7 +722,9 @@ public class Db
             //    the v1.5 tombstone columns since this rebuild also runs
             //    against legacy DBs that already have them after the ALTER
             //    block above (and against fresh DBs that have them in the
-            //    base CREATE TABLE IF NOT EXISTS).
+            //    base CREATE TABLE IF NOT EXISTS). v1.10 Phase 2 T3a adds
+            //    deliverable_schema_json — also already-present on the
+            //    source table thanks to the ALTER block above.
             await ExecAsync(conn, tx, @"
                 CREATE TABLE offerings (
                     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -723,6 +733,7 @@ public class Db
                     offering_name            TEXT    NOT NULL,
                     description              TEXT    NOT NULL,
                     requirement_schema_json  TEXT,
+                    deliverable_schema_json  TEXT,
                     price_usdc               REAL    NOT NULL,
                     price_type               TEXT    NOT NULL,
                     is_private               INTEGER NOT NULL DEFAULT 0,
@@ -744,18 +755,23 @@ public class Db
             //    marketplace_version to 'v1' for any pre-migration row that
             //    somehow has NULL. Tombstone columns COALESCE to defaults so
             //    the SELECT works whether or not the source table had them
-            //    (older legacy DBs predate v1.5).
+            //    (older legacy DBs predate v1.5). deliverable_schema_json
+            //    will always be NULL on a v1.2 → v1.3 first-rebuild because
+            //    the ALTER above just added it; the column survives the
+            //    rebuild so subsequent indexer writes can populate it.
             await ExecAsync(conn, tx, @"
                 INSERT INTO offerings (
                     id, agent_address, agent_name, offering_name, description,
-                    requirement_schema_json, price_usdc, price_type, is_private,
+                    requirement_schema_json, deliverable_schema_json,
+                    price_usdc, price_type, is_private,
                     chain, content_hash, first_seen_at, last_seen_at,
                     usage_count, agent_job_count, marketplace_version,
                     is_removed, removed_at
                 )
                 SELECT
                     id, agent_address, agent_name, offering_name, description,
-                    requirement_schema_json, price_usdc, price_type, is_private,
+                    requirement_schema_json, deliverable_schema_json,
+                    price_usdc, price_type, is_private,
                     chain, content_hash, first_seen_at, last_seen_at,
                     usage_count, agent_job_count,
                     COALESCE(marketplace_version, 'v1'),

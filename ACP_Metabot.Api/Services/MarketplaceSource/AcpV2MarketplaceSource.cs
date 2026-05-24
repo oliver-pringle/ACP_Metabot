@@ -328,31 +328,13 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
                 // newer ones (LiquidGuard re-register 2026-05-12 onward) have
                 // it as a structured JSON object. Handle both ValueKinds so
                 // either shape lands as the same JsonElement? downstream.
-                JsonElement? schema = null;
-                switch (o.Requirements.ValueKind)
-                {
-                    case JsonValueKind.Object:
-                    case JsonValueKind.Array:
-                        schema = o.Requirements.Clone();
-                        break;
-                    case JsonValueKind.String:
-                        var raw = o.Requirements.GetString();
-                        if (!string.IsNullOrWhiteSpace(raw))
-                        {
-                            var trimmed = raw.Trim().Trim('"');
-                            try
-                            {
-                                using var doc = JsonDocument.Parse(trimmed);
-                                schema = doc.RootElement.Clone();
-                            }
-                            catch (JsonException)
-                            {
-                                // Malformed schema string; surface upstream as null.
-                            }
-                        }
-                        break;
-                    // null / undefined / number / etc → schema stays null.
-                }
+                var schema = NormalizeSchemaJson(o.Requirements);
+
+                // v1.10 Phase 2 T3a: deliverable schema follows the same
+                // dual shape as requirements (AcpAgentOffering.deliverable
+                // is Record<string, unknown> | string per the V2 SDK
+                // types.d.ts). Same parser path.
+                var deliverable = NormalizeSchemaJson(o.Deliverable);
 
                 dtos.Add(new MarketplaceOfferingDto
                 {
@@ -361,6 +343,7 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
                     OfferingName = o.Name,
                     Description = o.Description ?? "",
                     RequirementSchema = schema,
+                    DeliverableSchema = deliverable,
                     PriceUsdc = o.PriceValue ?? 0.0,
                     PriceType = NormalizePriceType(o.PriceType),
                     IsPrivate = false, // V2 isHidden==true is filtered above
@@ -399,6 +382,42 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
         "percentage" or "percent" => "percent",
         var other => other ?? "fixed"
     };
+
+    /// <summary>
+    /// Normalises one of V2's dual-shape schema fields (requirements OR
+    /// deliverable). Both arrive as <c>Record&lt;string, unknown&gt; | string</c>
+    /// per the SDK's <c>AcpAgentOffering</c> contract — legacy registrations
+    /// use the JSON-as-string shape, newer registrations use the structured
+    /// object. Returns null when the field is missing / null / unparseable
+    /// rather than throwing — schema parsing failures must NOT drop the
+    /// whole offering (or its Resources side-effect).
+    /// </summary>
+    private static JsonElement? NormalizeSchemaJson(JsonElement el)
+    {
+        switch (el.ValueKind)
+        {
+            case JsonValueKind.Object:
+            case JsonValueKind.Array:
+                return el.Clone();
+            case JsonValueKind.String:
+                var raw = el.GetString();
+                if (string.IsNullOrWhiteSpace(raw)) return null;
+                var trimmed = raw.Trim().Trim('"');
+                try
+                {
+                    using var doc = JsonDocument.Parse(trimmed);
+                    return doc.RootElement.Clone();
+                }
+                catch (JsonException)
+                {
+                    // Malformed schema string; surface upstream as null.
+                    return null;
+                }
+            default:
+                // null / undefined / number / boolean → null
+                return null;
+        }
+    }
 
     // ---- response shapes ----
 
@@ -442,6 +461,11 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
         // dropped the whole agent — including its Resources side-effect —
         // pre-fix).
         [JsonPropertyName("requirements")] public JsonElement Requirements { get; set; }
+        // v1.10 Phase 2 T3a. Same dual-shape contract as Requirements
+        // (Record<string, unknown> | string per V2 SDK types.d.ts).
+        // Declared JsonElement, not JsonElement?, so missing fields are
+        // ValueKind=Undefined — NormalizeSchemaJson returns null for those.
+        [JsonPropertyName("deliverable")] public JsonElement Deliverable { get; set; }
         [JsonPropertyName("priceType")] public string? PriceType { get; set; }
         [JsonPropertyName("priceValue")] public double? PriceValue { get; set; }
         [JsonPropertyName("isHidden")] public bool IsHidden { get; set; }

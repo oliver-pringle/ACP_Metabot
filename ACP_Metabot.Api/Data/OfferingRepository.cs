@@ -12,7 +12,11 @@ public record UpsertItem(
     string Description, string? RequirementSchemaJson, double PriceUsdc,
     string PriceType, bool IsPrivate, string Chain, string ContentHash,
     long UsageCount, long AgentJobCount,
-    string MarketplaceVersion = "v1");
+    string MarketplaceVersion = "v1",
+    // v1.10 Phase 2 T3a: deliverable schema persisted alongside the
+    // requirement schema. V2 sources populate this from
+    // AcpAgentOffering.deliverable; V1 sources pass null.
+    string? DeliverableSchemaJson = null);
 
 public record UpsertSummary(int Added, int Updated, int Unchanged);
 
@@ -32,7 +36,11 @@ public class OfferingRepository
         string description, string? requirementSchemaJson, double priceUsdc,
         string priceType, bool isPrivate, string chain, string contentHash,
         long usageCount, long agentJobCount, DateTime nowUtc,
-        string marketplaceVersion = "v1")
+        string marketplaceVersion = "v1",
+        // v1.10 Phase 2 T3a: deliverable schema. Trails the existing
+        // requirement parameter so any older caller that doesn't pass it
+        // still compiles — both default to null (V1-source semantics).
+        string? deliverableSchemaJson = null)
     {
         await using var conn = _db.OpenConnection();
         var nowIso = nowUtc.ToString("O", CultureInfo.InvariantCulture);
@@ -79,6 +87,7 @@ public class OfferingRepository
                     SET agent_name              = $agentName,
                         description             = $desc,
                         requirement_schema_json = $schema,
+                        deliverable_schema_json = $delSchema,
                         price_usdc              = $price,
                         price_type              = $pType,
                         is_private              = $priv,
@@ -91,6 +100,7 @@ public class OfferingRepository
                 upd.Parameters.AddWithValue("$agentName", agentName);
                 upd.Parameters.AddWithValue("$desc", description);
                 upd.Parameters.AddWithValue("$schema", (object?)requirementSchemaJson ?? DBNull.Value);
+                upd.Parameters.AddWithValue("$delSchema", (object?)deliverableSchemaJson ?? DBNull.Value);
                 upd.Parameters.AddWithValue("$price", priceUsdc);
                 upd.Parameters.AddWithValue("$pType", priceType);
                 upd.Parameters.AddWithValue("$priv", isPrivate ? 1 : 0);
@@ -104,9 +114,16 @@ public class OfferingRepository
 
                 // v1.10 Phase 2: refresh schema_facets for this offering. Schema
                 // may have changed, so clear stale facets first then re-extract
-                // from the new requirement schema. Idempotent via INSERT OR IGNORE.
+                // from BOTH the requirement and deliverable schemas. Idempotent
+                // via INSERT OR IGNORE on (offering_id, field_name, role). The
+                // deleteFirst pass on the requirement call clears every facet
+                // (irrespective of role), so the deliverable call deliberately
+                // skips the delete to avoid wiping the requirement rows just
+                // written.
                 await WriteSchemaFacetsAsync(conn, tx: null, existingId,
-                    requirementSchemaJson, deleteFirst: true);
+                    requirementSchemaJson, role: "requirement", deleteFirst: true);
+                await WriteSchemaFacetsAsync(conn, tx: null, existingId,
+                    deliverableSchemaJson, role: "deliverable", deleteFirst: false);
 
                 // Content changed — profile changed, bump dirty flag.
                 if (_agentProfiles is not null)
@@ -120,12 +137,14 @@ public class OfferingRepository
         ins.CommandText = @"
             INSERT INTO offerings (
                 agent_address, agent_name, offering_name, description,
-                requirement_schema_json, price_usdc, price_type, is_private,
+                requirement_schema_json, deliverable_schema_json,
+                price_usdc, price_type, is_private,
                 chain, content_hash, first_seen_at, last_seen_at,
                 usage_count, agent_job_count, marketplace_version)
             VALUES (
                 $a, $agentName, $n, $desc,
-                $schema, $price, $pType, $priv,
+                $schema, $delSchema,
+                $price, $pType, $priv,
                 $chain, $hash, $now, $now,
                 $usage, $agentJobs, $mv);
             SELECT last_insert_rowid();";
@@ -134,6 +153,7 @@ public class OfferingRepository
         ins.Parameters.AddWithValue("$n", offeringName);
         ins.Parameters.AddWithValue("$desc", description);
         ins.Parameters.AddWithValue("$schema", (object?)requirementSchemaJson ?? DBNull.Value);
+        ins.Parameters.AddWithValue("$delSchema", (object?)deliverableSchemaJson ?? DBNull.Value);
         ins.Parameters.AddWithValue("$price", priceUsdc);
         ins.Parameters.AddWithValue("$pType", priceType);
         ins.Parameters.AddWithValue("$priv", isPrivate ? 1 : 0);
@@ -146,10 +166,12 @@ public class OfferingRepository
         var newId = (long)(await ins.ExecuteScalarAsync() ?? 0L);
 
         // v1.10 Phase 2: extract + persist schema_facets for the freshly
-        // inserted offering. No deleteFirst — there's nothing to clean up
-        // on the insert path.
+        // inserted offering across BOTH roles. No deleteFirst on either —
+        // there's nothing to clean up on the insert path.
         await WriteSchemaFacetsAsync(conn, tx: null, newId,
-            requirementSchemaJson, deleteFirst: false);
+            requirementSchemaJson, role: "requirement", deleteFirst: false);
+        await WriteSchemaFacetsAsync(conn, tx: null, newId,
+            deliverableSchemaJson, role: "deliverable", deleteFirst: false);
 
         // New offering inserted — profile changed, bump dirty flag.
         if (_agentProfiles is not null)
@@ -218,6 +240,7 @@ public class OfferingRepository
             SET agent_name              = $agentName,
                 description             = $desc,
                 requirement_schema_json = $schema,
+                deliverable_schema_json = $delSchema,
                 price_usdc              = $price,
                 price_type              = $pType,
                 is_private              = $priv,
@@ -240,6 +263,8 @@ public class OfferingRepository
         var uAgentName = upd.Parameters.Add("$agentName", SqliteType.Text);
         var uDesc = upd.Parameters.Add("$desc", SqliteType.Text);
         var uSchema = upd.Parameters.Add("$schema", SqliteType.Text);
+        // v1.10 Phase 2 T3a: deliverable schema slot on the bulk UPDATE.
+        var uDelSchema = upd.Parameters.Add("$delSchema", SqliteType.Text);
         var uPrice = upd.Parameters.Add("$price", SqliteType.Real);
         var uPType = upd.Parameters.Add("$pType", SqliteType.Text);
         var uPriv = upd.Parameters.Add("$priv", SqliteType.Integer);
@@ -256,12 +281,14 @@ public class OfferingRepository
         ins.CommandText = @"
             INSERT INTO offerings (
                 agent_address, agent_name, offering_name, description,
-                requirement_schema_json, price_usdc, price_type, is_private,
+                requirement_schema_json, deliverable_schema_json,
+                price_usdc, price_type, is_private,
                 chain, content_hash, first_seen_at, last_seen_at,
                 usage_count, agent_job_count, marketplace_version)
             VALUES (
                 $a, $agentName, $n, $desc,
-                $schema, $price, $pType, $priv,
+                $schema, $delSchema,
+                $price, $pType, $priv,
                 $chain, $hash, $now, $now,
                 $usage, $agentJobs, $mv);
             SELECT last_insert_rowid();";
@@ -270,6 +297,8 @@ public class OfferingRepository
         var iN = ins.Parameters.Add("$n", SqliteType.Text);
         var iDesc = ins.Parameters.Add("$desc", SqliteType.Text);
         var iSchema = ins.Parameters.Add("$schema", SqliteType.Text);
+        // v1.10 Phase 2 T3a: deliverable schema slot on the bulk INSERT.
+        var iDelSchema = ins.Parameters.Add("$delSchema", SqliteType.Text);
         var iPrice = ins.Parameters.Add("$price", SqliteType.Real);
         var iPType = ins.Parameters.Add("$pType", SqliteType.Text);
         var iPriv = ins.Parameters.Add("$priv", SqliteType.Integer);
@@ -285,8 +314,10 @@ public class OfferingRepository
         // item — DELETE stale facets on the update path, INSERT OR IGNORE
         // each extracted field name. Scoped to tx so a rollback discards the
         // facet writes too. Same idempotency guarantee as the boot-time
-        // backfill (T3) via the UNIQUE(offering_id, field_name, role)
-        // constraint on schema_facets.
+        // backfill (T3b) via the UNIQUE(offering_id, field_name, role)
+        // constraint on schema_facets. T3a generalises the INSERT to bind
+        // role as a parameter so the same prepared command serves both
+        // requirement and deliverable facets.
         await using var delFacets = conn.CreateCommand();
         delFacets.Transaction = tx;
         delFacets.CommandText = "DELETE FROM schema_facets WHERE offering_id = $id;";
@@ -296,9 +327,10 @@ public class OfferingRepository
         insFacets.Transaction = tx;
         insFacets.CommandText = @"
             INSERT OR IGNORE INTO schema_facets(offering_id, field_name, role)
-            VALUES ($id, $name, 'requirement');";
+            VALUES ($id, $name, $role);";
         var ifId = insFacets.Parameters.Add("$id", SqliteType.Integer);
         var ifName = insFacets.Parameters.Add("$name", SqliteType.Text);
+        var ifRole = insFacets.Parameters.Add("$role", SqliteType.Text);
 
         // Collect agent addresses whose profiles genuinely changed so we can
         // bump agent_profiles.last_change_at after the transaction commits.
@@ -328,6 +360,7 @@ public class OfferingRepository
                     uAgentName.Value = item.AgentName;
                     uDesc.Value = item.Description;
                     uSchema.Value = (object?)item.RequirementSchemaJson ?? DBNull.Value;
+                    uDelSchema.Value = (object?)item.DeliverableSchemaJson ?? DBNull.Value;
                     uPrice.Value = item.PriceUsdc;
                     uPType.Value = item.PriceType;
                     uPriv.Value = item.IsPrivate ? 1 : 0;
@@ -342,15 +375,28 @@ public class OfferingRepository
                     dEmbId.Value = ex.Id;
                     await delEmb.ExecuteNonQueryAsync();
                     // v1.10 Phase 2: same lifecycle for schema_facets — clear
-                    // stale facets and re-extract from the (possibly renamed)
-                    // requirement schema.
+                    // stale facets and re-extract from BOTH the (possibly
+                    // renamed) requirement schema AND the deliverable schema.
+                    // Single DELETE up front since the constraint covers both
+                    // roles via UNIQUE(offering_id, field_name, role).
                     dfId.Value = ex.Id;
                     await delFacets.ExecuteNonQueryAsync();
-                    var updFacets = SchemaFacetExtractor.Extract(item.RequirementSchemaJson);
-                    if (updFacets.Count > 0)
+                    ifId.Value = ex.Id;
+                    var updReqFacets = SchemaFacetExtractor.Extract(item.RequirementSchemaJson);
+                    if (updReqFacets.Count > 0)
                     {
-                        ifId.Value = ex.Id;
-                        foreach (var n in updFacets)
+                        ifRole.Value = "requirement";
+                        foreach (var n in updReqFacets)
+                        {
+                            ifName.Value = n;
+                            await insFacets.ExecuteNonQueryAsync();
+                        }
+                    }
+                    var updDelFacets = SchemaFacetExtractor.Extract(item.DeliverableSchemaJson);
+                    if (updDelFacets.Count > 0)
+                    {
+                        ifRole.Value = "deliverable";
+                        foreach (var n in updDelFacets)
                         {
                             ifName.Value = n;
                             await insFacets.ExecuteNonQueryAsync();
@@ -368,6 +414,7 @@ public class OfferingRepository
                 iN.Value = item.OfferingName;
                 iDesc.Value = item.Description;
                 iSchema.Value = (object?)item.RequirementSchemaJson ?? DBNull.Value;
+                iDelSchema.Value = (object?)item.DeliverableSchemaJson ?? DBNull.Value;
                 iPrice.Value = item.PriceUsdc;
                 iPType.Value = item.PriceType;
                 iPriv.Value = item.IsPrivate ? 1 : 0;
@@ -377,13 +424,25 @@ public class OfferingRepository
                 iAgentJobs.Value = item.AgentJobCount;
                 iMv.Value = item.MarketplaceVersion;
                 var newId = (long)(await ins.ExecuteScalarAsync() ?? 0L);
-                // v1.10 Phase 2: persist schema facets for the new offering.
-                // No DELETE — nothing to clean up on the fresh-insert path.
-                var insFacetNames = SchemaFacetExtractor.Extract(item.RequirementSchemaJson);
-                if (insFacetNames.Count > 0)
+                // v1.10 Phase 2: persist schema facets for the new offering
+                // across BOTH roles. No DELETE — nothing to clean up on the
+                // fresh-insert path.
+                ifId.Value = newId;
+                var insReqFacets = SchemaFacetExtractor.Extract(item.RequirementSchemaJson);
+                if (insReqFacets.Count > 0)
                 {
-                    ifId.Value = newId;
-                    foreach (var n in insFacetNames)
+                    ifRole.Value = "requirement";
+                    foreach (var n in insReqFacets)
+                    {
+                        ifName.Value = n;
+                        await insFacets.ExecuteNonQueryAsync();
+                    }
+                }
+                var insDelFacets = SchemaFacetExtractor.Extract(item.DeliverableSchemaJson);
+                if (insDelFacets.Count > 0)
+                {
+                    ifRole.Value = "deliverable";
+                    foreach (var n in insDelFacets)
                     {
                         ifName.Value = n;
                         await insFacets.ExecuteNonQueryAsync();
@@ -409,27 +468,29 @@ public class OfferingRepository
     }
 
     /// <summary>
-    /// v1.10 Phase 2: extract top-level field names from the requirement
-    /// schema and persist them into <c>schema_facets</c> for the given
-    /// offering id. Idempotent via the UNIQUE(offering_id, field_name, role)
-    /// constraint — the INSERT OR IGNORE on this table is what makes the
-    /// boot-time backfill (T3) and steady-state UpsertAsync writes safely
-    /// co-exist without dedupe logic at the caller.
+    /// v1.10 Phase 2: extract top-level field names from a schema (either
+    /// the requirement schema or the deliverable schema, distinguished by
+    /// <paramref name="role"/>) and persist them into <c>schema_facets</c>
+    /// for the given offering id. Idempotent via the
+    /// UNIQUE(offering_id, field_name, role) constraint — the INSERT OR IGNORE
+    /// on this table is what makes the boot-time backfill (T3b) and
+    /// steady-state UpsertAsync writes safely co-exist without dedupe logic
+    /// at the caller.
     ///
     /// Set <paramref name="deleteFirst"/> on the content-changed update path
     /// so stale field names from a renamed property don't survive the schema
-    /// rewrite. On a fresh insert there's nothing to clean up.
+    /// rewrite. On a fresh insert there's nothing to clean up. The delete is
+    /// scoped to the OFFERING (not by role) because update calls clear all
+    /// facets up-front and re-insert both roles back-to-back — splitting the
+    /// delete per role would require two passes against the same index.
     ///
-    /// PHASE 2 LIMITATION: only the requirement schema is persisted on the
-    /// offerings row today (column <c>requirement_schema_json</c>). The
-    /// deliverable schema role exists in <c>schema_facets</c> for forward
-    /// compatibility once UpsertAsync / Offering / offerings.deliverable_*
-    /// land in a follow-up; the upsert never writes deliverable facets yet
-    /// because the deliverable schema isn't a column on offerings.
+    /// <paramref name="role"/> must be either <c>"requirement"</c> or
+    /// <c>"deliverable"</c> — the CHECK constraint on schema_facets enforces
+    /// the same.
     /// </summary>
     private static async Task WriteSchemaFacetsAsync(
         SqliteConnection conn, SqliteTransaction? tx,
-        long offeringId, string? requirementSchemaJson, bool deleteFirst)
+        long offeringId, string? schemaJson, string role, bool deleteFirst)
     {
         if (deleteFirst)
         {
@@ -440,18 +501,20 @@ public class OfferingRepository
             await del.ExecuteNonQueryAsync();
         }
 
-        var reqFacets = SchemaFacetExtractor.Extract(requirementSchemaJson);
-        if (reqFacets.Count == 0) return;
+        var facets = SchemaFacetExtractor.Extract(schemaJson);
+        if (facets.Count == 0) return;
 
         await using var ins = conn.CreateCommand();
         if (tx is not null) ins.Transaction = tx;
         ins.CommandText = @"
             INSERT OR IGNORE INTO schema_facets(offering_id, field_name, role)
-            VALUES ($id, $name, 'requirement');";
+            VALUES ($id, $name, $role);";
         var idP = ins.Parameters.Add("$id", SqliteType.Integer);
         var nameP = ins.Parameters.Add("$name", SqliteType.Text);
+        var roleP = ins.Parameters.Add("$role", SqliteType.Text);
         idP.Value = offeringId;
-        foreach (var n in reqFacets)
+        roleP.Value = role;
+        foreach (var n in facets)
         {
             nameP.Value = n;
             await ins.ExecuteNonQueryAsync();
@@ -542,7 +605,8 @@ public class OfferingRepository
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             SELECT id, agent_address, agent_name, offering_name, description,
-                   requirement_schema_json, price_usdc, price_type, is_private,
+                   requirement_schema_json, deliverable_schema_json,
+                   price_usdc, price_type, is_private,
                    chain, content_hash, first_seen_at, last_seen_at,
                    usage_count, agent_job_count, marketplace_version,
                    is_removed, removed_at
@@ -559,7 +623,8 @@ public class OfferingRepository
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             SELECT o.id, o.agent_address, o.agent_name, o.offering_name, o.description,
-                   o.requirement_schema_json, o.price_usdc, o.price_type, o.is_private,
+                   o.requirement_schema_json, o.deliverable_schema_json,
+                   o.price_usdc, o.price_type, o.is_private,
                    o.chain, o.content_hash, o.first_seen_at, o.last_seen_at,
                    o.usage_count, o.agent_job_count, o.marketplace_version,
                    o.is_removed, o.removed_at
@@ -590,7 +655,8 @@ public class OfferingRepository
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             SELECT o.id, o.agent_address, o.agent_name, o.offering_name, o.description,
-                   o.requirement_schema_json, o.price_usdc, o.price_type, o.is_private,
+                   o.requirement_schema_json, o.deliverable_schema_json,
+                   o.price_usdc, o.price_type, o.is_private,
                    o.chain, o.content_hash, o.first_seen_at, o.last_seen_at,
                    o.usage_count, o.agent_job_count, o.marketplace_version,
                    o.is_removed, o.removed_at,
@@ -605,9 +671,12 @@ public class OfferingRepository
         while (await reader.ReadAsync())
         {
             var o = MapOffering(reader);
-            // Embedding cols sit AFTER the tombstone cols added in v1.5.
-            var dim = reader.GetInt32(18);
-            var blob = (byte[])reader[19];
+            // Embedding cols sit AFTER the v1.5 tombstone cols. v1.10 Phase 2
+            // T3a inserted deliverable_schema_json between requirement_schema_json
+            // and price_usdc, shifting every offering col +1 → embedding cols
+            // moved from 18/19 to 19/20.
+            var dim = reader.GetInt32(19);
+            var blob = (byte[])reader[20];
             var emb = new float[dim];
             Buffer.BlockCopy(blob, 0, emb, 0, dim * sizeof(float));
             result.Add((o, emb));
@@ -828,7 +897,8 @@ public class OfferingRepository
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             SELECT id, agent_address, agent_name, offering_name, description,
-                   requirement_schema_json, price_usdc, price_type, is_private,
+                   requirement_schema_json, deliverable_schema_json,
+                   price_usdc, price_type, is_private,
                    chain, content_hash, first_seen_at, last_seen_at,
                    usage_count, agent_job_count, marketplace_version,
                    is_removed, removed_at
@@ -851,7 +921,8 @@ public class OfferingRepository
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             SELECT id, agent_address, agent_name, offering_name, description,
-                   requirement_schema_json, price_usdc, price_type, is_private,
+                   requirement_schema_json, deliverable_schema_json,
+                   price_usdc, price_type, is_private,
                    chain, content_hash, first_seen_at, last_seen_at,
                    usage_count, agent_job_count, marketplace_version,
                    is_removed, removed_at
@@ -901,7 +972,8 @@ public class OfferingRepository
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             SELECT id, agent_address, agent_name, offering_name, description,
-                   requirement_schema_json, price_usdc, price_type, is_private,
+                   requirement_schema_json, deliverable_schema_json,
+                   price_usdc, price_type, is_private,
                    chain, content_hash, first_seen_at, last_seen_at,
                    usage_count, agent_job_count, marketplace_version,
                    is_removed, removed_at
@@ -1316,17 +1388,21 @@ public class OfferingRepository
 
     private static Offering MapOffering(System.Data.Common.DbDataReader reader)
     {
-        // Optional tombstone columns at the end of the projection. Present in
-        // every SELECT below; older callers that read offset-by-offset still
-        // see the existing 16-column shape because is_removed/removed_at
-        // sit at columns 16/17.
+        // Optional tombstone columns near the tail of the projection. Present
+        // in every SELECT below. v1.10 Phase 2 T3a inserted
+        // deliverable_schema_json at index 6, shifting every column from
+        // price_usdc (was 6, now 7) onward by +1.
+        //
+        // The FieldCount guard is preserved for legacy callers that read the
+        // pre-v1.5 16-column shape, but every shipping SELECT now projects
+        // through removed_at — the guards still hold even at the new offsets.
         bool isRemoved = false;
         DateTime? removedAt = null;
-        if (reader.FieldCount > 16)
+        if (reader.FieldCount > 17)
         {
-            if (!reader.IsDBNull(16)) isRemoved = reader.GetInt32(16) != 0;
-            if (reader.FieldCount > 17 && !reader.IsDBNull(17))
-                removedAt = DateTime.Parse(reader.GetString(17),
+            if (!reader.IsDBNull(17)) isRemoved = reader.GetInt32(17) != 0;
+            if (reader.FieldCount > 18 && !reader.IsDBNull(18))
+                removedAt = DateTime.Parse(reader.GetString(18),
                     CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
         }
         return new Offering(
@@ -1336,17 +1412,20 @@ public class OfferingRepository
             OfferingName: reader.GetString(3),
             Description: reader.GetString(4),
             RequirementSchemaJson: reader.IsDBNull(5) ? null : reader.GetString(5),
-            PriceUsdc: reader.GetDouble(6),
-            PriceType: reader.GetString(7),
-            IsPrivate: reader.GetInt32(8) != 0,
-            Chain: reader.GetString(9),
-            ContentHash: reader.GetString(10),
-            FirstSeenAt: DateTime.Parse(reader.GetString(11), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-            LastSeenAt: DateTime.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-            UsageCount: reader.GetInt64(13),
-            AgentJobCount: reader.GetInt64(14),
-            MarketplaceVersion: reader.GetString(15),
+            // v1.10 Phase 2 T3a: deliverable schema at index 6 (between the
+            // requirement schema and price_usdc).
+            PriceUsdc: reader.GetDouble(7),
+            PriceType: reader.GetString(8),
+            IsPrivate: reader.GetInt32(9) != 0,
+            Chain: reader.GetString(10),
+            ContentHash: reader.GetString(11),
+            FirstSeenAt: DateTime.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            LastSeenAt: DateTime.Parse(reader.GetString(13), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            UsageCount: reader.GetInt64(14),
+            AgentJobCount: reader.GetInt64(15),
+            MarketplaceVersion: reader.GetString(16),
             IsRemoved: isRemoved,
-            RemovedAt: removedAt);
+            RemovedAt: removedAt,
+            DeliverableSchemaJson: reader.IsDBNull(6) ? null : reader.GetString(6));
     }
 }

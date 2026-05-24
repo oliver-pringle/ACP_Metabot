@@ -128,6 +128,7 @@ public class AcpApiMarketplaceSource : IMarketplaceSource
             OfferingName = name,
             Description = row.Skill?.Description ?? "",
             RequirementSchema = null, // upstream doesn't expose it on the list endpoint
+            DeliverableSchema = null, // V1's /api/metrics/skills doesn't expose deliverable either
             PriceUsdc = priceValue,
             PriceType = priceType,
             IsPrivate = false,

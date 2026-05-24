@@ -23,6 +23,14 @@ public class MarketplaceOfferingDto
     [JsonPropertyName("requirementSchema")]
     public JsonElement? RequirementSchema { get; set; }
 
+    // v1.10 Phase 2 T3a: deliverable schema. V2 marketplace exposes this
+    // on AcpAgentOffering.deliverable (Record<string, unknown> | string —
+    // the same dual shape as requirements). V1's list endpoint does NOT
+    // expose this, so V1 sources leave it null and V1-sourced rows persist
+    // with deliverable_schema_json IS NULL.
+    [JsonPropertyName("deliverableSchema")]
+    public JsonElement? DeliverableSchema { get; set; }
+
     [JsonPropertyName("priceUsdc")]
     public double PriceUsdc { get; set; }
 

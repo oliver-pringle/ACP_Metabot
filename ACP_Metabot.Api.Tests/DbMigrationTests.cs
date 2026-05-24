@@ -608,6 +608,164 @@ public class DbMigrationTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Migration_adds_deliverable_schema_json_to_offerings()
+    {
+        // v1.10 Phase 2 T3a: the offerings table gains a deliverable_schema_json
+        // column so the upsert path can persist the deliverable schema upstream
+        // V2 returns (Record<string, unknown> | string per AcpAgentOffering)
+        // and feed it into WriteSchemaFacetsAsync for the 'deliverable' role.
+        var dbPath = Path.Combine(Path.GetTempPath(), $"metabot-del-{Guid.NewGuid():N}.db");
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:Sqlite"] = $"Data Source={dbPath}"
+            }).Build();
+        var db = new Db(config);
+        await db.InitializeSchemaAsync();
+        try
+        {
+            await using var conn = db.OpenConnection();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA table_info(offerings);";
+            var hasColumn = false;
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync())
+            {
+                var colName = rdr.GetString(1);
+                if (colName == "deliverable_schema_json") { hasColumn = true; break; }
+            }
+            Assert.True(hasColumn, "offerings.deliverable_schema_json column should exist after migration");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { File.Delete(dbPath); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task LegacyMigration_addsDeliverableSchemaJsonAsNull()
+    {
+        // Legacy DB (v1.2 shape, no marketplace_version, no tombstone, no
+        // deliverable_schema_json). After migration, every row must have
+        // deliverable_schema_json = NULL — no fake data.
+        await CreateLegacySchemaAsync();
+        await SeedOfferingsLegacy(rowCount: 4);
+        await _db.InitializeSchemaAsync();
+
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT deliverable_schema_json FROM offerings;";
+        await using var reader = await cmd.ExecuteReaderAsync();
+        int rowCount = 0;
+        while (await reader.ReadAsync())
+        {
+            Assert.True(reader.IsDBNull(0));
+            rowCount++;
+        }
+        Assert.Equal(4, rowCount);
+    }
+
+    [Fact]
+    public async Task UpsertManyAsync_persistsBothSchemaRolesIntoFacets()
+    {
+        // T3a end-to-end smoke: an UpsertItem with BOTH requirement and
+        // deliverable schemas must populate schema_facets with rows for
+        // both roles AND persist both columns onto offerings.
+        await _db.InitializeSchemaAsync();
+        var repo = new OfferingRepository(_db);
+        var nowUtc = DateTime.UtcNow;
+
+        var item = new UpsertItem(
+            AgentAddress: "0xab", AgentName: "agent", OfferingName: "fetch",
+            Description: "test offering",
+            RequirementSchemaJson: """{"type":"object","properties":{"walletAddress":{"type":"string"}}}""",
+            PriceUsdc: 0.10, PriceType: "fixed", IsPrivate: false, Chain: "base",
+            ContentHash: "h1",
+            UsageCount: 0, AgentJobCount: 0, MarketplaceVersion: "v2",
+            DeliverableSchemaJson: """{"type":"object","properties":{"txHash":{"type":"string"},"blockNumber":{"type":"integer"}}}""");
+
+        var summary = await repo.UpsertManyAsync(new[] { item }, nowUtc);
+        Assert.Equal(1, summary.Added);
+
+        // Both columns persisted.
+        await using var conn = _db.OpenConnection();
+        await using var colCmd = conn.CreateCommand();
+        colCmd.CommandText = @"
+            SELECT requirement_schema_json IS NOT NULL,
+                   deliverable_schema_json IS NOT NULL
+            FROM offerings;";
+        await using var colReader = await colCmd.ExecuteReaderAsync();
+        Assert.True(await colReader.ReadAsync());
+        Assert.Equal(1, colReader.GetInt32(0));
+        Assert.Equal(1, colReader.GetInt32(1));
+        await colReader.CloseAsync();
+
+        // Facets populated for BOTH roles.
+        await using var facetCmd = conn.CreateCommand();
+        facetCmd.CommandText = @"
+            SELECT role, field_name FROM schema_facets
+            ORDER BY role, field_name;";
+        var facets = new List<(string Role, string Name)>();
+        await using var fr = await facetCmd.ExecuteReaderAsync();
+        while (await fr.ReadAsync())
+        {
+            facets.Add((fr.GetString(0), fr.GetString(1)));
+        }
+        // Expect: deliverable.blocknumber, deliverable.txhash, requirement.walletaddress
+        Assert.Equal(3, facets.Count);
+        Assert.Contains(facets, f => f.Role == "deliverable" && f.Name == "txhash");
+        Assert.Contains(facets, f => f.Role == "deliverable" && f.Name == "blocknumber");
+        Assert.Contains(facets, f => f.Role == "requirement" && f.Name == "walletaddress");
+    }
+
+    [Fact]
+    public async Task UpsertManyAsync_contentChange_replacesDeliverableFacets()
+    {
+        // T3a lifecycle: when an offering's deliverable schema changes, the
+        // stale deliverable facets must be cleared AND the new ones written.
+        // The requirement facets must survive (they get cleared and rewritten
+        // in the same DELETE-then-INSERT pass).
+        await _db.InitializeSchemaAsync();
+        var repo = new OfferingRepository(_db);
+        var nowUtc = DateTime.UtcNow;
+
+        // v1: deliverable has fields A,B
+        var v1 = new UpsertItem(
+            AgentAddress: "0xab", AgentName: "agent", OfferingName: "fetch",
+            Description: "test", RequirementSchemaJson: """{"properties":{"x":{}}}""",
+            PriceUsdc: 0.10, PriceType: "fixed", IsPrivate: false, Chain: "base",
+            ContentHash: "h1",
+            UsageCount: 0, AgentJobCount: 0, MarketplaceVersion: "v2",
+            DeliverableSchemaJson: """{"properties":{"a":{},"b":{}}}""");
+        await repo.UpsertManyAsync(new[] { v1 }, nowUtc);
+
+        // v2: deliverable now has fields C,D — A and B should be removed.
+        var v2 = v1 with
+        {
+            ContentHash = "h2",
+            DeliverableSchemaJson = """{"properties":{"c":{},"d":{}}}"""
+        };
+        var summary = await repo.UpsertManyAsync(new[] { v2 }, nowUtc.AddMinutes(1));
+        Assert.Equal(1, summary.Updated);
+
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT role, field_name FROM schema_facets
+            ORDER BY role, field_name;";
+        var facets = new List<(string Role, string Name)>();
+        await using var rdr = await cmd.ExecuteReaderAsync();
+        while (await rdr.ReadAsync())
+            facets.Add((rdr.GetString(0), rdr.GetString(1)));
+        Assert.Equal(3, facets.Count);
+        Assert.Contains(facets, f => f.Role == "deliverable" && f.Name == "c");
+        Assert.Contains(facets, f => f.Role == "deliverable" && f.Name == "d");
+        Assert.Contains(facets, f => f.Role == "requirement" && f.Name == "x");
+        Assert.DoesNotContain(facets, f => f.Name == "a" || f.Name == "b");
+    }
+
     private async Task InsertOfferingWithLastSeen(string addr, string agentName,
         string offeringName, string mv, DateTime lastSeenUtc)
     {

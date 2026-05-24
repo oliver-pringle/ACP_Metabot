@@ -123,17 +123,41 @@ public class MarketplaceIndexerService : BackgroundService
                         schemaJson = schemaJson.Substring(0, MaxSchemaJsonLen);
                 }
 
+                // v1.10 Phase 2 T3a: deliverable schema. Same trust-boundary
+                // truncation as the requirement schema. V1 sources leave
+                // DeliverableSchema null; V2 fills it from AcpAgentOffering.deliverable.
+                string? deliverableSchemaJson = null;
+                if (dto.DeliverableSchema is not null)
+                {
+                    deliverableSchemaJson = JsonSerializer.Serialize(dto.DeliverableSchema);
+                    if (deliverableSchemaJson.Length > MaxSchemaJsonLen)
+                        deliverableSchemaJson = deliverableSchemaJson.Substring(0, MaxSchemaJsonLen);
+                }
+
                 // marketplace_version included in the hash so v1 and v2
                 // rows of "the same" offering are tracked independently —
                 // belt-and-braces alongside the composite UNIQUE.
+                //
+                // v1.10 Phase 2 T3a: deliverableSchemaJson joins the hash so
+                // a marketplace-side deliverable-only edit is detected as a
+                // content change and triggers the UPDATE path (which writes
+                // the new schema + re-extracts deliverable facets + drops
+                // the embedding for re-embed). On first deploy post-T3a,
+                // every V2 row with a non-null upstream deliverable will
+                // appear as "changed" — that's intentional: it backfills
+                // deliverable_schema_json + the 'deliverable' facets via
+                // the steady-state indexer rather than needing a separate
+                // boot-time pass. The boot-time backfill in T3b covers the
+                // case where the indexer hasn't ticked yet at boot.
                 var hash = ContentHash(dto.AgentAddress, offeringName, description,
                     dto.PriceUsdc, dto.PriceType, dto.Chain, schemaJson,
-                    source.MarketplaceVersion);
+                    source.MarketplaceVersion, deliverableSchemaJson);
                 items.Add(new UpsertItem(
                     dto.AgentAddress, agentName, offeringName, description,
                     schemaJson, dto.PriceUsdc, dto.PriceType, dto.IsPrivate, dto.Chain,
                     hash, dto.UsageCount, dto.AgentJobCount,
-                    MarketplaceVersion: source.MarketplaceVersion));
+                    MarketplaceVersion: source.MarketplaceVersion,
+                    DeliverableSchemaJson: deliverableSchemaJson));
             }
         }
 
@@ -248,12 +272,13 @@ public class MarketplaceIndexerService : BackgroundService
 
     private static string ContentHash(string agentAddress, string offeringName,
         string description, double priceUsdc, string priceType, string chain, string? schemaJson,
-        string marketplaceVersion)
+        string marketplaceVersion, string? deliverableSchemaJson = null)
     {
         var canonical = string.Join("",
             agentAddress, offeringName, description,
             priceUsdc.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-            priceType, chain, schemaJson ?? "", marketplaceVersion);
+            priceType, chain, schemaJson ?? "", marketplaceVersion,
+            deliverableSchemaJson ?? "");
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
