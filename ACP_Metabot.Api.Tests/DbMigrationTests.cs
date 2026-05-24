@@ -570,6 +570,44 @@ public class DbMigrationTests : IDisposable
             found.OrderBy(x => x, StringComparer.Ordinal).ToArray());
     }
 
+    // -----------------------------------------------------------------
+    // v1.10 Phase 2 — schema_facets schema tests
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task Migration_creates_schema_facets()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"metabot-sf-{Guid.NewGuid():N}.db");
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:Sqlite"] = $"Data Source={dbPath}"
+            }).Build();
+        var db = new Db(config);
+        await db.InitializeSchemaAsync();
+        try
+        {
+            await using var conn = db.OpenConnection();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT name FROM sqlite_master
+                WHERE type IN ('table','index')
+                  AND name IN ('schema_facets', 'ix_schema_facets_field', 'ix_schema_facets_off')
+                ORDER BY name;";
+            var found = new List<string>();
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync()) found.Add(rdr.GetString(0));
+            Assert.Equal(
+                new[] { "ix_schema_facets_field", "ix_schema_facets_off", "schema_facets" },
+                found.OrderBy(x => x, StringComparer.Ordinal).ToArray());
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { File.Delete(dbPath); } catch { }
+        }
+    }
+
     private async Task InsertOfferingWithLastSeen(string addr, string agentName,
         string offeringName, string mv, DateTime lastSeenUtc)
     {

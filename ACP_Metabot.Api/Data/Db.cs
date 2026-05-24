@@ -389,6 +389,20 @@ public class Db
                 VALUES('delete', old.id, old.name, old.description);
             END;
 
+            -- v1.10 Phase 2: schema_facets index for sub-offering field filtering.
+            -- Populated incrementally on OfferingRepository.UpsertAsync; one-time
+            -- backfill at boot if the table is empty (BackfillSchemaFacetsAsync).
+            CREATE TABLE IF NOT EXISTS schema_facets (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                offering_id     INTEGER NOT NULL,
+                field_name      TEXT NOT NULL,
+                role            TEXT NOT NULL CHECK (role IN ('requirement', 'deliverable')),
+                UNIQUE (offering_id, field_name, role),
+                FOREIGN KEY (offering_id) REFERENCES offerings(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS ix_schema_facets_field ON schema_facets(field_name, role);
+            CREATE INDEX IF NOT EXISTS ix_schema_facets_off ON schema_facets(offering_id);
+
             -- v1.6 #1 v0.1: reputation_feeds tracks ReputationAggregator
             -- contracts deployed by ChainlinkBot's POST /feed-address on behalf
             -- of high-reputation agents in our corpus. One row per agent; the
