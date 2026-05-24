@@ -16,10 +16,18 @@ public static class WebhookUrlValidator
 {
     public record Result(bool Ok, string? Reason);
 
+    // 2026-05-24 hardening: bound URL length + restrict to standard webhook
+    // port. Pre-hardening any-port + any-length was accepted.
+    public const int MaxUrlLength = 2048;
+    private const int AllowedHttpsPort = 443;
+
     public static async Task<Result> ValidateAsync(string url, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(url))
             return new Result(false, "webhookUrl is empty");
+
+        if (url.Length > MaxUrlLength)
+            return new Result(false, $"webhookUrl exceeds {MaxUrlLength} characters");
 
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
             return new Result(false, "webhookUrl is not a valid absolute URL");
@@ -27,9 +35,22 @@ public static class WebhookUrlValidator
         if (!string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
             return new Result(false, "webhookUrl must use https");
 
+        if (!uri.IsDefaultPort && uri.Port != AllowedHttpsPort)
+            return new Result(false, $"webhookUrl port {uri.Port} not allowed for https:// in production; allowed: {AllowedHttpsPort}");
+
+        if (!string.IsNullOrEmpty(uri.UserInfo))
+            return new Result(false, "webhookUrl must not contain userinfo (user:pass@host)");
+
         var host = uri.Host;
         if (string.IsNullOrEmpty(host))
             return new Result(false, "webhookUrl has no host");
+
+        // Refuse raw non-ASCII unicode in hostname — require punycode form.
+        foreach (var ch in host)
+        {
+            if (!(char.IsAsciiLetterOrDigit(ch) || ch == '-' || ch == '.'))
+                return new Result(false, $"webhookUrl host contains non-ASCII character '{ch}' — use punycode (xn--) form");
+        }
 
         // Hostname blacklist (catches obvious cases without DNS).
         if (IsBlockedHostname(host))
@@ -62,6 +83,22 @@ public static class WebhookUrlValidator
         }
 
         return new Result(true, null);
+    }
+
+    /// 2026-05-24 hardening: connect-time IP guard for SocketsHttpHandler.
+    /// ConnectCallback. Re-validates the actual resolved IPEndPoint against
+    /// the same blocklist before the TCP connect, closing the DNS-rebind
+    /// TOCTOU window between ValidateAsync's DNS lookup and HttpClient's
+    /// own connect-time resolution. Portfolio defense-in-depth pattern.
+    public static bool IsConnectBlocked(IPAddress addr, out string reason)
+    {
+        if (IsPrivateOrInternal(addr))
+        {
+            reason = $"blocked private/internal address {addr}";
+            return true;
+        }
+        reason = "";
+        return false;
     }
 
     private static bool IsBlockedHostname(string host)

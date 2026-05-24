@@ -35,7 +35,12 @@ public record RiskSubscription(
 public class RiskSubscriptionRepository
 {
     private readonly Db _db;
-    public RiskSubscriptionRepository(Db db) => _db = db;
+    private readonly ACP_Metabot.Api.Services.WebhookSecretCipher _cipher;
+    public RiskSubscriptionRepository(Db db, ACP_Metabot.Api.Services.WebhookSecretCipher cipher)
+    {
+        _db = db;
+        _cipher = cipher;
+    }
 
     public async Task InsertAsync(RiskSubscription sub)
     {
@@ -60,7 +65,8 @@ public class RiskSubscriptionRepository
         cmd.Parameters.AddWithValue("$wallet", sub.WalletAddress.ToLowerInvariant());
         cmd.Parameters.AddWithValue("$chain",  sub.Chain);
         cmd.Parameters.AddWithValue("$url",    sub.WebhookUrl);
-        cmd.Parameters.AddWithValue("$secret", sub.WebhookSecret);
+        // 2026-05-24 hardening: AES-256-GCM at rest (opt-in via env). Lazy migration.
+        cmd.Parameters.AddWithValue("$secret", _cipher.Protect(sub.WebhookSecret));
         cmd.Parameters.AddWithValue("$cadence", sub.Cadence);
         cmd.Parameters.AddWithValue("$tp",     sub.TicksPurchased);
         cmd.Parameters.AddWithValue("$td",     sub.TicksDelivered);
@@ -158,16 +164,16 @@ public class RiskSubscriptionRepository
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private static async Task<RiskSubscription?> ReadOneAsync(SqliteDataReader reader)
+    private async Task<RiskSubscription?> ReadOneAsync(SqliteDataReader reader)
     {
         if (!await reader.ReadAsync()) return null;
         return ReadFromReader(reader);
     }
 
-    private static Task<RiskSubscription?> ReadOneSyncOrNullAsync(SqliteDataReader reader)
+    private Task<RiskSubscription?> ReadOneSyncOrNullAsync(SqliteDataReader reader)
         => Task.FromResult<RiskSubscription?>(ReadFromReader(reader));
 
-    private static RiskSubscription ReadFromReader(SqliteDataReader reader)
+    private RiskSubscription ReadFromReader(SqliteDataReader reader)
     {
         DateTime ParseUtc(int i) => DateTime.Parse(reader.GetString(i),
             CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
@@ -180,7 +186,8 @@ public class RiskSubscriptionRepository
             WalletAddress:       reader.GetString(3),
             Chain:               reader.GetString(4),
             WebhookUrl:          reader.GetString(5),
-            WebhookSecret:       reader.GetString(6),
+            // 2026-05-24 hardening: decrypt at-rest secret on read.
+            WebhookSecret:       _cipher.Unprotect(reader.GetString(6)),
             Cadence:             reader.GetString(7),
             TicksPurchased:      reader.GetInt32(8),
             TicksDelivered:      reader.GetInt32(9),

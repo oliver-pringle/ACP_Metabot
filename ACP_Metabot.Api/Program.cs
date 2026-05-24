@@ -1,5 +1,6 @@
 using System.Threading.RateLimiting;
 using ACP_Metabot.Api.Data;
+using ACP_Metabot.Api.Middleware;
 using ACP_Metabot.Api.Models;
 using ACP_Metabot.Api.Services;
 using ACP_Metabot.Api.Services.MarketplaceSource;
@@ -18,6 +19,11 @@ builder.Services.Configure<KestrelServerOptions>(options =>
 });
 
 builder.Services.AddSingleton<Db>();
+// 2026-05-24 hardening: AES-256-GCM cipher for webhook_secret at rest. Opt-in
+// via WEBHOOK_SECRET_ENCRYPTION_KEY (base64 32 bytes); no-op plaintext
+// passthrough when unset. Wrapped into PulseSubscriptionRepository +
+// RiskSubscriptionRepository transparently. Lazy migration via "v1:" prefix.
+builder.Services.AddSingleton<WebhookSecretCipher>();
 builder.Services.AddSingleton<AgentProfileRepository>();
 builder.Services.AddSingleton<OfferingRepository>();
 builder.Services.AddSingleton<WatchRepository>();
@@ -509,6 +515,33 @@ if (!app.Environment.IsDevelopment())
 
 app.UseRateLimiter();
 
+// 2026-05-24 hardening: per-X-API-Key + per-IP sliding-window limit on
+// heavy internal endpoints that the existing ASP.NET RateLimiter doesn't
+// cover (the existing per-policy limits attach by [EnableRateLimiting]
+// attribute to public /v1/* endpoints only). My middleware adds a backstop
+// per-X-API-Key bucket for cross-bot consumers (e.g. ChainlinkBot reading
+// /v1/internal/agentReputation hot) and a per-IP backstop for the
+// subscription-bind paths. Runs AFTER UseRateLimiter so public-policy
+// 429s still fire first; my bucket is the second layer.
+app.UseMiddleware<RateLimitMiddleware>();
+
+// 2026-05-24 hardening: minimal security headers on every response.
+// nosniff + Referrer-Policy always; Cache-Control: no-store on non-Resource
+// paths so paid responses + subscription metadata aren't cached.
+app.Use(async (ctx, next) =>
+{
+    ctx.Response.OnStarting(() =>
+    {
+        var p = ctx.Request.Path.Value ?? string.Empty;
+        ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
+        ctx.Response.Headers["Referrer-Policy"]        = "no-referrer";
+        if (!p.StartsWith("/v1/resources/", StringComparison.Ordinal) && p != "/health")
+            ctx.Response.Headers["Cache-Control"] = "no-store";
+        return Task.CompletedTask;
+    });
+    await next();
+});
+
 // Operator metrics: record every request (including 429s and 401s) into
 // the request_log table. Sits AFTER UseRateLimiter so 429 responses are
 // captured, BEFORE the X-API-Key middleware so unauthorized internal-path
@@ -536,6 +569,24 @@ app.UseMiddleware<RequestMetricsMiddleware>();
 //
 // All /v1/internal/* paths require X-API-Key.
 var apiKey = builder.Configuration["INTERNAL_API_KEY"];
+// 2026-05-24 hardening: fail-fast on missing or short INTERNAL_API_KEY in
+// any non-Development environment. Pre-hardening, every protected request
+// returned 500 "INTERNAL_API_KEY is not configured" — that's a per-request
+// failure mode rather than a boot-time signal. The min length floor catches
+// operators who paste a short demo key. Portfolio pattern (ACP_OracleBot v0.7,
+// ACP_ChainlinkBot v1.3.1).
+if (!app.Environment.IsDevelopment())
+{
+    if (string.IsNullOrWhiteSpace(apiKey))
+        throw new InvalidOperationException(
+            "INTERNAL_API_KEY is required in non-Development environments. " +
+            $"Current environment: {app.Environment.EnvironmentName}. " +
+            "Set the env var to a high-entropy random string (>= 32 chars).");
+    if (apiKey.Length < 32)
+        throw new InvalidOperationException(
+            $"INTERNAL_API_KEY is only {apiKey.Length} characters; require >= 32 in non-Development. " +
+            "Generate a stronger one: `openssl rand -hex 32`.");
+}
 var apiKeyBytes = string.IsNullOrEmpty(apiKey)
     ? Array.Empty<byte>()
     : System.Text.Encoding.UTF8.GetBytes(apiKey);

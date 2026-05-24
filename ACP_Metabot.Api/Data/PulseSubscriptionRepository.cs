@@ -31,7 +31,12 @@ public record PulseSubscription(
 public class PulseSubscriptionRepository
 {
     private readonly Db _db;
-    public PulseSubscriptionRepository(Db db) => _db = db;
+    private readonly ACP_Metabot.Api.Services.WebhookSecretCipher _cipher;
+    public PulseSubscriptionRepository(Db db, ACP_Metabot.Api.Services.WebhookSecretCipher cipher)
+    {
+        _db = db;
+        _cipher = cipher;
+    }
 
     public async Task InsertAsync(PulseSubscription sub)
     {
@@ -52,7 +57,10 @@ public class PulseSubscriptionRepository
         cmd.Parameters.AddWithValue("$job",     sub.JobId);
         cmd.Parameters.AddWithValue("$buyer",   sub.BuyerAddress.ToLowerInvariant());
         cmd.Parameters.AddWithValue("$url",     sub.WebhookUrl);
-        cmd.Parameters.AddWithValue("$secret",  sub.WebhookSecret);
+        // 2026-05-24 hardening: webhook_secret optionally AES-256-GCM at rest
+        // via WEBHOOK_SECRET_ENCRYPTION_KEY. No-op (plaintext passthrough)
+        // when unset; lazy migration via "v1:" prefix sentinel.
+        cmd.Parameters.AddWithValue("$secret",  _cipher.Protect(sub.WebhookSecret));
         cmd.Parameters.AddWithValue("$cadence", sub.Cadence);
         cmd.Parameters.AddWithValue("$market",  sub.Marketplace);
         cmd.Parameters.AddWithValue("$tp",      sub.TicksPurchased);
@@ -132,7 +140,7 @@ public class PulseSubscriptionRepository
                  status, created_at, expires_at, first_tick_at,
                  last_run_at, next_run_at, last_payload_hash";
 
-    private static PulseSubscription ReadFromReader(SqliteDataReader r)
+    private PulseSubscription ReadFromReader(SqliteDataReader r)
     {
         DateTime ParseUtc(int i) => DateTime.Parse(r.GetString(i),
             CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
@@ -143,7 +151,9 @@ public class PulseSubscriptionRepository
             JobId:               r.GetInt64(1),
             BuyerAddress:        r.GetString(2),
             WebhookUrl:          r.GetString(3),
-            WebhookSecret:       r.GetString(4),
+            // 2026-05-24 hardening: decrypt at-rest secret on read. Legacy
+            // plaintext rows pass through unchanged via the "v1:" sentinel.
+            WebhookSecret:       _cipher.Unprotect(r.GetString(4)),
             Cadence:             r.GetString(5),
             Marketplace:         r.GetString(6),
             TicksPurchased:      r.GetInt32(7),

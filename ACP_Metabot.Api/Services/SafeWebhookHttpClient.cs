@@ -31,11 +31,19 @@ public sealed class SafeWebhookHttpClient : IDisposable
         // attacks against the connect phase; per-request timeout is set by
         // the caller via the linked CTS so different callers (5s alert push,
         // 10s risk tick, 15s pulse tick) get their own ceiling.
+        //
+        // 2026-05-24 hardening: ConnectCallback re-validates the actual
+        // resolved IPEndPoint against WebhookUrlValidator.IsConnectBlocked
+        // at TCP connect time. Closes the DNS-rebind TOCTOU window between
+        // ValidateAsync's DNS resolution and HttpClient's own connect-time
+        // resolution. Defense-in-depth on top of the manual per-hop
+        // ValidateAsync that SendWithValidatedRedirectsAsync already does.
         var handler = new SocketsHttpHandler
         {
             AllowAutoRedirect = false,
             ConnectTimeout = TimeSpan.FromSeconds(5),
             PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+            ConnectCallback = WebhookConnectCallbacks.PinValidatedIp,
         };
         _http = new HttpClient(handler, disposeHandler: true);
         _logger = logger;
