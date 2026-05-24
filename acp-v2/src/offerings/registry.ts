@@ -25,6 +25,12 @@ import { marketplaceGap } from "./marketplaceGap.js";
 import { marketplacePulseSub } from "./marketplacePulseSub.js";
 // R12 Tier 1.3 — productises ACP_Tester test-hire primitive as $0.10 offering.
 import { agentSmokeCheck } from "./agentSmokeCheck.js";
+// v1.10 Phase 3 T4 + T5 — Smart Search Claude-narrated summary + defensive
+// agent risk score. Two $0.05 paid offerings; see specs in
+// docs/superpowers/specs/2026-05-18-metabot-v1.10-smart-search-design.md
+// and the Phase 3 plan.
+import { searchNarrative } from "./searchNarrative.js";
+import { agentRiskCheck } from "./agentRiskCheck.js";
 
 // v1.7.2: search / searchAgents / browseAgent moved from paid offerings to
 // free Resources (see acp-v2/src/resources.ts). The $0.01 price floor was
@@ -59,6 +65,11 @@ export const OFFERINGS: Record<string, Offering> = {
   // R12 Tier 1.3 — agent_smoke_check ($0.10) — static-analysis smoke test
   // for any V2 agent's offering. v0.2 wires real-hire via docker-ops-sidecar.
   agent_smoke_check: agentSmokeCheck,
+  // v1.10 Phase 3 — Smart Search narrative + defensive risk score. Both
+  // priced at $0.05 (matching the $0.05 floor on similar one-shot reads
+  // like agentReputation / arenaParticipants).
+  searchNarrative,
+  agentRiskCheck,
 };
 
 export function getOffering(name: string): Offering | undefined {

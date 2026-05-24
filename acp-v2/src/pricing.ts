@@ -37,6 +37,12 @@ const PRICE_USDC: Record<string, number> = {
   // R12 Tier 1.3 — static-analysis smoke check. $0.10 = 2× preHireBudgetCheck
   // because this returns a verdict, not just a price tally.
   agent_smoke_check: 0.10,
+  // v1.10 Phase 3 T4 — Claude-narrated top-5 summary. $0.05 = same floor as
+  // agentReputation / arenaParticipants (single-call augmented read).
+  searchNarrative: 0.05,
+  // v1.10 Phase 3 T5 — 4-signal scam-risk score. $0.05 matches searchNarrative
+  // (also a one-shot augmented read with a 6h cache window).
+  agentRiskCheck: 0.05,
 };
 
 const DEFAULT_PRICE_USDC = 0.01;

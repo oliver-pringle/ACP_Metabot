@@ -305,6 +305,22 @@ export interface ApiClient {
     offeringName?: string;
     sampleRequirement?: Record<string, unknown>;
   }): Promise<unknown>;
+
+  // v1.10 Phase 3 T4 — searchNarrative: Claude-Haiku narrated wrap of the
+  // top-5 search hits for a buyer query. Forces top-5 + no
+  // resources/expand/risk on the underlying search, 1h cache.
+  searchNarrative(req: {
+    query: string;
+    previousQueries?: string[];
+    marketplace?: "v1" | "v2";
+  }): Promise<unknown>;
+
+  // v1.10 Phase 3 T5 — agentRiskCheck: 4-signal scam-risk score for one agent
+  // on one chain (1 = Ethereum, 8453 = Base; default 8453). 6h cache.
+  agentRiskCheck(req: {
+    agentAddress: string;
+    chainId?: number;
+  }): Promise<unknown>;
 }
 
 export function createApiClient(
@@ -435,6 +451,32 @@ export function createApiClient(
     // R12 Tier 1.3 — agentSmokeCheck
     agentSmokeCheck: (req) =>
       request<unknown>("/v1/smoke/check", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+
+    // v1.10 Phase 3 T4 — searchNarrative. The C# endpoint takes a wrapped
+    // SearchNarrativeRequest({Search:SearchRequest, PreviousQueries:string[]?})
+    // because the underlying narrator forces top-5 + no resources/expand/risk
+    // on the search side. The sidecar passes only the buyer-facing fields
+    // (query + previousQueries + optional marketplace filter); all the
+    // limit/offset/rerank knobs live behind the endpoint.
+    searchNarrative: (req) =>
+      request<unknown>("/v1/searchNarrative", {
+        method: "POST",
+        body: JSON.stringify({
+          search: {
+            query: req.query,
+            marketplace: req.marketplace,
+          },
+          previousQueries: req.previousQueries,
+        }),
+      }),
+
+    // v1.10 Phase 3 T5 — agentRiskCheck. ChainId defaults to 8453 (Base) at
+    // the endpoint when unset; only 1 and 8453 are accepted.
+    agentRiskCheck: (req) =>
+      request<unknown>("/v1/agentRiskCheck", {
         method: "POST",
         body: JSON.stringify(req),
       }),
