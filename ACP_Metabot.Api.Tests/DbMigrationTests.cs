@@ -766,6 +766,45 @@ public class DbMigrationTests : IDisposable
         Assert.DoesNotContain(facets, f => f.Name == "a" || f.Name == "b");
     }
 
+    // -----------------------------------------------------------------
+    // v1.10 Phase 3 — query_rewrite_spend + search_narratives_cache
+    //                 + agent_risk_cache schema tests
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task Migration_creates_phase3_tables()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"metabot-p3-{Guid.NewGuid():N}.db");
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:Sqlite"] = $"Data Source={dbPath}"
+            }).Build();
+        var db = new Db(config);
+        await db.InitializeSchemaAsync();
+        try
+        {
+            await using var conn = db.OpenConnection();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT name FROM sqlite_master
+                WHERE type='table'
+                  AND name IN ('query_rewrite_spend', 'search_narratives_cache', 'agent_risk_cache')
+                ORDER BY name;";
+            var found = new List<string>();
+            await using var rdr = await cmd.ExecuteReaderAsync();
+            while (await rdr.ReadAsync()) found.Add(rdr.GetString(0));
+            Assert.Equal(
+                new[] { "agent_risk_cache", "query_rewrite_spend", "search_narratives_cache" },
+                found.OrderBy(x => x, StringComparer.Ordinal).ToArray());
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            try { File.Delete(dbPath); } catch { }
+        }
+    }
+
     private async Task InsertOfferingWithLastSeen(string addr, string agentName,
         string offeringName, string mv, DateTime lastSeenUtc)
     {

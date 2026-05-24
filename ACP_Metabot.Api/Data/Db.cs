@@ -410,6 +410,36 @@ public class Db
             CREATE INDEX IF NOT EXISTS ix_schema_facets_field ON schema_facets(field_name, role);
             CREATE INDEX IF NOT EXISTS ix_schema_facets_off ON schema_facets(offering_id);
 
+            -- v1.10 Phase 3: LLM query rewriter spend cap + narrator cache + risk cache.
+            CREATE TABLE IF NOT EXISTS query_rewrite_spend (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                spent_at        TEXT NOT NULL,
+                usd_amount      REAL NOT NULL,
+                query_hash      TEXT NOT NULL,
+                rewriter_model  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_rewrite_spend_at ON query_rewrite_spend(spent_at DESC);
+
+            CREATE TABLE IF NOT EXISTS search_narratives_cache (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_canonical TEXT NOT NULL,
+                corpus_version  INTEGER NOT NULL,
+                narrative_json  TEXT NOT NULL,
+                generated_at    TEXT NOT NULL,
+                UNIQUE(query_canonical, corpus_version)
+            );
+            CREATE INDEX IF NOT EXISTS ix_narr_cache_gen ON search_narratives_cache(generated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS agent_risk_cache (
+                agent_address   TEXT NOT NULL,
+                chain_id        INTEGER NOT NULL,
+                risk_score      INTEGER NOT NULL,
+                risk_tier       TEXT NOT NULL,
+                signals_json    TEXT NOT NULL,
+                evaluated_at    TEXT NOT NULL,
+                PRIMARY KEY (agent_address, chain_id)
+            );
+
             -- v1.6 #1 v0.1: reputation_feeds tracks ReputationAggregator
             -- contracts deployed by ChainlinkBot's POST /feed-address on behalf
             -- of high-reputation agents in our corpus. One row per agent; the
