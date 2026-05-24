@@ -155,6 +155,11 @@ builder.Services.AddSingleton<QueryExpander>(_ =>
 // key missing, LLM error). All deps already registered: IClaudeClient (line 101),
 // Db (default container), IConfiguration (framework-provided).
 builder.Services.AddSingleton<LlmQueryRewriter>();
+// v1.10 Phase 3 T4: Claude-backed search narrator. Wraps the top-5 offerings
+// in a 3-5 sentence summary + per-result reasoning. Caches via
+// search_narratives_cache for `Search:NarrativeCacheTtlSeconds` (default 1h).
+// Never throws — degraded envelope on LLM/cache/parse failure.
+builder.Services.AddSingleton<SearchNarrator>();
 builder.Services.AddSingleton<SearchService>();
 builder.Services.AddSingleton<CrossPresenceBuilder>();
 builder.Services.AddSingleton<AgentSearchService>();
@@ -916,6 +921,65 @@ app.MapGet("/categories", (CategoryService svc) => Results.Ok(new { categories =
 // Public gateway — same logic, no X-API-Key, IP rate-limited.
 app.MapPost("/v1/search", HandleSearch).RequireRateLimiting("public-search");
 app.MapPost("/v1/composeStack", HandleCompose).RequireRateLimiting("public-compose");
+
+// v1.10 Phase 3 T4: searchNarrative — runs a search via SearchWithFiltersAsync
+// for the top-5, then NarrateAsync wraps the hits in a Claude-Haiku summary +
+// per-result reasoning. The plugin layer will apply its untrusted-content
+// envelope on top; the API just returns the structured payload.
+app.MapPost("/v1/searchNarrative",
+    async (SearchNarrativeRequest req, SearchService search, SearchNarrator narrator,
+        CancellationToken ct) =>
+{
+    if (req.Search is null || string.IsNullOrWhiteSpace(req.Search.Query))
+        return Results.BadRequest(new { error = "search.query is required" });
+    if (req.Search.Query.Length > MaxQueryLen)
+        return Results.BadRequest(new { error = $"search.query must be {MaxQueryLen} chars or fewer" });
+    if (req.PreviousQueries is { Length: > 5 })
+        return Results.BadRequest(new { error = "previousQueries accepts at most 5 entries" });
+    if (req.PreviousQueries is not null)
+    {
+        foreach (var p in req.PreviousQueries)
+            if (p != null && p.Length > 200)
+                return Results.BadRequest(new { error = "previousQueries entries must be 200 chars or fewer" });
+    }
+
+    var marketplace = NormalizeMarketplace(req.Search.Marketplace);
+    if (req.Search.Marketplace is not null && marketplace is null)
+        return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
+
+    // Narration runs over the top-5 hits regardless of the request's
+    // limit/offset — the summary is meant to be a tight wrap of the very
+    // top of the ranking, not a paginated digest.
+    var filters = new SearchFilters(IncludeResources: false, Expand: false, IncludeRisk: false);
+    var (results, _) = await search.SearchWithFiltersAsync(
+        req.Search.Query,
+        limit: 5,
+        offset: 0,
+        minScore: 0.0,
+        priceMaxUsdc: double.PositiveInfinity,
+        staleAfterDays: null,
+        rerank: true,
+        categoryFilter: null,
+        chainFilter: null,
+        minReputation: null,
+        marketplaceFilter: marketplace,
+        filters: filters,
+        ct: ct);
+
+    var narrative = await narrator.NarrateAsync(req.Search.Query, results, req.PreviousQueries, ct);
+
+    return Results.Ok(new
+    {
+        query = req.Search.Query,
+        count = results.Count,
+        results,
+        summary = narrative.Summary,
+        perResultReason = narrative.PerResultReason,
+        citedOfferings = narrative.CitedOfferings,
+        cacheHit = narrative.CacheHit,
+        status = narrative.Status,
+    });
+}).RequireRateLimiting("public-compose");
 
 // ===== v1.7 paid offerings (5 of 6 shipped; arenaDigestPro deferred) =====
 //
@@ -2798,6 +2862,11 @@ public record SearchRequest(
     // v1.10 Phase 2 sub-offering filters
     string? RequiresField = null,
     string? ProducesField = null);
+// v1.10 Phase 3 T4: /v1/searchNarrative wraps a SearchRequest + optional
+// previousQueries (≤5 entries × 200 chars). The endpoint forces top-5 +
+// no resources/expand/risk on the underlying search so the narrator wraps
+// a stable, minimal payload.
+public record SearchNarrativeRequest(SearchRequest Search, string[]? PreviousQueries);
 public record ComposeRequest(
     string UseCase,
     double? BudgetUsdc,

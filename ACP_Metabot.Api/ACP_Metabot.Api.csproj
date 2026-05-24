@@ -29,6 +29,9 @@
     <Content Update="PromptTemplates\QueryRewrite.md">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Update="PromptTemplates\SearchNarrate.md">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>
