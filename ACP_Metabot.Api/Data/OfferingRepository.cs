@@ -1,5 +1,6 @@
 using System.Globalization;
 using ACP_Metabot.Api.Models;
+using ACP_Metabot.Api.Services;
 using Microsoft.Data.Sqlite;
 
 namespace ACP_Metabot.Api.Data;
@@ -100,6 +101,13 @@ public class OfferingRepository
                 upd.Parameters.AddWithValue("$agentJobs", agentJobCount);
                 upd.Parameters.AddWithValue("$id", existingId);
                 await upd.ExecuteNonQueryAsync();
+
+                // v1.10 Phase 2: refresh schema_facets for this offering. Schema
+                // may have changed, so clear stale facets first then re-extract
+                // from the new requirement schema. Idempotent via INSERT OR IGNORE.
+                await WriteSchemaFacetsAsync(conn, tx: null, existingId,
+                    requirementSchemaJson, deleteFirst: true);
+
                 // Content changed — profile changed, bump dirty flag.
                 if (_agentProfiles is not null)
                     await _agentProfiles.BumpLastChangeAtAsync(agentAddress);
@@ -136,6 +144,13 @@ public class OfferingRepository
         ins.Parameters.AddWithValue("$agentJobs", agentJobCount);
         ins.Parameters.AddWithValue("$mv", marketplaceVersion);
         var newId = (long)(await ins.ExecuteScalarAsync() ?? 0L);
+
+        // v1.10 Phase 2: extract + persist schema_facets for the freshly
+        // inserted offering. No deleteFirst — there's nothing to clean up
+        // on the insert path.
+        await WriteSchemaFacetsAsync(conn, tx: null, newId,
+            requirementSchemaJson, deleteFirst: false);
+
         // New offering inserted — profile changed, bump dirty flag.
         if (_agentProfiles is not null)
             await _agentProfiles.BumpLastChangeAtAsync(agentAddress);
@@ -248,7 +263,8 @@ public class OfferingRepository
                 $a, $agentName, $n, $desc,
                 $schema, $price, $pType, $priv,
                 $chain, $hash, $now, $now,
-                $usage, $agentJobs, $mv);";
+                $usage, $agentJobs, $mv);
+            SELECT last_insert_rowid();";
         var iA = ins.Parameters.Add("$a", SqliteType.Text);
         var iAgentName = ins.Parameters.Add("$agentName", SqliteType.Text);
         var iN = ins.Parameters.Add("$n", SqliteType.Text);
@@ -264,6 +280,25 @@ public class OfferingRepository
         var iUsage = ins.Parameters.Add("$usage", SqliteType.Integer);
         var iAgentJobs = ins.Parameters.Add("$agentJobs", SqliteType.Integer);
         var iMv = ins.Parameters.Add("$mv", SqliteType.Text);
+
+        // v1.10 Phase 2: facet write path. Two prepared commands reused per
+        // item — DELETE stale facets on the update path, INSERT OR IGNORE
+        // each extracted field name. Scoped to tx so a rollback discards the
+        // facet writes too. Same idempotency guarantee as the boot-time
+        // backfill (T3) via the UNIQUE(offering_id, field_name, role)
+        // constraint on schema_facets.
+        await using var delFacets = conn.CreateCommand();
+        delFacets.Transaction = tx;
+        delFacets.CommandText = "DELETE FROM schema_facets WHERE offering_id = $id;";
+        var dfId = delFacets.Parameters.Add("$id", SqliteType.Integer);
+
+        await using var insFacets = conn.CreateCommand();
+        insFacets.Transaction = tx;
+        insFacets.CommandText = @"
+            INSERT OR IGNORE INTO schema_facets(offering_id, field_name, role)
+            VALUES ($id, $name, 'requirement');";
+        var ifId = insFacets.Parameters.Add("$id", SqliteType.Integer);
+        var ifName = insFacets.Parameters.Add("$name", SqliteType.Text);
 
         // Collect agent addresses whose profiles genuinely changed so we can
         // bump agent_profiles.last_change_at after the transaction commits.
@@ -306,6 +341,21 @@ public class OfferingRepository
                     // with the new description on the next indexer tick.
                     dEmbId.Value = ex.Id;
                     await delEmb.ExecuteNonQueryAsync();
+                    // v1.10 Phase 2: same lifecycle for schema_facets — clear
+                    // stale facets and re-extract from the (possibly renamed)
+                    // requirement schema.
+                    dfId.Value = ex.Id;
+                    await delFacets.ExecuteNonQueryAsync();
+                    var updFacets = SchemaFacetExtractor.Extract(item.RequirementSchemaJson);
+                    if (updFacets.Count > 0)
+                    {
+                        ifId.Value = ex.Id;
+                        foreach (var n in updFacets)
+                        {
+                            ifName.Value = n;
+                            await insFacets.ExecuteNonQueryAsync();
+                        }
+                    }
                     updated++;
                     // Mirrored fields changed — profile changed.
                     profileChanged.Add(item.AgentAddress.ToLowerInvariant());
@@ -326,7 +376,19 @@ public class OfferingRepository
                 iUsage.Value = item.UsageCount;
                 iAgentJobs.Value = item.AgentJobCount;
                 iMv.Value = item.MarketplaceVersion;
-                await ins.ExecuteNonQueryAsync();
+                var newId = (long)(await ins.ExecuteScalarAsync() ?? 0L);
+                // v1.10 Phase 2: persist schema facets for the new offering.
+                // No DELETE — nothing to clean up on the fresh-insert path.
+                var insFacetNames = SchemaFacetExtractor.Extract(item.RequirementSchemaJson);
+                if (insFacetNames.Count > 0)
+                {
+                    ifId.Value = newId;
+                    foreach (var n in insFacetNames)
+                    {
+                        ifName.Value = n;
+                        await insFacets.ExecuteNonQueryAsync();
+                    }
+                }
                 added++;
                 // New offering — profile changed.
                 profileChanged.Add(item.AgentAddress.ToLowerInvariant());
@@ -344,6 +406,56 @@ public class OfferingRepository
         }
 
         return new UpsertSummary(added, updated, unchanged);
+    }
+
+    /// <summary>
+    /// v1.10 Phase 2: extract top-level field names from the requirement
+    /// schema and persist them into <c>schema_facets</c> for the given
+    /// offering id. Idempotent via the UNIQUE(offering_id, field_name, role)
+    /// constraint — the INSERT OR IGNORE on this table is what makes the
+    /// boot-time backfill (T3) and steady-state UpsertAsync writes safely
+    /// co-exist without dedupe logic at the caller.
+    ///
+    /// Set <paramref name="deleteFirst"/> on the content-changed update path
+    /// so stale field names from a renamed property don't survive the schema
+    /// rewrite. On a fresh insert there's nothing to clean up.
+    ///
+    /// PHASE 2 LIMITATION: only the requirement schema is persisted on the
+    /// offerings row today (column <c>requirement_schema_json</c>). The
+    /// deliverable schema role exists in <c>schema_facets</c> for forward
+    /// compatibility once UpsertAsync / Offering / offerings.deliverable_*
+    /// land in a follow-up; the upsert never writes deliverable facets yet
+    /// because the deliverable schema isn't a column on offerings.
+    /// </summary>
+    private static async Task WriteSchemaFacetsAsync(
+        SqliteConnection conn, SqliteTransaction? tx,
+        long offeringId, string? requirementSchemaJson, bool deleteFirst)
+    {
+        if (deleteFirst)
+        {
+            await using var del = conn.CreateCommand();
+            if (tx is not null) del.Transaction = tx;
+            del.CommandText = "DELETE FROM schema_facets WHERE offering_id = $id;";
+            del.Parameters.AddWithValue("$id", offeringId);
+            await del.ExecuteNonQueryAsync();
+        }
+
+        var reqFacets = SchemaFacetExtractor.Extract(requirementSchemaJson);
+        if (reqFacets.Count == 0) return;
+
+        await using var ins = conn.CreateCommand();
+        if (tx is not null) ins.Transaction = tx;
+        ins.CommandText = @"
+            INSERT OR IGNORE INTO schema_facets(offering_id, field_name, role)
+            VALUES ($id, $name, 'requirement');";
+        var idP = ins.Parameters.Add("$id", SqliteType.Integer);
+        var nameP = ins.Parameters.Add("$name", SqliteType.Text);
+        idP.Value = offeringId;
+        foreach (var n in reqFacets)
+        {
+            nameP.Value = n;
+            await ins.ExecuteNonQueryAsync();
+        }
     }
 
     /// <summary>
