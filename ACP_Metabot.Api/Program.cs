@@ -216,6 +216,21 @@ builder.Services.AddSingleton<MarketplacePulseService>();
 builder.Services.AddSingleton<MarketplacePulseWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MarketplacePulseWorker>());
 
+// v1.10 Phase 1: ResourcesEmbeddingsWorker — default OFF. Flip
+// Resources:EmbedWorker:Enabled=true (env: RESOURCES_EMBED_WORKER_ENABLED=true)
+// on the droplet to start lazy-backfilling resources_embeddings. Phase 1 ships
+// the plumbing; FTS-based SearchHybridAsync (T6) is the primary Resource-
+// search lane until embedding-based ranking lands in Phase 2+.
+var resourcesEmbedEnabled =
+    builder.Configuration.GetValue<bool?>("Resources:EmbedWorker:Enabled") == true
+    || string.Equals(
+        Environment.GetEnvironmentVariable("RESOURCES_EMBED_WORKER_ENABLED"),
+        "true", StringComparison.OrdinalIgnoreCase);
+if (resourcesEmbedEnabled)
+{
+    builder.Services.AddHostedService<ResourcesEmbeddingsWorker>();
+}
+
 // ── v1.8 Portfolio Risk Bot — 5 cross-bot orchestrator offerings ─────────
 //
 // risk_snapshot fans out to LiquidGuard + RevokeBot + MEVProtect + the
