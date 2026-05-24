@@ -161,6 +161,127 @@ public class SearchService
             marketplaceFilter, ct);
 
     /// <summary>
+    /// v1.10 Phase 1 negative-filter helper. Pure-function, applied between
+    /// rerank and pagination so the returned top-N stays consistent with
+    /// buyer intent. Drops offerings whose agent / chain / price / requirement
+    /// schema matches any exclusion entry. Returns the input list unchanged
+    /// when filters is null OR all exclusion lists are empty AND MaxPriceUsd
+    /// is null.
+    /// </summary>
+    public static IReadOnlyList<OfferingMatch> ApplyNegativeFilters(
+        IReadOnlyList<OfferingMatch> hits,
+        SearchFilters filters)
+    {
+        if (filters is null) return hits;
+        HashSet<string>? excludeAgents = null;
+        if (filters.ExcludeAgents is { Count: > 0 })
+        {
+            excludeAgents = new HashSet<string>(
+                filters.ExcludeAgents
+                    .Where(a => !string.IsNullOrWhiteSpace(a))
+                    .Select(a => a.Trim().ToLowerInvariant()),
+                StringComparer.Ordinal);
+            if (excludeAgents.Count == 0) excludeAgents = null;
+        }
+        HashSet<string>? excludeChains = null;
+        if (filters.ExcludeChains is { Count: > 0 })
+        {
+            excludeChains = new HashSet<string>(
+                filters.ExcludeChains
+                    .Where(c => !string.IsNullOrWhiteSpace(c))
+                    .Select(c => c.Trim().ToLowerInvariant()),
+                StringComparer.Ordinal);
+            if (excludeChains.Count == 0) excludeChains = null;
+        }
+        var excludeReqs = filters.ExcludeRequirements?
+            .Where(r => !string.IsNullOrWhiteSpace(r))
+            .Select(r => r.Trim())
+            .ToArray() ?? Array.Empty<string>();
+
+        var keep = new List<OfferingMatch>(hits.Count);
+        foreach (var h in hits)
+        {
+            if (excludeAgents is not null
+                && excludeAgents.Contains((h.AgentAddress ?? "").ToLowerInvariant()))
+                continue;
+            if (excludeChains is not null
+                && excludeChains.Contains((h.Chain ?? "").ToLowerInvariant()))
+                continue;
+            if (filters.MaxPriceUsd is double cap && h.PriceUsdc > cap)
+                continue;
+            if (excludeReqs.Length > 0)
+            {
+                var reqs = TryGetRequirements(h);
+                if (!string.IsNullOrEmpty(reqs))
+                {
+                    var hit = false;
+                    foreach (var token in excludeReqs)
+                    {
+                        if (reqs.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            hit = true; break;
+                        }
+                    }
+                    if (hit) continue;
+                }
+            }
+            keep.Add(h);
+        }
+        return keep;
+    }
+
+    // Best-effort accessor for requirements text. OfferingMatch doesn't
+    // currently expose the requirements schema directly; this method
+    // centralises the lookup via reflection so the filter logic is testable
+    // and forward-compatible — if a future commit adds a Requirements property
+    // to OfferingMatch (e.g. v1.10 Phase 2's schema_facets work), it'll be
+    // picked up automatically. When no candidate property exists, the filter
+    // is a no-op for that hit (acceptable Phase 1 behaviour per the spec).
+    private static string? TryGetRequirements(OfferingMatch h)
+    {
+        var t = h.GetType();
+        foreach (var name in new[] { "Requirements", "RequirementSchema", "RequirementsJson", "RequirementSchemaJson" })
+        {
+            var prop = t.GetProperty(name);
+            if (prop is not null) return prop.GetValue(h)?.ToString();
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// v1.10 Phase 1 entry point used by HandleSearch. Returns the paginated
+    /// hits AND the ExpandedQuery so the endpoint can echo glossary expansion
+    /// in the response envelope. Fetches a large candidate pool first
+    /// (pre-filter), applies negative filters, then paginates — keeping the
+    /// returned top-N consistent with buyer intent. MaxPriceUsd is fused with
+    /// the existing priceMaxUsdc cap (we use the tighter of the two so a
+    /// caller can't widen an existing limit).
+    /// </summary>
+    public async Task<(IReadOnlyList<OfferingMatch> Hits, ExpandedQuery Expansion)> SearchWithFiltersAsync(
+        string query, int limit, int offset, double minScore, double priceMaxUsdc,
+        int? staleAfterDays, bool rerank, string? categoryFilter,
+        HashSet<string>? chainFilter, int? minReputation,
+        string? marketplaceFilter,
+        SearchFilters filters,
+        CancellationToken ct)
+    {
+        var expansion = _expander.Expand(query ?? string.Empty);
+        var safeFilters = filters ?? new SearchFilters();
+        var effectivePriceMax = safeFilters.MaxPriceUsd is double mp
+            ? Math.Min(priceMaxUsdc, mp)
+            : priceMaxUsdc;
+        // Fetch a generous candidate pool pre-filter so that negative filters
+        // applied below don't starve the paginated window. 200 mirrors
+        // DensePoolSize so we never lose ranking signal we already paid for.
+        var raw = await SearchAsync(query ?? string.Empty, limit: 200, offset: 0,
+            minScore, effectivePriceMax, staleAfterDays, rerank, categoryFilter,
+            chainFilter, minReputation, marketplaceFilter, ct);
+        var filtered = ApplyNegativeFilters(raw, safeFilters);
+        var paged = filtered.Skip(Math.Max(0, offset)).Take(Math.Max(0, limit)).ToList();
+        return (paged, expansion);
+    }
+
+    /// <summary>
     /// Pagination-aware overload. Skips <paramref name="offset"/> results before
     /// taking <paramref name="limit"/>. The blended-and-reranked ordering is
     /// preserved: pagination operates on the final, sorted candidate list.

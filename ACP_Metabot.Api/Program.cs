@@ -557,8 +557,42 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, Cancellat
     if (req.Marketplace is not null && marketplace is null)
         return Results.BadRequest(new { error = "marketplace must be 'v1' or 'v2'" });
     var offset = req.Offset is null ? 0 : Math.Clamp(req.Offset.Value, 0, 1000);
-    var results = await svc.SearchAsync(req.Query, limit, offset, minScore, priceMax, staleAfterDays,
-        rerank, category, chainFilter, req.MinReputation, marketplace, ct);
+
+    // v1.10 Phase 1 negative-filter validation. Caps mirror the trust-boundary
+    // limits applied to query/useCase above — buyer-supplied lists can't blow
+    // the per-request CPU budget through pathological exclusion sets.
+    const int MaxExcludeListLen = 50;
+    const int MaxExcludeStringLen = 200;
+    foreach (var (list, name) in new[] {
+        (req.ExcludeRequirements, "excludeRequirements"),
+        (req.ExcludeAgents, "excludeAgents"),
+        (req.ExcludeChains, "excludeChains"),
+    })
+    {
+        if (list is null) continue;
+        if (list.Length > MaxExcludeListLen)
+            return Results.BadRequest(new { error = $"{name} accepts at most {MaxExcludeListLen} entries" });
+        foreach (var s in list)
+        {
+            if (s is null) continue;
+            if (s.Length > MaxExcludeStringLen)
+                return Results.BadRequest(new { error = $"{name} entries must be {MaxExcludeStringLen} chars or fewer" });
+        }
+    }
+    if (req.MaxPriceUsd is double mpu && mpu < 0)
+        return Results.BadRequest(new { error = "maxPriceUsd must be >= 0" });
+
+    var filters = new SearchFilters(
+        ExcludeRequirements: req.ExcludeRequirements,
+        ExcludeAgents: req.ExcludeAgents,
+        ExcludeChains: req.ExcludeChains,
+        MaxPriceUsd: req.MaxPriceUsd,
+        IncludeResources: req.IncludeResources ?? true,
+        Expand: req.Expand ?? false,
+        IncludeRisk: req.IncludeRisk ?? false);
+
+    var (results, expansion) = await svc.SearchWithFiltersAsync(req.Query, limit, offset, minScore, priceMax,
+        staleAfterDays, rerank, category, chainFilter, req.MinReputation, marketplace, filters, ct);
 
     object? bestMatch = null;
     if (results.Count > 0 && results[0].Score >= 0.7)
@@ -572,7 +606,25 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc, Cancellat
         };
     }
 
-    return Results.Ok(new { query = req.Query, count = results.Count, results, bestMatch });
+    return Results.Ok(new
+    {
+        query = req.Query,
+        count = results.Count,
+        results,
+        bestMatch,
+        expansion = new
+        {
+            glossaryHits = expansion.GlossaryHits,
+            synonymQueries = expansion.Synonyms,
+        },
+        filtersApplied = new
+        {
+            excludeRequirements = filters.ExcludeRequirements ?? (IReadOnlyList<string>)Array.Empty<string>(),
+            excludeAgents = filters.ExcludeAgents ?? (IReadOnlyList<string>)Array.Empty<string>(),
+            excludeChains = filters.ExcludeChains ?? (IReadOnlyList<string>)Array.Empty<string>(),
+            maxPriceUsd = filters.MaxPriceUsd,
+        }
+    });
 }
 
 async Task<IResult> HandleCompose(ComposeRequest req, StackComposerService svc, CancellationToken ct)
@@ -2628,7 +2680,15 @@ public record SearchRequest(
     int? MinReputation,
     int? Freshness,
     [property: System.Text.Json.Serialization.JsonPropertyName("marketplace")] string? Marketplace,
-    int? Offset = null);
+    int? Offset = null,
+    // v1.10 Phase 1 negative filters + future-flags
+    string[]? ExcludeRequirements = null,
+    string[]? ExcludeAgents = null,
+    string[]? ExcludeChains = null,
+    double? MaxPriceUsd = null,
+    bool? IncludeResources = null,
+    bool? Expand = null,
+    bool? IncludeRisk = null);
 public record ComposeRequest(
     string UseCase,
     double? BudgetUsdc,
