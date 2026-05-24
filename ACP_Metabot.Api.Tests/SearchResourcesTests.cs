@@ -71,4 +71,50 @@ public class SearchResourcesTests : IAsyncLifetime
             marketplaceFilter: null);
         Assert.Empty(hits);
     }
+
+    /// <summary>
+    /// Phase 1 bug repro: the second UpsertManyForAgentAsync call hits the
+    /// ON CONFLICT DO UPDATE path, which fires <c>trg_agent_resources_au</c>.
+    /// Pre-fix that trigger threw "SQL logic error" because the FTS5 'delete'
+    /// command was misaligned with the resources_fts vtable layout (it passed
+    /// <c>old.id</c> in the <c>resource_id</c> column slot, but FTS5 'delete'
+    /// expects the FTS-internal <c>rowid</c> in the SECOND column position,
+    /// not an UNINDEXED user column). The bug was warn-only in production
+    /// because <c>AcpV2MarketplaceSource</c> catches and logs, but it
+    /// generated noisy log lines on every V2 sweep that updated an existing
+    /// resource's description.
+    ///
+    /// This test additionally verifies that AFTER the update the FTS5 index
+    /// reflects the NEW description and no longer matches the OLD one — i.e.
+    /// that the trigger maintenance is correct, not just non-throwing.
+    /// </summary>
+    [Fact]
+    public async Task UpsertManyForAgent_can_update_existing_row_description()
+    {
+        // First call: T1 in InitializeAsync inserted ("driftWindow", "...recent...drift incidents").
+        // Now flip the description so the upsert collides on the
+        // (marketplace_version, agent_address, name) unique key and updates
+        // the description, firing trg_agent_resources_au.
+        var addr = "0x" + new string('a', 40);
+        await _repo.UpsertManyForAgentAsync(
+            agentAddress: addr,
+            agentName: "OracleBot",
+            marketplaceVersion: "v2",
+            resources: new[]
+            {
+                ("driftWindow", "https://example/d", (string?)null,
+                    "Returns recent oracle peg spreads across sources"),
+            });
+
+        // FTS index now reflects "peg" not "drift".
+        var pegHits = await _repo.SearchHybridAsync("peg", limit: 5, marketplaceFilter: null);
+        Assert.Contains(pegHits, h => h.Name == "driftWindow");
+
+        // And the old token no longer matches THIS resource's body — but the
+        // SECOND seed row from InitializeAsync ("randomThing") also doesn't
+        // contain "drift" either, so we look specifically at name=driftWindow.
+        // The description was rewritten; "drift" should no longer match it.
+        var driftHits = await _repo.SearchHybridAsync("drift", limit: 5, marketplaceFilter: null);
+        Assert.DoesNotContain(driftHits, h => h.Name == "driftWindow");
+    }
 }

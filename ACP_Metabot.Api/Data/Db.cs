@@ -376,18 +376,24 @@ public class Db
                 VALUES (new.id, new.name, new.description);
             END;
 
+            -- NOTE: resources_fts is a PLAIN FTS5 table (no content='...' clause),
+            -- so the magic 'delete' command (INSERT INTO fts(fts, ...) VALUES('delete', ...))
+            -- is NOT supported here -- that meta-command only applies to contentless /
+            -- external-content FTS5 tables. Using it against a plain FTS5 vtable raises
+            -- a SQL logic error. For plain tables, a normal DELETE statement is the
+            -- correct way to remove rows; we filter on the UNINDEXED resource_id
+            -- column (full-scan, but the dataset is small and AU/AD only fire on
+            -- mutations to a single row).
             CREATE TRIGGER IF NOT EXISTS trg_agent_resources_au
             AFTER UPDATE OF name, description ON agent_resources BEGIN
-                INSERT INTO resources_fts(resources_fts, resource_id, name, description)
-                VALUES('delete', old.id, old.name, old.description);
+                DELETE FROM resources_fts WHERE resource_id = old.id;
                 INSERT INTO resources_fts(resource_id, name, description)
                 VALUES (new.id, new.name, new.description);
             END;
 
             CREATE TRIGGER IF NOT EXISTS trg_agent_resources_ad
             AFTER DELETE ON agent_resources BEGIN
-                INSERT INTO resources_fts(resources_fts, resource_id, name, description)
-                VALUES('delete', old.id, old.name, old.description);
+                DELETE FROM resources_fts WHERE resource_id = old.id;
             END;
 
             -- v1.10 Phase 2: schema_facets index for sub-offering field filtering.
@@ -520,6 +526,33 @@ public class Db
                 ON pulse_subscriptions(buyer_address);
             ";
         await cmd.ExecuteNonQueryAsync();
+
+        // v1.10 Phase 1 bug-fix migration: production databases that booted on
+        // the original (buggy) trg_agent_resources_au / _ad will have those
+        // triggers persisted in sqlite_master. CREATE TRIGGER IF NOT EXISTS
+        // above will then no-op, leaving the buggy triggers in place. Drop
+        // them explicitly here, then re-run the CREATE block. Cheap (DROP
+        // TRIGGER on non-existent triggers is a no-op when IF EXISTS is used)
+        // and idempotent — fresh databases pass through unchanged.
+        await using (var dropBuggyTriggers = conn.CreateCommand())
+        {
+            dropBuggyTriggers.CommandText = @"
+                DROP TRIGGER IF EXISTS trg_agent_resources_au;
+                DROP TRIGGER IF EXISTS trg_agent_resources_ad;
+
+                CREATE TRIGGER IF NOT EXISTS trg_agent_resources_au
+                AFTER UPDATE OF name, description ON agent_resources BEGIN
+                    DELETE FROM resources_fts WHERE resource_id = old.id;
+                    INSERT INTO resources_fts(resource_id, name, description)
+                    VALUES (new.id, new.name, new.description);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_agent_resources_ad
+                AFTER DELETE ON agent_resources BEGIN
+                    DELETE FROM resources_fts WHERE resource_id = old.id;
+                END;";
+            await dropBuggyTriggers.ExecuteNonQueryAsync();
+        }
 
         // v1.10 Phase 1: backfill resources_fts from any existing agent_resources rows
         // missing a mirror. Idempotent — uses NOT EXISTS check so re-runs no-op.
