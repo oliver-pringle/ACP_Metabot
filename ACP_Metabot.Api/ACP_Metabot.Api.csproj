@@ -29,12 +29,8 @@
     <Content Update="Data\SuspiciousFunderPatterns.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Update="PromptTemplates\QueryRewrite.md">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Update="PromptTemplates\SearchNarrate.md">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
+    <Content Include="PromptTemplates\QueryRewrite.md" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="PromptTemplates\SearchNarrate.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
