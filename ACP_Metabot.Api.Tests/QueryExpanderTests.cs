@@ -1,6 +1,5 @@
 using System.Text.Json;
 using ACP_Metabot.Api.Services;
-using Xunit;
 
 namespace ACP_Metabot.Api.Tests;
 
