@@ -276,7 +276,27 @@ public class SearchService
         var raw = await SearchAsync(query ?? string.Empty, limit: 200, offset: 0,
             minScore, effectivePriceMax, staleAfterDays, rerank, categoryFilter,
             chainFilter, minReputation, marketplaceFilter, ct);
-        var filtered = ApplyNegativeFilters(raw, safeFilters);
+        IReadOnlyList<OfferingMatch> filtered = ApplyNegativeFilters(raw, safeFilters);
+
+        // v1.10 Phase 2: schema-facet intersection. Drops offerings whose
+        // requirement / deliverable schema doesn't declare the named field.
+        // Index-backed lookup against schema_facets — O(log n) regardless of
+        // corpus size. Runs after negative filters so the candidate pool is
+        // already pruned; runs before pagination so the returned top-N
+        // stays consistent with buyer intent.
+        if (!string.IsNullOrWhiteSpace(safeFilters.RequiresField))
+        {
+            var allowed = await _repo.GetOfferingIdsByFacetAsync(
+                safeFilters.RequiresField, "requirement", ct);
+            filtered = filtered.Where(h => allowed.Contains(h.OfferingId)).ToList();
+        }
+        if (!string.IsNullOrWhiteSpace(safeFilters.ProducesField))
+        {
+            var allowed = await _repo.GetOfferingIdsByFacetAsync(
+                safeFilters.ProducesField, "deliverable", ct);
+            filtered = filtered.Where(h => allowed.Contains(h.OfferingId)).ToList();
+        }
+
         var paged = filtered.Skip(Math.Max(0, offset)).Take(Math.Max(0, limit)).ToList();
         return (paged, expansion);
     }

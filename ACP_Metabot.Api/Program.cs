@@ -634,6 +634,24 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc,
     if (req.MaxPriceUsd is double mpu && mpu < 0)
         return Results.BadRequest(new { error = "maxPriceUsd must be >= 0" });
 
+    // v1.10 Phase 2 sub-offering filter validation. Identifier-shape only
+    // (letters / digits / underscore / hyphen) so we can bind the value
+    // directly into the schema_facets lookup without escaping concerns, and
+    // capped at 80 chars to bound the per-request cost. Blank => no filter.
+    foreach (var (val, name) in new[] {
+        (req.RequiresField, "requiresField"),
+        (req.ProducesField, "producesField"),
+    })
+    {
+        if (string.IsNullOrWhiteSpace(val)) continue;
+        if (val!.Length > 80)
+            return Results.BadRequest(new { error = $"{name} must be 80 chars or fewer" });
+        if (!System.Text.RegularExpressions.Regex.IsMatch(val, "^[A-Za-z0-9_-]+$"))
+            return Results.BadRequest(new {
+                error = $"{name} must be an identifier (letters, digits, underscore, hyphen)"
+            });
+    }
+
     var filters = new SearchFilters(
         ExcludeRequirements: req.ExcludeRequirements,
         ExcludeAgents: req.ExcludeAgents,
@@ -641,7 +659,9 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc,
         MaxPriceUsd: req.MaxPriceUsd,
         IncludeResources: req.IncludeResources ?? true,
         Expand: req.Expand ?? false,
-        IncludeRisk: req.IncludeRisk ?? false);
+        IncludeRisk: req.IncludeRisk ?? false,
+        RequiresField: req.RequiresField,
+        ProducesField: req.ProducesField);
 
     var (results, expansion) = await svc.SearchWithFiltersAsync(req.Query, limit, offset, minScore, priceMax,
         staleAfterDays, rerank, category, chainFilter, req.MinReputation, marketplace, filters, ct);
@@ -695,6 +715,8 @@ async Task<IResult> HandleSearch(SearchRequest req, SearchService svc,
             excludeAgents = filters.ExcludeAgents ?? (IReadOnlyList<string>)Array.Empty<string>(),
             excludeChains = filters.ExcludeChains ?? (IReadOnlyList<string>)Array.Empty<string>(),
             maxPriceUsd = filters.MaxPriceUsd,
+            requiresField = filters.RequiresField,
+            producesField = filters.ProducesField,
         }
     });
 }
@@ -2760,7 +2782,10 @@ public record SearchRequest(
     double? MaxPriceUsd = null,
     bool? IncludeResources = null,
     bool? Expand = null,
-    bool? IncludeRisk = null);
+    bool? IncludeRisk = null,
+    // v1.10 Phase 2 sub-offering filters
+    string? RequiresField = null,
+    string? ProducesField = null);
 public record ComposeRequest(
     string UseCase,
     double? BudgetUsdc,

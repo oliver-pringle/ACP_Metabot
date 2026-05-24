@@ -522,6 +522,36 @@ public class OfferingRepository
     }
 
     /// <summary>
+    /// v1.10 Phase 2 T4: returns the set of offering_ids whose schema_facets
+    /// match the given (fieldName, role) combination. fieldName is matched
+    /// case-insensitively — facet rows are stored lowercased by
+    /// <see cref="SchemaFacetExtractor.Extract"/>, so the lookup just
+    /// lowercases the caller's input before binding. Returns an empty set
+    /// when no facets match or when <paramref name="fieldName"/> is blank.
+    ///
+    /// Index <c>ix_schema_facets_field</c> (field_name, role) makes this an
+    /// O(log n) point lookup regardless of corpus size.
+    /// </summary>
+    public async Task<HashSet<long>> GetOfferingIdsByFacetAsync(
+        string fieldName, string role, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(fieldName)) return new HashSet<long>();
+        var lower = fieldName.Trim().ToLowerInvariant();
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT offering_id FROM schema_facets
+            WHERE field_name = $name AND role = $role;";
+        cmd.Parameters.AddWithValue("$name", lower);
+        cmd.Parameters.AddWithValue("$role", role);
+        var ids = new HashSet<long>();
+        await using var rdr = await cmd.ExecuteReaderAsync(ct);
+        while (await rdr.ReadAsync(ct))
+            ids.Add(rdr.GetInt64(0));
+        return ids;
+    }
+
+    /// <summary>
     /// Marks rows as removed when their <c>last_seen_at</c> is older than
     /// <paramref name="staleCutoffUtc"/>, scoped to a single marketplace
     /// version. Returns the number of rows newly tombstoned.
