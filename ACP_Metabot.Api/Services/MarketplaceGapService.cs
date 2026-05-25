@@ -20,6 +20,10 @@ namespace ACP_Metabot.Api.Services;
 //   medium_volume_emerging   — total >= 30,  sat < 0.50 — solid niche
 //   niche_underserved        — total <  30,  sat < 0.40 — small but open
 //   balanced                 — anything else
+//
+// v1.10.1 — accepts a marketplace slice (v1 | v2 | both). Default flipped
+// to "v2" per spec Q2 (BC-shift documented in offering description). Same
+// taxonomy applied per-slice (Q1 — no separate thresholds).
 public class MarketplaceGapService
 {
     private readonly SaturationCalculator _saturation;
@@ -31,9 +35,19 @@ public class MarketplaceGapService
         _categories = categories;
     }
 
-    public MarketplaceGapResponse Analyze(string? category, int limit)
+    public MarketplaceGapResponse Analyze(string? category, int limit, string marketplace = "v2")
     {
-        var per = _saturation.PerCategory();
+        // Service-layer coercion. The endpoint already rejects unknowns with
+        // 400; this is defensive for any internal caller that bypassed it.
+        // Unknown → "v2" (the documented marketplaceGap default per Q2), not
+        // "v1" — NormalizeMarketplaceTag's "v1" fallback is for raw corpus
+        // tags where legacy V1 is the safe historical default; here the
+        // intent is the offering's advertised default.
+        var resolvedMarketplace = (marketplace ?? "v2").Trim().ToLowerInvariant();
+        if (resolvedMarketplace is not ("v1" or "v2" or "both"))
+            resolvedMarketplace = "v2";
+
+        var per = _saturation.PerCategory(resolvedMarketplace);
         var descByName = _categories.Categories.ToDictionary(
             c => c.Name, c => c.Description, StringComparer.Ordinal);
 
@@ -61,12 +75,25 @@ public class MarketplaceGapService
         }
 
         var capped = Math.Clamp(limit, 1, 20);
+        var materialised = rows.Take(capped).ToList();
+
+        // Q4: separate the cold-boot "no corpus" note from the per-slice
+        // "no offerings in this marketplace" note. per.Count == 0 means
+        // the indexer hasn't run yet; per.All(Total == 0) means the slice
+        // is empty (e.g. V2 corpus not yet ingested).
+        string? note;
+        if (per.Count == 0)
+            note = "saturationMap not yet computed — indexer has not run a full embed cycle since boot";
+        else if (per.All(r => r.Total == 0))
+            note = $"no {resolvedMarketplace} offerings in current corpus snapshot";
+        else
+            note = null;
+
         return new MarketplaceGapResponse(
-            Opportunities: rows.Take(capped).ToList(),
+            Opportunities: materialised,
             Filter:        string.IsNullOrWhiteSpace(category) ? null : category,
-            Note:          per.Count == 0
-                ? "saturationMap not yet computed — indexer has not run a full embed cycle since boot"
-                : null,
+            Marketplace:   resolvedMarketplace,
+            Note:          note,
             ComputedAt:    DateTime.UtcNow);
     }
 
@@ -80,7 +107,7 @@ public class MarketplaceGapService
     };
 }
 
-public record MarketplaceGapRequest(string? Category, int? Limit);
+public record MarketplaceGapRequest(string? Category, int? Limit, string? Marketplace);
 
 public record MarketplaceGapRow(
     string Category,
@@ -94,5 +121,6 @@ public record MarketplaceGapRow(
 public record MarketplaceGapResponse(
     IReadOnlyList<MarketplaceGapRow> Opportunities,
     string? Filter,
+    string Marketplace,
     string? Note,
     DateTime ComputedAt);

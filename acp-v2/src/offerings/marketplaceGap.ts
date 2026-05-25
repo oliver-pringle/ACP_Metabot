@@ -6,11 +6,16 @@ import type { Offering } from "./types.js";
 // recommendation-tagged opportunity list. The buyer pays for the ranking +
 // taxonomy, not the underlying duplicate-density data.
 //
+// v1.10.1  -  accepts marketplace ∈ {v1, v2, both}. Default flipped from
+// pre-v1.10.1 "both" to "v2" because V2 is the marketplace where new ACP
+// bots actually deploy. Pass marketplace: "both" to recover the prior
+// combined-corpus behaviour.
+//
 // Offering name 14 chars  -  under marketplace 20-char cap.
 export const marketplaceGap: Offering = {
   name: "marketplaceGap",
   description:
-    "Ranks ACP marketplace categories by an opportunity score (lower saturation + reasonable volume = higher score) and tags each with a recommendation: high_volume_low_density, medium_volume_emerging, niche_underserved, balanced, or saturated_avoid. Use to decide where a new ACP bot has the most headroom. Optional category filter for deep-dive on a single category.",
+    "Ranks ACP marketplace categories by an opportunity score (lower saturation + reasonable volume = higher score) and tags each with a recommendation: high_volume_low_density, medium_volume_emerging, niche_underserved, balanced, or saturated_avoid. v1.10.1 adds a marketplace slice (v1/v2/both, default v2 — the marketplace new ACP bots actually deploy to). Pass marketplace:both for the pre-v1.10.1 combined-corpus view. Optional category filter for deep-dive on a single category.",
   requirementSchema: {
     type: "object",
     properties: {
@@ -26,16 +31,23 @@ export const marketplaceGap: Offering = {
         minimum: 1,
         maximum: 20,
       },
+      marketplace: {
+        type: "string",
+        enum: ["v1", "v2", "both"],
+        description:
+          "Which marketplace pool to compute saturation against. 'v1' = acpx.virtuals.io legacy pool. 'v2' (default) = api.acp.virtuals.io modern pool — the relevant denominator for new ACP-v2 bot decisions. 'both' = combined pool, matches the pre-v1.10.1 unfiltered response. Near-duplicate edges count across marketplaces — a V1↔V2 near-dup pair marks both ids as saturated in their respective slice.",
+      },
     },
     required: [],
   },
   requirementExample: {
     limit: 5,
+    marketplace: "v2",
   },
   slaMinutes: 5,
   deliverableSchema: {
     type: "object",
-    required: ["opportunities", "computedAt"],
+    required: ["opportunities", "marketplace", "computedAt"],
     properties: {
       opportunities: {
         type: "array",
@@ -54,10 +66,10 @@ export const marketplaceGap: Offering = {
           properties: {
             category: { type: "string", description: "Canonical category name." },
             description: { type: "string", description: "Plain-English category definition (from categories.json)." },
-            total: { type: "integer", description: "Number of offerings classified into this category." },
-            saturatedCount: { type: "integer", description: "Offerings with at least one near-duplicate within the category." },
-            saturationPct: { type: "number", description: "Duplicate density, 0.0-1.0 (e.g. 0.65 = 65% near-duplicate)." },
-            opportunityScore: { type: "number", description: "total * (1 - saturationPct)^2. Roughly 'offerings of headroom'." },
+            total: { type: "integer", description: "Number of offerings in this category WITHIN the requested marketplace slice." },
+            saturatedCount: { type: "integer", description: "Offerings (in slice) with at least one near-duplicate within the category (near-dup edges cross marketplaces)." },
+            saturationPct: { type: "number", description: "Duplicate density of the slice, 0.0-1.0 (e.g. 0.65 = 65% near-duplicate)." },
+            opportunityScore: { type: "number", description: "total * (1 - saturationPct)^2. Roughly 'offerings of headroom' within the slice." },
             recommendationTag: {
               type: "string",
               enum: [
@@ -67,7 +79,7 @@ export const marketplaceGap: Offering = {
                 "niche_underserved",
                 "balanced",
               ],
-              description: "Decision-grade taxonomy: avoid, prime, solid, small-but-open, neutral.",
+              description: "Decision-grade taxonomy: avoid, prime, solid, small-but-open, neutral. Thresholds are global — when marketplace=v2 is selected most categories will fall into niche_underserved or balanced (V2 has lower per-category density today).",
             },
           },
         },
@@ -77,10 +89,15 @@ export const marketplaceGap: Offering = {
         nullable: true,
         description: "Echo of the category filter argument, null when unfiltered.",
       },
+      marketplace: {
+        type: "string",
+        enum: ["v1", "v2", "both"],
+        description: "Echo of the resolved marketplace slice ('v2' when the caller omitted the field).",
+      },
       note: {
         type: "string",
         nullable: true,
-        description: "Set when saturationMap has not yet been computed (cold-boot edge case); null otherwise.",
+        description: "Set when saturationMap has not yet been computed (cold-boot) OR when the requested marketplace slice contains zero offerings; null otherwise.",
       },
       computedAt: {
         type: "string",
@@ -94,34 +111,35 @@ export const marketplaceGap: Offering = {
       {
         category: "Alerts and Monitoring",
         description: "On-chain event alerts, price alerts, transaction notifications, webhook delivery.",
-        total: 644,
-        saturatedCount: 294,
-        saturationPct: 0.4565,
-        opportunityScore: 190.32,
-        recommendationTag: "high_volume_low_density",
+        total: 88,
+        saturatedCount: 22,
+        saturationPct: 0.25,
+        opportunityScore: 49.5,
+        recommendationTag: "medium_volume_emerging",
       },
       {
         category: "Stablecoin Analytics",
         description: "Stablecoin reserve analysis, peg monitoring, depeg risk assessment, supply tracking.",
-        total: 118,
-        saturatedCount: 42,
-        saturationPct: 0.3559,
-        opportunityScore: 48.96,
-        recommendationTag: "high_volume_low_density",
+        total: 18,
+        saturatedCount: 4,
+        saturationPct: 0.2222,
+        opportunityScore: 10.89,
+        recommendationTag: "niche_underserved",
       },
       {
         category: "Liquidity and AMM",
         description: "Liquidity pool analysis, AMM dynamics, LP position management, impermanent loss.",
-        total: 27,
-        saturatedCount: 8,
-        saturationPct: 0.2963,
-        opportunityScore: 13.36,
+        total: 7,
+        saturatedCount: 1,
+        saturationPct: 0.1429,
+        opportunityScore: 5.14,
         recommendationTag: "niche_underserved",
       },
     ],
     filter: null,
+    marketplace: "v2",
     note: null,
-    computedAt: "2026-05-18T12:00:00Z",
+    computedAt: "2026-05-25T12:00:00Z",
   },
   validate(req) {
     if (req.category !== undefined && req.category !== null) {
@@ -140,12 +158,25 @@ export const marketplaceGap: Offering = {
         return { valid: false, reason: "limit must be between 1 and 20" };
       }
     }
+    if (req.marketplace !== undefined && req.marketplace !== null) {
+      if (typeof req.marketplace !== "string") {
+        return { valid: false, reason: "marketplace must be a string when set" };
+      }
+      const m = req.marketplace.trim().toLowerCase();
+      if (m !== "v1" && m !== "v2" && m !== "both") {
+        return { valid: false, reason: "marketplace must be one of: v1, v2, both" };
+      }
+    }
     return { valid: true };
   },
   async execute(req, { client }) {
+    const m = typeof req.marketplace === "string"
+      ? (req.marketplace.trim().toLowerCase() as "v1" | "v2" | "both")
+      : undefined;
     return await client.marketplaceGap({
-      category: typeof req.category === "string" ? req.category : undefined,
-      limit: typeof req.limit === "number" ? req.limit : undefined,
+      category:    typeof req.category === "string" ? req.category : undefined,
+      limit:       typeof req.limit === "number" ? req.limit : undefined,
+      marketplace: m,
     });
   },
 };

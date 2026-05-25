@@ -288,7 +288,10 @@ export interface ApiClient {
   }): Promise<unknown>;
 
   // v1.9 marketplaceGap  -  "where should I build?"
-  marketplaceGap(req: { category?: string; limit?: number }): Promise<unknown>;
+  // v1.10.1: marketplace ∈ {v1, v2, both}. Default "v2" at the C# endpoint
+  // (BC-shift from pre-v1.10.1 "both"); the sidecar passes whatever the
+  // buyer set, undefined elides the field on the wire.
+  marketplaceGap(req: { category?: string; limit?: number; marketplace?: "v1" | "v2" | "both" }): Promise<unknown>;
 
   // v1.9 marketplacePulseSub  -  daily digest subscription create
   marketplacePulseSub(req: {

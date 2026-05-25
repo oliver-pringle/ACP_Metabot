@@ -168,8 +168,10 @@ public class DigestService
             cohortSurvival = rows;
         }
 
-        // Sub-task D: saturationMap (global — not filter-scoped)
-        var saturationMap = _saturation.PerCategory()
+        // Sub-task D: saturationMap (global — not filter-scoped).
+        // v1.10.1: explicit "both" preserves the digest's combined-corpus
+        // semantics — only marketplaceGap defaults to V2-only.
+        var saturationMap = _saturation.PerCategory("both")
             .Select(c => new SaturationMapRow(c.Category, c.Total, c.SaturatedCount, c.SaturationPct))
             .ToList();
 

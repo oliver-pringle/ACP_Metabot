@@ -139,7 +139,10 @@ public class SearchService
 
         // Refresh saturation + price-percentile calculators in lockstep so
         // per-hit enrichments are always consistent with the current corpus.
-        _saturation.Refresh(tagged.Select(c => (c.Item1.Id, c.Item3 ?? string.Empty, c.Item2)));
+        // v1.10.1: saturation now takes the marketplace tag for per-slice
+        // rollups (V1/V2/both) consumed by marketplaceGap.
+        _saturation.Refresh(tagged.Select(c =>
+            (c.Item1.Id, c.Item3 ?? string.Empty, string.IsNullOrEmpty(c.Item1.MarketplaceVersion) ? "v1" : c.Item1.MarketplaceVersion, c.Item2)));
         _pricePercentile.Refresh(tagged.Select(c =>
             (c.Item1.Id, c.Item3 ?? string.Empty, c.Item1.MarketplaceVersion ?? "v1", c.Item1.PriceUsdc)));
 

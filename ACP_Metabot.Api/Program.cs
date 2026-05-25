@@ -1148,17 +1148,28 @@ app.MapPost("/v1/seller/migration",
     return Results.Ok(await svc.V1Tov2MigrationAsync(addr));
 }).RequireRateLimiting("public-compose");
 
-// ===== v1.9 marketplaceGap ($0.30) =====
+// ===== v1.9 marketplaceGap ($0.30), v1.10.1 marketplace slice =====
 //
 // "Where should I build a new ACP bot?" — ranks every canonical marketplace
 // category by an opportunity score derived from the existing saturationMap.
 // No new data computed; the saturation snapshot is reused. The added value
 // is the score formula + per-row recommendation_tag taxonomy.
+//
+// v1.10.1: accepts marketplace ∈ {v1, v2, both}. Default "v2" — flipped from
+// pre-v1.10.1 "both" because V2 is the marketplace where new ACP bots
+// actually deploy. Pass marketplace: "both" to recover the prior default.
 app.MapPost("/v1/marketplace/gap",
     async (MarketplaceGapRequest req, MarketplaceGapService svc) =>
 {
     var limit = req?.Limit ?? 5;
-    return Results.Ok(svc.Analyze(req?.Category, limit));
+    var marketplace = (req?.Marketplace ?? "v2").Trim().ToLowerInvariant();
+    if (marketplace is not ("v1" or "v2" or "both"))
+        return Results.BadRequest(new
+        {
+            error   = "invalid_marketplace",
+            allowed = new[] { "v1", "v2", "both" },
+        });
+    return Results.Ok(svc.Analyze(req?.Category, limit, marketplace));
 }).RequireRateLimiting("public-compose");
 
 // ===== v1.9 marketplacePulseSub ($4 / 30-day daily digest subscription) =====

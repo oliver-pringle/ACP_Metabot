@@ -34,11 +34,11 @@ public class SearchEnrichmentTests
     {
         // Corpus: two near-duplicate wallet offerings.
         var satCalc = new SaturationCalculator(threshold: 0.85);
-        satCalc.Refresh(new (long, string, float[])[]
+        satCalc.Refresh(new (long, string, string, float[])[]
         {
-            (1L, "wallet", Vec(1f, 0f)),
-            (2L, "wallet", Vec(0.99f, 0.05f)),   // near-dup of 1
-            (3L, "wallet", Vec(-1f, 0f)),         // not a dup
+            (1L, "wallet", "v1", Vec(1f, 0f)),
+            (2L, "wallet", "v1", Vec(0.99f, 0.05f)),   // near-dup of 1
+            (3L, "wallet", "v1", Vec(-1f, 0f)),         // not a dup
         });
 
         var ppCalc = new PricePercentileCalculator(lowNThreshold: 5);
@@ -54,7 +54,7 @@ public class SearchEnrichmentTests
     public void SearchHit_CarriesPricePercentileDto_WhenSufficientPeers()
     {
         var satCalc = new SaturationCalculator(0.85);
-        satCalc.Refresh(Array.Empty<(long, string, float[])>());
+        satCalc.Refresh(Array.Empty<(long, string, string, float[])>());
 
         var ppCalc = new PricePercentileCalculator(lowNThreshold: 3);
         // 6 wallet/v2 offerings at prices 0, 1, 2, 3, 4, 5 USDC
@@ -84,7 +84,7 @@ public class SearchEnrichmentTests
     public void SearchHit_PricePercentile_LowN_WhenInsufficientPeers()
     {
         var satCalc = new SaturationCalculator(0.85);
-        satCalc.Refresh(Array.Empty<(long, string, float[])>());
+        satCalc.Refresh(Array.Empty<(long, string, string, float[])>());
 
         var ppCalc = new PricePercentileCalculator(lowNThreshold: 5);
         // Only 3 offerings — below threshold of 5.
