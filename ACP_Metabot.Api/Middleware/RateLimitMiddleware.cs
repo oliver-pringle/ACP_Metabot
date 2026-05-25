@@ -140,14 +140,13 @@ public sealed class RateLimitMiddleware
         return Convert.ToHexString(bytes, 0, 16);
     }
 
+    // 2026-05-25 hardening (audit #1): use the post-UseForwardedHeaders
+    // RemoteIpAddress, not raw X-Forwarded-For. Program.cs (lines 273-304)
+    // already configures ForwardedHeadersOptions with the trusted proxy
+    // network via TRUSTED_PROXY_NETWORKS — RemoteIpAddress is the real
+    // client after the trusted hop. The pre-fix manual XFF parse bypassed
+    // that trust boundary; rotating fake headers per request was the
+    // documented bypass.
     private static string ResolveClientIp(HttpContext ctx)
-    {
-        var fwd = ctx.Request.Headers["X-Forwarded-For"].FirstOrDefault();
-        if (!string.IsNullOrWhiteSpace(fwd))
-        {
-            var first = fwd.Split(',')[0].Trim();
-            if (!string.IsNullOrEmpty(first)) return first;
-        }
-        return ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-    }
+        => ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
 }
