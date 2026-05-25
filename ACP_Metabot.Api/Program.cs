@@ -104,6 +104,15 @@ builder.Services.AddSingleton<IEmbeddingProvider>(sp =>
 });
 builder.Services.AddSingleton<VoyageRerankProvider>();
 builder.Services.AddSingleton<IRerankProvider, VoyageRerankAdapter>();
+// 2026-05-25 hardening (audit #1): ClaudeApiClient was using the default
+// IHttpClientFactory client (no timeout, no resilience) — a hanging Anthropic
+// request would tie up /v1/composeStack + /v1/searchNarrative requests. Now
+// the named client has an explicit 60s timeout + StandardResilienceHandler
+// (3 retries with jittered exponential backoff on 5xx + transient errors).
+builder.Services.AddHttpClient(nameof(ClaudeApiClient), c =>
+{
+    c.Timeout = TimeSpan.FromSeconds(60);
+}).AddStandardResilienceHandler();
 builder.Services.AddSingleton<IClaudeClient, ClaudeApiClient>();
 // Marketplace sources are pluggable via Indexer:Source.
 //   "acp-api"   — live upstream V1 + V2 (V2 toggleable via Indexer:V2:Enabled, default true)
@@ -535,6 +544,8 @@ app.Use(async (ctx, next) =>
         var p = ctx.Request.Path.Value ?? string.Empty;
         ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
         ctx.Response.Headers["Referrer-Policy"]        = "no-referrer";
+        ctx.Response.Headers["X-Frame-Options"]        = "DENY";
+        ctx.Response.Headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'";
         if (!p.StartsWith("/v1/resources/", StringComparison.Ordinal) && p != "/health")
             ctx.Response.Headers["Cache-Control"] = "no-store";
         return Task.CompletedTask;
@@ -586,6 +597,23 @@ if (!app.Environment.IsDevelopment())
         throw new InvalidOperationException(
             $"INTERNAL_API_KEY is only {apiKey.Length} characters; require >= 32 in non-Development. " +
             "Generate a stronger one: `openssl rand -hex 32`.");
+
+    // 2026-05-25 hardening (audit #3): WEBHOOK_SECRET_ENCRYPTION_KEY now
+    // REQUIRED in non-Development. Pre-sweep, the cipher silently became a
+    // plaintext passthrough when the env var was unset and subscription
+    // webhook_secret values sat plaintext in SQLite + backups. Opt-out via
+    // METABOT_ALLOW_PLAINTEXT_WEBHOOK_SECRETS=true for transitional deploys.
+    var webhookCipher = app.Services.GetRequiredService<WebhookSecretCipher>();
+    var allowPlaintextSecrets = string.Equals(
+        builder.Configuration["METABOT_ALLOW_PLAINTEXT_WEBHOOK_SECRETS"]
+            ?? Environment.GetEnvironmentVariable("METABOT_ALLOW_PLAINTEXT_WEBHOOK_SECRETS"),
+        "true", StringComparison.OrdinalIgnoreCase);
+    if (!webhookCipher.IsEncryptionEnabled && !allowPlaintextSecrets)
+        throw new InvalidOperationException(
+            "WEBHOOK_SECRET_ENCRYPTION_KEY is required in non-Development environments. " +
+            $"Current environment: {app.Environment.EnvironmentName}. Generate a 32-byte " +
+            "random base64 key (`openssl rand -base64 32`) and set the env var, or set " +
+            "METABOT_ALLOW_PLAINTEXT_WEBHOOK_SECRETS=true for a transitional deploy.");
 }
 var apiKeyBytes = string.IsNullOrEmpty(apiKey)
     ? Array.Empty<byte>()

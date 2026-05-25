@@ -92,7 +92,20 @@ Rules:
         var parsed = TryParse(raw, candidates, maxOfferings);
         if (parsed is null)
         {
-            _logger.LogWarning("[composeStack] Claude returned unparseable output: {Raw}", raw);
+            // P11 sweep 2026-05-25: do NOT log raw model output — it can include
+            // prompt content (use case, wallet details, attacker-controlled
+            // marketplace text) and turns logs into an exfiltration sink. Log
+            // hash + length + first 128 sanitised chars instead.
+            var hash = System.Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(raw ?? "")))
+                .Substring(0, 16);
+            var sample = (raw ?? "").Length <= 128 ? (raw ?? "")
+                : (raw ?? "").Substring(0, 128);
+            sample = sample.Replace('\n', ' ').Replace('\r', ' ');
+            _logger.LogWarning(
+                "[composeStack] Claude returned unparseable output. hash={Hash} length={Len} sample={Sample}",
+                hash, (raw ?? "").Length, sample);
             return new ComposedStack(
                 Rationale: "Composer model returned an unparseable response. Please retry.",
                 Stack: Array.Empty<StackEntry>(),

@@ -75,11 +75,25 @@ public sealed class TheChainlinkBotClient : ITheChainlinkBotClient
     private readonly ILogger<TheChainlinkBotClient> _log;
 
     public TheChainlinkBotClient(IHttpClientFactory httpFactory, IConfiguration config,
-        ILogger<TheChainlinkBotClient> log)
+        IHostEnvironment env, ILogger<TheChainlinkBotClient> log)
     {
         _httpFactory = httpFactory;
         _apiKey = config["TheChainlinkBot:ApiKey"] ?? "";
         _log = log;
+        // 2026-05-25 hardening (audit #10): fail-fast in non-Development if
+        // either the base URL OR the API key is unset. Pre-sweep, an unset
+        // key silently emitted unauthenticated cross-bot calls in production,
+        // masking misconfiguration of either side. Empty key tolerated in
+        // Development only.
+        var baseUrl = config["TheChainlinkBot:BaseUrl"] ?? "";
+        var integrationEnabled = !string.IsNullOrEmpty(baseUrl);
+        if (integrationEnabled && string.IsNullOrEmpty(_apiKey) && !env.IsDevelopment())
+        {
+            throw new InvalidOperationException(
+                "TheChainlinkBot:ApiKey is required in non-Development when " +
+                "TheChainlinkBot:BaseUrl is set. Set both env vars in lock-step, " +
+                "or unset BaseUrl to disable the cross-bot integration entirely.");
+        }
     }
 
     /// <summary>

@@ -33,13 +33,20 @@ public sealed class RequestMetricsMiddleware
     private readonly RequestDelegate _next;
     private readonly MetricsChannel  _channel;
     private readonly ILogger<RequestMetricsMiddleware> _logger;
+    private readonly bool _storeRawQueries;
 
     public RequestMetricsMiddleware(RequestDelegate next, MetricsChannel channel,
-        ILogger<RequestMetricsMiddleware> logger)
+        IConfiguration config, ILogger<RequestMetricsMiddleware> logger)
     {
         _next = next;
         _channel = channel;
         _logger = logger;
+        // P20 sweep 2026-05-25: by default, store a SHA256-hex-16 hash of the
+        // query text instead of the raw truncated string. /metrics/top still
+        // groups by hash (so popularity counts work) but never surfaces raw
+        // prompt content to API-key holders or backups. Operators flip
+        // Metrics:StoreRawQueries=true to restore pre-sweep behaviour.
+        _storeRawQueries = config.GetValue<bool?>("Metrics:StoreRawQueries") ?? false;
     }
 
     public async Task InvokeAsync(HttpContext ctx)
@@ -100,6 +107,10 @@ public sealed class RequestMetricsMiddleware
             // that in the recorded row.
             if (unhandled && statusCode < 400) statusCode = 500;
 
+            var storedQueryText = _storeRawQueries
+                ? Truncate(queryText, MaxStoredQueryLen)
+                : HashOrNull(queryText);
+
             var evt = new RequestMetricEvent(
                 TimestampUtc:  DateTime.UtcNow,
                 Endpoint:      path,
@@ -110,7 +121,7 @@ public sealed class RequestMetricsMiddleware
                 UserAgent:     Truncate(userAgent, MaxStoredUserAgentLen),
                 CallerId:      callerId,
                 RemoteIp:      remoteIp,
-                QueryText:     Truncate(queryText, MaxStoredQueryLen),
+                QueryText:     storedQueryText,
                 AgentAddress:  agentAddress,
                 ProviderError: providerError);
 
@@ -224,5 +235,18 @@ public sealed class RequestMetricsMiddleware
     {
         if (string.IsNullOrEmpty(s)) return null;
         return s.Length <= max ? s : s.Substring(0, max);
+    }
+
+    // P20 sweep 2026-05-25: return null for null/empty, otherwise SHA256-hex-16
+    // prefixed with "h:" so consumers know it's a hash and can still GROUP BY it
+    // for /metrics/top popularity counts. 16 hex chars = 64 bits of entropy —
+    // collision-resistant enough for popularity-grouping.
+    private static string? HashOrNull(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return null;
+        var hash = System.Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(s)));
+        return "h:" + hash.Substring(0, 16).ToLowerInvariant();
     }
 }
