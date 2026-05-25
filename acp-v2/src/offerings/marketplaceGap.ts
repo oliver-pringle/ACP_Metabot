@@ -1,12 +1,12 @@
 import type { Offering } from "./types.js";
 
-// v1.9 marketplaceGap ($0.30) — "where should I build a new ACP bot?"
+// v1.9 marketplaceGap ($0.30)  -  "where should I build a new ACP bot?"
 //
 // Repackages the saturationMap surfaced for free in /digest into a ranked,
 // recommendation-tagged opportunity list. The buyer pays for the ranking +
 // taxonomy, not the underlying duplicate-density data.
 //
-// Offering name 14 chars — under marketplace 20-char cap.
+// Offering name 14 chars  -  under marketplace 20-char cap.
 export const marketplaceGap: Offering = {
   name: "marketplaceGap",
   description:

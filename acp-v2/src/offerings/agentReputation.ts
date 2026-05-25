@@ -19,7 +19,7 @@ export const agentReputation: Offering = {
   requirementExample: {
     agentAddress: "0x693a237221e760bC7ff4968B74e25dCA17234633",
   },
-  // Cold-compute path runs ChainEventScanner.ScanAgentAsync — 1-4 min
+  // Cold-compute path runs ChainEventScanner.ScanAgentAsync  -  1-4 min
   // on free RPCs even after the v1.7.2 RpcRetry helper. 10-min SLA
   // gives the retry path real headroom; 5-min was structurally tight.
   slaMinutes: 10,
@@ -75,7 +75,7 @@ export const agentReputation: Offering = {
       },
       trajectory: {
         type: "array",
-        description: "Daily agentScore history for up to the last 30 days (oldest → newest). Empty when the agent has no warmer or paid-hire history yet. Use to spot improving or declining agents.",
+        description: "Daily agentScore history for up to the last 30 days (oldest -> newest). Empty when the agent has no warmer or paid-hire history yet. Use to spot improving or declining agents.",
         items: {
           type: "object",
           required: ["date", "agentScore"],

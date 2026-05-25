@@ -1,9 +1,9 @@
 import type { Offering } from "./types.js";
 import { requireOneOf } from "../validators.js";
 
-// risk_compare ($0.20) — bulk risk_snapshot for 2-5 wallets, ranked from
+// risk_compare ($0.20)  -  bulk risk_snapshot for 2-5 wallets, ranked from
 // safest to riskiest with a single-line conclusion plus per-component
-// "best in cohort" callouts. Cheap relative to N × risk_snapshot because
+// "best in cohort" callouts. Cheap relative to N x risk_snapshot because
 // the fan-out runs in parallel and the result is summarised, not the
 // full snapshot per wallet.
 export const riskCompare: Offering = {
@@ -68,7 +68,7 @@ export const riskCompare: Offering = {
       },
       conclusion: {
         type: "string",
-        description: "Single-sentence verdict, e.g. 'Wallet 0xabc…1234 is safest.'",
+        description: "Single-sentence verdict, e.g. 'Wallet 0xabc...1234 is safest.'",
       },
       diffs: {
         type: "object",
@@ -92,7 +92,7 @@ export const riskCompare: Offering = {
       { wallet: "0x4e47b82daa50abc41ab3d6f95f0fb5dc5dd16c0b", score: 88, grade: "A" },
       { wallet: "0x693a237221e760bc7ff4968b74e25dca17234633", score: 65, grade: "C" },
     ],
-    conclusion: "Wallet 0x4e47…6c0b is safest (grade A, 88).",
+    conclusion: "Wallet 0x4e47...6c0b is safest (grade A, 88).",
     diffs: {
       healthFactorBest: "0x4e47b82daa50abc41ab3d6f95f0fb5dc5dd16c0b",
       approvalsBest:    "0x4e47b82daa50abc41ab3d6f95f0fb5dc5dd16c0b",

@@ -1,12 +1,12 @@
 import type { Offering } from "./types.js";
 import { requireString, requireOneOf } from "../validators.js";
 
-// risk_snapshot ($0.30) — Portfolio Risk Bot's headline offering, living inside
+// risk_snapshot ($0.30)  -  Portfolio Risk Bot's headline offering, living inside
 // TheMetaBot as a cross-bot orchestrator. Aggregates four cross-bot data
 // sources (LiquidGuard health factor, RevokeBot approvals, MEVProtect MEV
 // score, internal cached reputation) into a single 0-100 risk grade plus a
 // 1-paragraph verdict. Deterministic synthesis (no LLM) so per-call cost
-// stays predictable. Cross-bot calls degrade gracefully — when a peer bot
+// stays predictable. Cross-bot calls degrade gracefully  -  when a peer bot
 // is unavailable, its component is marked "unavailable" in fallbacks[] and
 // the score is computed from the remaining sources.
 export const riskSnapshot: Offering = {
@@ -72,7 +72,7 @@ export const riskSnapshot: Offering = {
         type: "string",
         enum: ["A", "B", "C", "D", "F"],
         description:
-          "Letter grade derived from riskScore: A (≥85), B (70-84), C (55-69), D (40-54), F (<40).",
+          "Letter grade derived from riskScore: A (>=85), B (70-84), C (55-69), D (40-54), F (<40).",
       },
       summary: {
         type: "string",
@@ -144,18 +144,18 @@ export const riskSnapshot: Offering = {
     riskScore: 72,
     riskGrade: "B",
     summary:
-      "Wallet shows healthy collateralisation (Aave HF 1.87) with one elevated-risk approval (unlimited USDC to an unverified router). MEV exposure is low across the last 30 days. No on-chain reputation rows. Grade B — clean up the unverified approval and the score moves into A territory.",
+      "Wallet shows healthy collateralisation (Aave HF 1.87) with one elevated-risk approval (unlimited USDC to an unverified router). MEV exposure is low across the last 30 days. No on-chain reputation rows. Grade B  -  clean up the unverified approval and the score moves into A territory.",
     components: {
       healthFactor: {
         score: 85,
         source: "LiquidGuard",
-        details: "Aave V3 HF 1.87, Compound V3 HF 2.10 — both comfortably above liquidation.",
+        details: "Aave V3 HF 1.87, Compound V3 HF 2.10  -  both comfortably above liquidation.",
         status: "fresh",
       },
       approvals: {
         score: 55,
         source: "RevokeBot",
-        details: "1 high-risk approval found (unlimited USDC to 0xabc…cdef, not in trusted registry).",
+        details: "1 high-risk approval found (unlimited USDC to 0xabc...cdef, not in trusted registry).",
         highRiskCount: 1,
         status: "fresh",
       },
@@ -168,7 +168,7 @@ export const riskSnapshot: Offering = {
       reputation: {
         score: 50,
         source: "TheMetaBot",
-        details: "Wallet is not a registered ACP agent — neutral baseline.",
+        details: "Wallet is not a registered ACP agent  -  neutral baseline.",
         status: "fresh",
       },
     },

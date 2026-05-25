@@ -4,7 +4,7 @@ import { requirePositiveIntOrNothing } from "../validators.js";
 export const today: Offering = {
   name: "today",
   description:
-    "Daily marketplace pulse. Returns newOfferings, newResources (free V2 Resources first-seen in window), gainers (top hire-count growth), newAgents, churnRate, cohortSurvival (weekly survival curves for windows ≥30d, null otherwise), and saturationMap (per-category duplicate density). days argument 1–90 (default 1). Optional marketplace filter 'v1' or 'v2'.",
+    "Daily marketplace pulse. Returns newOfferings, newResources (free V2 Resources first-seen in window), gainers (top hire-count growth), newAgents, churnRate, cohortSurvival (weekly survival curves for windows >=30d, null otherwise), and saturationMap (per-category duplicate density). days argument 1-90 (default 1). Optional marketplace filter 'v1' or 'v2'.",
   requirementSchema: {
     type: "object",
     properties: {
@@ -42,14 +42,14 @@ export const today: Offering = {
       },
       newResources: {
         type: "array",
-        description: "v1.7.4: free V2 Resources (AcpAgentResource: name+url+params+description) first seen within the window across the indexed corpus. Resources are buyer-orchestrator pre-hire endpoints — discovery surface adjacent to paid offerings. V1 marketplace has no Resources surface so this is V2-only.",
+        description: "v1.7.4: free V2 Resources (AcpAgentResource: name+url+params+description) first seen within the window across the indexed corpus. Resources are buyer-orchestrator pre-hire endpoints  -  discovery surface adjacent to paid offerings. V1 marketplace has no Resources surface so this is V2-only.",
         items: {
           type: "object",
           required: ["agentName", "agentAddress", "name", "url", "description", "firstSeenAt", "marketplaceVersion"],
           properties: {
             agentName:          { type: "string", description: "Marketplace display name of the agent that publishes the Resource" },
             agentAddress:       { type: "string", description: "Lowercased 0x-prefixed wallet address of the publishing agent" },
-            name:               { type: "string", description: "Resource name (≤30 chars per marketplace cap)" },
+            name:               { type: "string", description: "Resource name (<=30 chars per marketplace cap)" },
             url:                { type: "string", description: "Absolute HTTPS endpoint buyers call to invoke the Resource" },
             description:        { type: "string", description: "Resource description from the agent's app.virtuals.io registration" },
             firstSeenAt:        { type: "string", format: "date-time", description: "ISO-8601 UTC timestamp the Resource was first observed in the indexer" },
@@ -90,7 +90,7 @@ export const today: Offering = {
         required: ["rate", "churnedCount", "baselineCount"],
         description: "Fraction of offerings that went inactive (tombstoned) in the window relative to the start-of-window total.",
         properties: {
-          rate: { type: "number", description: "Churn rate 0.0–1.0." },
+          rate: { type: "number", description: "Churn rate 0.0-1.0." },
           churnedCount: { type: "integer", description: "Number of offerings that went inactive within the window" },
           baselineCount: { type: "integer", description: "Total active offerings at the start of the window" },
         },
@@ -107,7 +107,7 @@ export const today: Offering = {
             cohortStart: { type: "string", format: "date-time", description: "ISO-8601 UTC timestamp of the start of the cohort week" },
             cohortSize: { type: "integer", description: "Number of offerings that joined the marketplace in this week" },
             surviving: { type: "integer", description: "Number of those offerings still active at the end of the window" },
-            survivalRate: { type: "number", description: "Fraction of the cohort still active, 0.0–1.0." },
+            survivalRate: { type: "number", description: "Fraction of the cohort still active, 0.0-1.0." },
           },
         },
       },
@@ -121,7 +121,7 @@ export const today: Offering = {
             category: { type: "string", description: "Canonical marketplace category id (e.g. 'wallet-intelligence')" },
             total: { type: "integer", description: "Total offerings in the category" },
             saturatedCount: { type: "integer", description: "Offerings with at least one near-duplicate in the same category" },
-            saturationPct: { type: "number", description: "Percentage of offerings that are near-duplicates, 0–100." },
+            saturationPct: { type: "number", description: "Percentage of offerings that are near-duplicates, 0-100." },
           },
         },
       },
@@ -131,7 +131,7 @@ export const today: Offering = {
   deliverableExample: {
     windowDays: 1,
     windowStart: "2026-05-03T00:00:00Z",
-    snapshotComparison: "Compared 2026-05-03 → 2026-05-04: 4 new offerings, 12 gainers.",
+    snapshotComparison: "Compared 2026-05-03 -> 2026-05-04: 4 new offerings, 12 gainers.",
     partial: false,
     newOfferings: [
       {

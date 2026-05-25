@@ -1,7 +1,7 @@
 import type { Offering } from "./types.js";
 import { requireString, requireOneOf } from "../validators.js";
 
-// risk_attestation ($0.50) — risk_snapshot plus an EAS-style cryptographic
+// risk_attestation ($0.50)  -  risk_snapshot plus an EAS-style cryptographic
 // attestation of the result at a specific block. Used by insurance / grant
 // programs that want "borrower passed risk check at block X" as a portable
 // claim. The attestation is signed by EASIssuer's Privy WaaS issuer wallet
@@ -87,7 +87,7 @@ export const riskAttestation: Offering = {
     },
     fallbacks: [],
     attestation: {
-      signature: "0xa1b2c3…ef00",
+      signature: "0xa1b2c3...ef00",
       schemaUid: "0xdf208286c7c0b8a5d8f9e2a3b4c5d6e7f8901234567890abcdef0114f",
       easAttestationUid: "0x9c8a76b5c4d3e2f1a09b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e",
       easTxHash: "0x33445566778899aabbccddeeff0011223344556677889900aabbccddeeff00",

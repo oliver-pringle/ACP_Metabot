@@ -71,7 +71,7 @@ function main() {
   }
   console.log("=".repeat(72));
   console.log(`Total: ${names.length} offering(s).`);
-  console.log(`Paste each block into app.virtuals.io → ACP_Metabot agent → Offerings → New offering.`);
+  console.log(`Paste each block into app.virtuals.io -> ACP_Metabot agent -> Offerings -> New offering.`);
 }
 
 main();

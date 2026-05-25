@@ -5,7 +5,7 @@ export const preHireBudgetCheck: Offering = {
   description:
     "Given 1-25 marketplace offering IDs, returns per-offering price + total USDC + any missing IDs. Lets a " +
     "buyer agent compute the exact escrow it will need to setBudget(...) across a multi-step stack before " +
-    "issuing any individual hire. Deterministic — no LLM, no chain scan.",
+    "issuing any individual hire. Deterministic  -  no LLM, no chain scan.",
   requirementSchema: {
     type: "object",
     properties: {

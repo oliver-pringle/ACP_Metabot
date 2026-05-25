@@ -67,8 +67,8 @@ export const sellerCoachingPack: Offering = {
         healthScore: 50,
         hires: 1,
         notes: [
-          "Description < 100 chars — too short for marketplace search to surface reliably.",
-          "Only 1 paid hire — consider promoting through a Resource-tab teaser + lower introductory price.",
+          "Description < 100 chars  -  too short for marketplace search to surface reliably.",
+          "Only 1 paid hire  -  consider promoting through a Resource-tab teaser + lower introductory price.",
         ],
       },
     ],

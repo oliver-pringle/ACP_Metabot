@@ -7,7 +7,7 @@ export const buyerOrchestrate: Offering = {
     "composeStack + reputation badges + Arena participation. Returns a use-case-driven 1-10 step stack of " +
     "complementary marketplace offerings, with each seller's cached reputation and Arena ranking attached " +
     "as a trust signal. Lets a buyer agent rank candidates by credentialed performance, not just keyword " +
-    "match. Cheap because all enrichment uses cached data — no fresh chain scans.",
+    "match. Cheap because all enrichment uses cached data  -  no fresh chain scans.",
   requirementSchema: {
     type: "object",
     properties: {

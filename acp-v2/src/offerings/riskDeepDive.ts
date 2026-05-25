@@ -1,7 +1,7 @@
 import type { Offering } from "./types.js";
 import { requireString, requireOneOf } from "../validators.js";
 
-// risk_deep_dive ($1.00) — risk_snapshot plus per-position action bundles.
+// risk_deep_dive ($1.00)  -  risk_snapshot plus per-position action bundles.
 // For each high-risk approval, returns the RevokeBot-built revoke calldata
 // (to / data / value), so a buyer agent can sign-and-broadcast directly.
 // Lending-protocol "close_position" / "rebalance" hints are flagged for
@@ -98,7 +98,7 @@ export const riskDeepDive: Offering = {
     summary:
       "Wallet has 2 unlimited approvals to unverified spenders and an Aave HF of 1.21 (close to the 1.0 liquidation threshold). Recommended: revoke the 2 risky approvals first, then add collateral or repay debt to raise HF above 1.5.",
     components: {
-      healthFactor: { score: 50, source: "LiquidGuard", details: "Aave HF 1.21 — within 25% of liquidation.", status: "fresh" },
+      healthFactor: { score: 50, source: "LiquidGuard", details: "Aave HF 1.21  -  within 25% of liquidation.", status: "fresh" },
       approvals: { score: 40, source: "RevokeBot", details: "2 high-risk approvals.", highRiskCount: 2, status: "fresh" },
       mevExposure: { score: 90, source: "MEVProtect", details: "Low MEV exposure.", status: "fresh" },
       reputation: { score: 50, source: "TheMetaBot", details: "Not an ACP agent.", status: "fresh" },
@@ -112,7 +112,7 @@ export const riskDeepDive: Offering = {
           to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
           data: "0x095ea7b3000000000000000000000000abcdef1234567890abcdef1234567890abcdef12000000000000000000000000000000000000000000000000000000000000000",
           value: "0",
-          description: "Revoke USDC approval to 0xabc…ef12 (unverified router).",
+          description: "Revoke USDC approval to 0xabc...ef12 (unverified router).",
         },
       },
       {
@@ -122,7 +122,7 @@ export const riskDeepDive: Offering = {
           to: "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",
           data: "",
           value: "0",
-          description: "Aave HF below 1.5 — add collateral or repay debt. v1 returns this as a manual-review hint; v1.1 will bundle the deposit/repay calldata.",
+          description: "Aave HF below 1.5  -  add collateral or repay debt. v1 returns this as a manual-review hint; v1.1 will bundle the deposit/repay calldata.",
         },
       },
     ],

@@ -274,7 +274,7 @@ export interface ApiClient {
   sellerCoaching(req: { agent: string }): Promise<unknown>;
   v1Tov2Migration(req: { agent: string }): Promise<unknown>;
 
-  // v1.8 Portfolio Risk Bot — cross-bot orchestrator offerings
+  // v1.8 Portfolio Risk Bot  -  cross-bot orchestrator offerings
   riskSnapshot(req: { wallet: string; chain?: "base" | "ethereum" }): Promise<unknown>;
   riskDeepDive(req: { wallet: string; chain?: "base" | "ethereum" }): Promise<unknown>;
   riskCompare(req: { wallets: string[]; chain?: "base" | "ethereum" }): Promise<unknown>;
@@ -287,10 +287,10 @@ export interface ApiClient {
     chain?: "base" | "ethereum";
   }): Promise<unknown>;
 
-  // v1.9 marketplaceGap — "where should I build?"
+  // v1.9 marketplaceGap  -  "where should I build?"
   marketplaceGap(req: { category?: string; limit?: number }): Promise<unknown>;
 
-  // v1.9 marketplacePulseSub — daily digest subscription create
+  // v1.9 marketplacePulseSub  -  daily digest subscription create
   marketplacePulseSub(req: {
     jobId: number;
     buyerAddress: string;
@@ -298,7 +298,7 @@ export interface ApiClient {
     marketplace?: "v1" | "v2" | "both";
   }): Promise<unknown>;
 
-  // R12 Tier 1.3 — agent_smoke_check: static-analysis smoke test for any
+  // R12 Tier 1.3  -  agent_smoke_check: static-analysis smoke test for any
   // V2 ACP agent's offering. v0.2 wires real-hire via docker-ops-sidecar.
   agentSmokeCheck(req: {
     targetAgent: string;
@@ -306,7 +306,7 @@ export interface ApiClient {
     sampleRequirement?: Record<string, unknown>;
   }): Promise<unknown>;
 
-  // v1.10 Phase 3 T4 — searchNarrative: Claude-Haiku narrated wrap of the
+  // v1.10 Phase 3 T4  -  searchNarrative: Claude-Haiku narrated wrap of the
   // top-5 search hits for a buyer query. Forces top-5 + no
   // resources/expand/risk on the underlying search, 1h cache.
   searchNarrative(req: {
@@ -315,7 +315,7 @@ export interface ApiClient {
     marketplace?: "v1" | "v2";
   }): Promise<unknown>;
 
-  // v1.10 Phase 3 T5 — agentRiskCheck: 4-signal scam-risk score for one agent
+  // v1.10 Phase 3 T5  -  agentRiskCheck: 4-signal scam-risk score for one agent
   // on one chain (1 = Ethereum, 8453 = Base; default 8453). 6h cache.
   agentRiskCheck(req: {
     agentAddress: string;
@@ -329,10 +329,10 @@ export function createApiClient(
   timeoutMs = 60_000
 ): ApiClient {
   // Retry policy:
-  //   - 5xx and network errors → retry up to 2 times (3 attempts total) with
+  //   - 5xx and network errors -> retry up to 2 times (3 attempts total) with
   //     1s and 4s backoff. Matters most for /watches because the buyer has
   //     already been funded by the time it runs.
-  //   - 4xx errors propagate immediately — they signal a deliberate rejection
+  //   - 4xx errors propagate immediately  -  they signal a deliberate rejection
   //     (e.g. SSRF guard) and retrying would only burn time.
   const retryDelaysMs = [1000, 4000];
 
@@ -355,7 +355,7 @@ export function createApiClient(
             "Content-Type": "application/json",
             "X-API-Key": apiKey,
             // Tag internal calls so the C# tier's request_log can split
-            // sidecar traffic from cross-bot traffic. Free-text — peers
+            // sidecar traffic from cross-bot traffic. Free-text  -  peers
             // (DeFiEval, AgentEval) send their own value here.
             "X-Caller": "sidecar",
             ...(init?.headers ?? {}),
@@ -366,12 +366,12 @@ export function createApiClient(
         const text = await res.text();
         const err = new Error(`acp-metabot-api ${res.status}: ${text}`);
         if (res.status >= 400 && res.status < 500) {
-          // Client error — do not retry.
+          // Client error  -  do not retry.
           throw err;
         }
         lastError = err;
       } catch (err) {
-        // AbortError, network errors, JSON parse errors → retryable.
+        // AbortError, network errors, JSON parse errors -> retryable.
         // 4xx Errors thrown above are also caught here, so re-throw them.
         if (err instanceof Error && /^acp-metabot-api 4\d\d:/.test(err.message)) {
           throw err;
@@ -421,7 +421,7 @@ export function createApiClient(
     v1Tov2Migration: (req) =>
       request<unknown>("/v1/seller/migration", { method: "POST", body: JSON.stringify(req) }),
 
-    // v1.8 Portfolio Risk Bot — every endpoint is /v1/risk/*.
+    // v1.8 Portfolio Risk Bot  -  every endpoint is /v1/risk/*.
     riskSnapshot: (req) =>
       request<unknown>("/v1/risk/snapshot", { method: "POST", body: JSON.stringify(req) }),
     riskDeepDive: (req) =>
@@ -430,7 +430,7 @@ export function createApiClient(
       request<unknown>("/v1/risk/compare", { method: "POST", body: JSON.stringify(req) }),
     riskAttestation: (req) =>
       request<unknown>("/v1/risk/attestation", { method: "POST", body: JSON.stringify(req) }),
-    // /v1/internal/* — INTERNAL_API_KEY gated. The sidecar already sends
+    // /v1/internal/*  -  INTERNAL_API_KEY gated. The sidecar already sends
     // X-API-Key on every call (see request() default headers). Moved out of
     // the public /v1/* surface to refuse subscription creation from anyone
     // who can't prove they paid escrow.
@@ -441,21 +441,21 @@ export function createApiClient(
     marketplaceGap: (req) =>
       request<unknown>("/v1/marketplace/gap", { method: "POST", body: JSON.stringify(req) }),
 
-    // v1.9 marketplacePulseSub — /v1/internal/* (escrow-gated, see above).
+    // v1.9 marketplacePulseSub  -  /v1/internal/* (escrow-gated, see above).
     marketplacePulseSub: (req) =>
       request<unknown>("/v1/internal/marketplace/pulse/subscribe", {
         method: "POST",
         body: JSON.stringify(req),
       }),
 
-    // R12 Tier 1.3 — agentSmokeCheck
+    // R12 Tier 1.3  -  agentSmokeCheck
     agentSmokeCheck: (req) =>
       request<unknown>("/v1/smoke/check", {
         method: "POST",
         body: JSON.stringify(req),
       }),
 
-    // v1.10 Phase 3 T4 — searchNarrative. The C# endpoint takes a wrapped
+    // v1.10 Phase 3 T4  -  searchNarrative. The C# endpoint takes a wrapped
     // SearchNarrativeRequest({Search:SearchRequest, PreviousQueries:string[]?})
     // because the underlying narrator forces top-5 + no resources/expand/risk
     // on the search side. The sidecar passes only the buyer-facing fields
@@ -473,7 +473,7 @@ export function createApiClient(
         }),
       }),
 
-    // v1.10 Phase 3 T5 — agentRiskCheck. ChainId defaults to 8453 (Base) at
+    // v1.10 Phase 3 T5  -  agentRiskCheck. ChainId defaults to 8453 (Base) at
     // the endpoint when unset; only 1 and 8453 are accepted.
     agentRiskCheck: (req) =>
       request<unknown>("/v1/agentRiskCheck", {

@@ -1,11 +1,11 @@
-// ACP v2 Resources — public, free, parameterised endpoints that buyer /
+// ACP v2 Resources  -  public, free, parameterised endpoints that buyer /
 // orchestrator agents (e.g. Butler) call BEFORE paying for an offering.
 //
 // First-class in @virtuals-protocol/acp-node-v2 ^0.0.6 as AcpAgentResource:
 // { name, url, params, description }. Surfaced in a separate tab from
 // offerings on the agent's app.virtuals.io profile.
 //
-// Metadata HERE (TypeScript) ↔ route handlers in ACP_Metabot.Api/Program.cs.
+// Metadata HERE (TypeScript) <-> route handlers in ACP_Metabot.Api/Program.cs.
 // The HTTP routes live under /v1/resources/* (public, IP rate-limited via the
 // public-resources policy). The X-API-Key middleware ALREADY whitelists /v1/*
 // so no middleware change is needed.
@@ -33,7 +33,7 @@ export const RESOURCES: Record<string, Resource> = {
       "indexed offerings split by V1 and V2, the corpus refresh timestamp, " +
       "and the indexer's last successful fetch. Free, public, " +
       "parameterless. Lets buyer agents check freshness before paying " +
-      "for `search` — a stale corpus means stale results."
+      "for `search`  -  a stale corpus means stale results."
   },
   capabilities: {
     name: "capabilities",
@@ -51,7 +51,7 @@ export const RESOURCES: Record<string, Resource> = {
     params: { type: "object", properties: {} },
     description:
       "Returns the chains TheMetaBot operates on (where it accepts hires) " +
-      "AND the chains its indexer covers (which marketplaces — V1, V2 — " +
+      "AND the chains its indexer covers (which marketplaces  -  V1, V2  -  " +
       "are searchable per chain). Free, public, parameterless. Lets buyer " +
       "agents pre-check whether a search across a target chain will return " +
       "results."
@@ -88,7 +88,7 @@ export const RESOURCES: Record<string, Resource> = {
       "Of the Top-50 Arena agents TheMetaBot has indexed, how many also sell " +
       "ACP offerings on app.virtuals.io? Returns sampleSize + alsoSellOnAcp " +
       "+ overlapFraction. Free, public, parameterless. A high overlap signals " +
-      "that Arena performance correlates with marketplace presence — useful " +
+      "that Arena performance correlates with marketplace presence  -  useful " +
       "demand-side signal for buyers looking for credentialed sellers."
   },
 
@@ -102,7 +102,7 @@ export const RESOURCES: Record<string, Resource> = {
       "SDK requires before issuing any hire. Returns the expected " +
       "ModularAccountV2 delegation prefix, an eth_getCode probe template, " +
       "and the recovery path when drift is detected. Free, parameterless. " +
-      "Note: TheMetaBot does NOT make the RPC call for you in v1.7 — this " +
+      "Note: TheMetaBot does NOT make the RPC call for you in v1.7  -  this " +
       "is the canonical procedure for the buyer agent to self-verify."
   },
   buyerUsdcReadiness: {
@@ -145,7 +145,7 @@ export const RESOURCES: Record<string, Resource> = {
       "breakdowns from the live offerings corpus."
   },
 
-  // ── v1.7 Bundle C: Seller-Success Coach + V1↔V2 portage ───────────────────
+  // ── v1.7 Bundle C: Seller-Success Coach + V1<->V2 portage ───────────────────
   sellerDiagnose: {
     name: "sellerDiagnose",
     url: `${PUBLIC_BASE}/v1/resources/sellerDiagnose`,
@@ -161,7 +161,7 @@ export const RESOURCES: Record<string, Resource> = {
       "a checklist verdict (HEALTHY / ISSUES_FOUND / NOT_INDEXED) plus " +
       "specific issues found: missing requirement schemas, name-length " +
       "violations, sub-min prices, too-short descriptions, missing Resources. " +
-      "Use this to coach a seller before they ship — or to identify gaps " +
+      "Use this to coach a seller before they ship  -  or to identify gaps " +
       "in a competitor's offering registry."
   },
   marketplaceVersionMap: {
@@ -177,11 +177,11 @@ export const RESOURCES: Record<string, Resource> = {
     description:
       "Returns which marketplaces (V1 / V2) an agent has offerings on, with " +
       "per-marketplace offering counts and a dominantMarketplace verdict. " +
-      "Includes a migration hint when the agent is V1-only — pointing at the " +
+      "Includes a migration hint when the agent is V1-only  -  pointing at the " +
       "v1Tov2Migration paid offering as the next step."
   },
 
-  // ── v1.7.2: search / searchAgents / browseAgent demoted from paid → free ──
+  // ── v1.7.2: search / searchAgents / browseAgent demoted from paid -> free ──
   // Originally three $0.01 offerings; the per-call price was below the ACP
   // hire-lifecycle overhead (sign + escrow + settle), so they were never
   // economically rational to hire. Moved to free Resources so they can act
@@ -258,13 +258,13 @@ export const RESOURCES: Record<string, Resource> = {
     params: { type: "object", properties: {} },
     description:
       "Explains how the 0-100 wallet risk score is computed: per-component " +
-      "weights, score → grade thresholds (A/B/C/D/F), and the unavailable-" +
+      "weights, score -> grade thresholds (A/B/C/D/F), and the unavailable-" +
       "peer fallback policy. Free, parameterless. Lets buyer agents pre-" +
       "validate what risk_snapshot will tell them and decide whether the " +
       "component weights match their use case."
   },
 
-  // ── R12 Tier 1.1 — Cross-portfolio witness pointer ───────────────────────
+  // ── R12 Tier 1.1  -  Cross-portfolio witness pointer ───────────────────────
   witnessedCatalogue: {
     name: "witnessedCatalogue",
     url: `${PUBLIC_BASE}/v1/resources/witnessedCatalogue`,
@@ -278,7 +278,7 @@ export const RESOURCES: Record<string, Resource> = {
       "paying for any of its offerings."
   },
 
-  // ── R12 Tier 1.2 — Portfolio rollup for orchestrators ────────────────────
+  // ── R12 Tier 1.2  -  Portfolio rollup for orchestrators ────────────────────
   portfolioRollup: {
     name: "portfolioRollup",
     url: `${PUBLIC_BASE}/v1/resources/portfolioRollup`,

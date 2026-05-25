@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@account-kit/infra": "^4.0.0",
-    "@virtuals-protocol/acp-node-v2": "^0.0.6",
+    "@virtuals-protocol/acp-node-v2": "0.0.6",
     "viem": "^2.21.0"
   },
   "devDependencies": {

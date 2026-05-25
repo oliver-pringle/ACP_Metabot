@@ -1,18 +1,18 @@
 import type { Offering } from "./types.js";
 import { requireString, requireOneOf } from "../validators.js";
 
-// marketplacePulseSub ($4.00 / 30 days) — TheMetaBot's first recurring tier.
+// marketplacePulseSub ($4.00 / 30 days)  -  TheMetaBot's first recurring tier.
 // On hire, Metabot generates a webhookSecret + subscription row, and from
 // the next 12:00 UTC tick the MarketplacePulseWorker (default OFF) POSTs the
 // daily /digest snapshot (HMAC-signed) to the buyer's HTTPS webhookUrl.
 //
 // Why a subscription on TheMetaBot: the marketplace pulse is most valuable
-// when delivered passively — buyer agents that want to know "what shipped
+// when delivered passively  -  buyer agents that want to know "what shipped
 // today" don't have to poll /v1/today every day. The webhook + signature
 // shape is identical to RevokeBot's daily_scan_watch and v1.8 daily_risk_watch
 // so a buyer verifier written once works across the whole portfolio.
 //
-// Offering name 19 chars — under the 20-char marketplace cap.
+// Offering name 19 chars  -  under the 20-char marketplace cap.
 export const marketplacePulseSub: Offering = {
   name: "marketplacePulseSub",
   description:
@@ -62,7 +62,7 @@ export const marketplacePulseSub: Offering = {
       cadence: {
         type: "string",
         enum: ["daily"],
-        description: "Tick cadence — always 'daily' in v1.",
+        description: "Tick cadence  -  always 'daily' in v1.",
       },
       marketplace: {
         type: "string",

@@ -17,7 +17,7 @@ import { RESOURCES } from "../src/resources.js";
 }
 
 // v1.7.4: Resource descriptions also cap at 500 chars on app.virtuals.io
-// (caught 2026-05-12 registering RevokeBot.quote at 540 chars — marketplace
+// (caught 2026-05-12 registering RevokeBot.quote at 540 chars  -  marketplace
 // rejects at registration time but the dashboard hint doesn't surface the
 // limit). Same guard pattern as offering descriptions in print-offerings-for-registration.
 {
@@ -63,10 +63,10 @@ function main() {
   }
   console.log("=".repeat(72));
   console.log(`Total: ${names.length} resource(s).`);
-  console.log(`Paste each block into app.virtuals.io → TheMetaBot agent → Resources → New resource.`);
-  console.log(`Resources are FREE — no price field. The marketplace form takes name + URL +`);
+  console.log(`Paste each block into app.virtuals.io -> TheMetaBot agent -> Resources -> New resource.`);
+  console.log(`Resources are FREE  -  no price field. The marketplace form takes name + URL +`);
   console.log(`params schema + description. Butler-style buyer agents will call the URL to`);
-  console.log(`introspect TheMetaBot pre-hire — make sure each URL responds 200 in production.`);
+  console.log(`introspect TheMetaBot pre-hire  -  make sure each URL responds 200 in production.`);
 }
 
 main();

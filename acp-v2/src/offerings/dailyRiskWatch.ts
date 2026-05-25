@@ -1,7 +1,7 @@
 import type { Offering } from "./types.js";
 import { requireString, requireOneOf } from "../validators.js";
 
-// daily_risk_watch ($5.00 / 30 days) — subscription tier. After hire, the
+// daily_risk_watch ($5.00 / 30 days)  -  subscription tier. After hire, the
 // RiskWatchWorker BackgroundService runs risk_snapshot daily and POSTs an
 // HMAC-signed webhook with the new snapshot, a diff vs. yesterday, and an
 // `alert` flag set when the score drops by more than 10 points. Buyer
@@ -52,7 +52,7 @@ export const dailyRiskWatch: Offering = {
       "expiresAt",
     ],
     description:
-      "Subscription receipt returned at hire time. Includes the webhookSecret (returned ONCE — store securely; not retrievable later). Daily push payloads are POSTed to the buyer's webhookUrl by the RiskWatchWorker, NOT included in this payload. Webhook body shape: { subscriptionId, tick, cadence, snapshot, diff }. Signed with HMAC-SHA256(webhookSecret, `${tick}.${timestamp}.${body}`) and surfaced on the X-Subscription-Signature header (prefix 'sha256=').",
+      "Subscription receipt returned at hire time. Includes the webhookSecret (returned ONCE  -  store securely; not retrievable later). Daily push payloads are POSTed to the buyer's webhookUrl by the RiskWatchWorker, NOT included in this payload. Webhook body shape: { subscriptionId, tick, cadence, snapshot, diff }. Signed with HMAC-SHA256(webhookSecret, `${tick}.${timestamp}.${body}`) and surfaced on the X-Subscription-Signature header (prefix 'sha256=').",
     properties: {
       subscriptionId: {
         type: "string",
@@ -70,7 +70,7 @@ export const dailyRiskWatch: Offering = {
       cadence: {
         type: "string",
         enum: ["daily"],
-        description: "Tick cadence — always 'daily' in v1.",
+        description: "Tick cadence  -  always 'daily' in v1.",
       },
       chain: {
         type: "string",

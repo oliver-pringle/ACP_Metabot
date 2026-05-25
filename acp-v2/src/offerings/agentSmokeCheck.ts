@@ -1,6 +1,6 @@
 import type { Offering } from "./types.js";
 
-// R12 Tier 1.3 — agent_smoke_check ($0.10)
+// R12 Tier 1.3  -  agent_smoke_check ($0.10)
 //
 // Productises ACP_Tester's existing test-hire primitive into a paid
 // marketplace offering. Buyer supplies a target agent address and an
@@ -9,7 +9,7 @@ import type { Offering } from "./types.js";
 // + schema-match. v1 ships static analysis only (no actual paid hire);
 // v0.2 wires the real hire through ACP_Website's docker-ops-sidecar.
 //
-// Offering name 17 chars — under marketplace 20-char cap.
+// Offering name 17 chars  -  under marketplace 20-char cap.
 export const agentSmokeCheck: Offering = {
   name: "agent_smoke_check",
   description:
@@ -111,7 +111,7 @@ export const agentSmokeCheck: Offering = {
     confidence: 0.82,
     findings: [
       { severity: "info", check: "schema_present", message: "requirementSchema present and well-formed." },
-      { severity: "info", check: "sla_set", message: "slaMinutes = 5 (meets ≥ 5 portfolio convention)." },
+      { severity: "info", check: "sla_set", message: "slaMinutes = 5 (meets >= 5 portfolio convention)." },
       { severity: "info", check: "deliverable_schema_present", message: "deliverableSchema present and well-formed." },
       { severity: "info", check: "price_floor", message: "priceUsdc = 0.02 (above $0.01 portfolio floor)." },
     ],

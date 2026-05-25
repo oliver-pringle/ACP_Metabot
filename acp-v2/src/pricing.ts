@@ -30,17 +30,17 @@ const PRICE_USDC: Record<string, number> = {
   // raw lookup) and composeStack ($0.50 stack synthesis): structured ranking
   // + recommendation tags over already-computed saturation data.
   marketplaceGap: 0.30,
-  // v1.9 marketplace pulse subscription. $4.00 = 30 daily ticks ≈ $0.13/tick,
+  // v1.9 marketplace pulse subscription. $4.00 = 30 daily ticks ~= $0.13/tick,
   // ~15% above today's per-call price (per the portfolio subscription
   // gradient principle in memory project_acp_pricing_review_shipped.md).
   marketplacePulseSub: 4.00,
-  // R12 Tier 1.3 — static-analysis smoke check. $0.10 = 2× preHireBudgetCheck
+  // R12 Tier 1.3  -  static-analysis smoke check. $0.10 = 2x preHireBudgetCheck
   // because this returns a verdict, not just a price tally.
   agent_smoke_check: 0.10,
-  // v1.10 Phase 3 T4 — Claude-narrated top-5 summary. $0.05 = same floor as
+  // v1.10 Phase 3 T4  -  Claude-narrated top-5 summary. $0.05 = same floor as
   // agentReputation / arenaParticipants (single-call augmented read).
   searchNarrative: 0.05,
-  // v1.10 Phase 3 T5 — 4-signal scam-risk score. $0.05 matches searchNarrative
+  // v1.10 Phase 3 T5  -  4-signal scam-risk score. $0.05 matches searchNarrative
   // (also a one-shot augmented read with a 6h cache window).
   agentRiskCheck: 0.05,
 };

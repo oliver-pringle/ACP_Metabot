@@ -24,7 +24,7 @@ async function main() {
   // token is already cached; we want to see the auth call succeed too.
   await api.ensureAuthenticated();
   const token: string = api.token;
-  console.log(`[probe] auth ok — token length=${token.length}`);
+  console.log(`[probe] auth ok  -  token length=${token.length}`);
 
   const serverUrl = "https://api.acp.virtuals.io";
   const fetches: { label: string; url: string }[] = [
@@ -65,7 +65,7 @@ async function main() {
   }
 
   // Also confirm /agents/wallet/{addr} works with auth (we already know it
-  // works without auth — this just rules out an auth-induced regression).
+  // works without auth  -  this just rules out an auth-induced regression).
   try {
     const res = await fetch(
       `${serverUrl}/agents/wallet/${env.walletAddress.toLowerCase()}`,
@@ -85,7 +85,7 @@ async function main() {
     console.log(`[probe] self-fetch threw: ${(err as Error).message}`);
   }
 
-  console.log("[probe] done — agent.stop() not called (transport idle)");
+  console.log("[probe] done  -  agent.stop() not called (transport idle)");
   process.exit(0);
 }
 
