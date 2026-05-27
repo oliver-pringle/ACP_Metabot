@@ -284,13 +284,12 @@ export const RESOURCES: Record<string, Resource> = {
     url: `${PUBLIC_BASE}/v1/resources/portfolioRollup`,
     params: { type: "object", properties: {} },
     description:
-      "Single endpoint listing every Oliver-portfolio offering keyed by bot " +
-      "with reputation/Arena badges. Hermes / Butler / Orion crawl this " +
-      "instead of probing 13 separate agents. Includes 13 portfolio bots " +
-      "(TheMetaBot, TheChainlinkBot, TheOracleBot, TheWitnessBot, TheSolanaBot, " +
-      "TheButlerBridgeBot, EASissuerBot, TheArenaBot, TheRevokeBot, " +
-      "LiquidGuard, MEVProtect, DeFiEval, AgentEval). Free, public, " +
-      "parameterless. Cached 5 min."
+      "Portfolio-wide rollup: every bot's slug, agent address, chains, " +
+      "category, marketplace URL, offering / resource / subscription counts, " +
+      "live reputation, witnessedCatalogue pointer, plus cross-bot edges " +
+      "(producer -> consumer -> via). Butler Pro / Hermes / Suede / Orion / " +
+      "Bay Buddy crawl this in one call instead of probing 13 separate " +
+      "agents. Free, public, parameterless. Cached 5 min."
   }
 };
 

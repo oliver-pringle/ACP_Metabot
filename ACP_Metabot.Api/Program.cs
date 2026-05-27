@@ -277,6 +277,11 @@ builder.Services.AddSingleton<RiskOrchestrationService>();
 builder.Services.AddSingleton<RiskWatchWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RiskWatchWorker>());
 
+// R12 Tier 1.2 — portfolioRollup service. Singleton so the 5-min cache is
+// shared across all requests. No sibling HTTP work in v1; v1.1 will plumb
+// sibling-probe via the existing IHttpClientFactory.
+builder.Services.AddSingleton<PortfolioRollupService>();
+
 builder.Services.AddOpenApi();
 
 // Trust X-Forwarded-* ONLY from the configured reverse-proxy network. Without
@@ -2451,115 +2456,16 @@ app.MapGet("/v1/resources/witnessedCatalogue", () =>
 }).RequireRateLimiting("public-resources");
 
 // ─── R12 Tier 1.2 — portfolioRollup ─────────────────────────────────────────
-// Single endpoint listing every Oliver-portfolio offering with reputation
-// badges. Halves orchestrator latency vs probing 13 separate agents. Cached
-// in-process for 5 min via a small holder class to keep it cheap.
+// Single endpoint listing every Oliver-portfolio bot with offering counts,
+// reputation, witnessedCatalogue pointers, and cross-bot edges. Designed for
+// Butler Pro Mode + buyer-orchestrator pre-flight discovery. Free, public,
+// parameterless, 5-min in-process cache via PortfolioRollupService.
+app.MapGet("/v1/resources/portfolioRollup", async (
+    PortfolioRollupService svc, CancellationToken ct) =>
 {
-    object? cachedRollup = null;
-    DateTime cachedAt = DateTime.MinValue;
-    var rollupLock = new object();
-    const int RollupTtlSeconds = 300;
-
-    app.MapGet("/v1/resources/portfolioRollup", async (
-        AgentReputationCacheRepository repRepo,
-        OfferingRepository offRepo,
-        AgentResourcesRepository resRepo,
-        CancellationToken ct) =>
-    {
-        // Try cache first (read outside lock).
-        var snap = cachedRollup;
-        if (snap is not null && (DateTime.UtcNow - cachedAt).TotalSeconds < RollupTtlSeconds)
-            return Results.Ok(snap);
-
-        // Portfolio addresses — 13 bot agents on V2 marketplace as of 2026-05-20.
-        // Wallet 1 (5/5) + Wallet 2 (5/5) + Wallet 3 (3/5).
-        var portfolio = new (string Name, string Addr, string Bio)[]
-        {
-            ("TheMetaBot",          "0xecf9773b50f01f3a97b087a6ecdf12a71afc558c", "indexer + search + risk orchestrator"),
-            ("TheChainlinkBot",     "0x6f28f51743b912197caeadbc3113c955bb80e738", "Chainlink primitives + reputation feeds"),
-            ("TheOracleBot",        "0x935e97046b10832664d007430c7b7fd310a6236e", "cross-source price-oracle deviation"),
-            ("TheWitnessBot",       "0xc834e81ebe0921fdf9458ac422861df441a6caf9", "cryptographic catalogue provenance"),
-            ("TheSolanaBot",        "0x34235a877ee2da8dc9649d46af6f7463bc2206c2", "first Solana-native ACP agent"),
-            ("TheButlerBridgeBot",  "0xbbd08418d78c0fd4b26117c15221c4cee015f492", "x402 ↔ ACP bridge"),
-            ("EASissuerBot",        "0xe9b0f88f8f27a7033f4f9679e93ebcfe1a78f7fd", "EAS attestation issuer (Base mainnet)"),
-            // Canonical addresses verified 2026-05-20 by per-bot codebase scan.
-            ("TheArenaBot",         "0xa524de81819e213e8bb181fa0b3747a4a6c3a7e3", "Degen Arena leaderboard mirror"),
-            ("TheRevokeBot",        "0xbd9527bdbd61640f544bddd513ed9fcaf9387df8", "wallet approvals scanner + revoke"),
-            ("LiquidGuard",         "0x18362cdc11247ee9e37dea29a1cf21f378ec619f", "Aave/Compound/Morpho HF + LpGuard + PauseSentinel"),
-            ("MEVProtect",          "0x827b2c1de0922314f62bc19554044fd649291ca3", "private mempool + forensics"),
-            ("DeFiEval",            "0x997163304142c3a3ff660ad03069b7d78485ca95", "DeFi-agent evaluator"),
-            ("AgentEval",           "0xb97552998e7ee94ef2a260fdc25529ed93e4902b", "3-niche agent evaluator")
-        };
-
-        var now = DateTime.UtcNow;
-        var rows = new List<object>(portfolio.Length);
-        foreach (var bot in portfolio)
-        {
-            object? rep = null;
-            try
-            {
-                var r = await repRepo.GetAsync(bot.Addr, now);
-                if (r is not null)
-                    rep = new { score = r.AgentScore, computedAt = r.ComputedAt.ToString("O"), source = r.Source };
-            }
-            catch { /* graceful degrade */ }
-
-            List<object> offerings = new();
-            try
-            {
-                var offs = await offRepo.ListByAgentAsync(bot.Addr);
-                offerings = offs
-                    .Where(o => !o.IsRemoved)
-                    .Take(30)
-                    .Select(o => (object)new
-                    {
-                        name = o.OfferingName,
-                        priceUsdc = o.PriceUsdc,
-                        marketplaceVersion = o.MarketplaceVersion
-                    }).ToList();
-            }
-            catch { /* graceful degrade */ }
-
-            List<object> resources = new();
-            try
-            {
-                var ress = await resRepo.ListByAgentAsync(bot.Addr, ct);
-                resources = ress.Take(20).Select(rs => (object)new
-                {
-                    name = rs.Name,
-                    url = rs.Url
-                }).ToList();
-            }
-            catch { /* graceful degrade */ }
-
-            rows.Add(new
-            {
-                botName = bot.Name,
-                agentAddress = bot.Addr,
-                bio = bot.Bio,
-                marketplaceUrl = $"https://app.virtuals.io/acp/agents/{bot.Addr}",
-                reputation = rep,
-                offerings,
-                resources
-            });
-        }
-
-        var view = new
-        {
-            portfolioSize = portfolio.Length,
-            generatedAt = DateTime.UtcNow.ToString("O"),
-            cachedTtlSeconds = RollupTtlSeconds,
-            agents = rows
-        };
-
-        lock (rollupLock)
-        {
-            cachedRollup = view;
-            cachedAt = DateTime.UtcNow;
-        }
-        return Results.Ok(view);
-    }).RequireRateLimiting("public-resources");
-}
+    var rollup = await svc.GetRollupAsync(ct);
+    return Results.Ok(rollup);
+}).RequireRateLimiting("public-resources");
 
 // Cross-agent Resource search. LIKE-based match on name + description +
 // agent_name. v1 is fine at the current ~500-row scale; v1.1 may upgrade
