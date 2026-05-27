@@ -76,7 +76,7 @@ export const agentSmokeCheck: Offering = {
           type: "object",
           required: ["severity", "check", "message"],
           properties: {
-            severity: { type: "string", enum: ["info", "warn", "error"] },
+            severity: { type: "string", enum: ["info", "warn", "error"], description: "'info' = no concern, 'warn' = minor concern, 'error' = structural failure that would cause a hire to fail." },
             check: { type: "string", description: "Short ID of the structural check, e.g. 'schema_present', 'required_fields', 'sla_set'." },
             message: { type: "string", description: "Human-readable explanation." },
           },
@@ -89,7 +89,7 @@ export const agentSmokeCheck: Offering = {
         properties: {
           score: { type: "integer", description: "0-100 agent score." },
           hires: { type: "integer", description: "Lifetime hires across the agent's offerings." },
-          computedAt: { type: "string", format: "date-time" },
+          computedAt: { type: "string", format: "date-time", description: "ISO-8601 UTC of the cached reputation snapshot." },
         },
       },
       checkedAt: {

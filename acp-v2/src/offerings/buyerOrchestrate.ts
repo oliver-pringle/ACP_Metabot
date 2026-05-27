@@ -27,19 +27,20 @@ export const buyerOrchestrate: Offering = {
     type: "object",
     required: ["useCase", "rationale", "totalPriceUsdc", "stack"],
     properties: {
-      useCase:        { type: "string" },
+      useCase:        { type: "string", description: "Echoes the requested use-case string." },
       rationale:      { type: "string", description: "LLM-curated rationale for why each offering belongs in the stack." },
       totalPriceUsdc: { type: "number", description: "Sum of per-call USDC prices across the stack." },
       stack: {
         type: "array",
+        description: "Curated stack of complementary ACP offerings with reputation + Arena enrichment per slot.",
         items: {
           type: "object",
           required: ["offeringName", "agentName", "agentAddress", "priceUsdc", "role"],
           properties: {
-            offeringName: { type: "string" },
-            agentName:    { type: "string" },
-            agentAddress: { type: "string" },
-            priceUsdc:    { type: "number" },
+            offeringName: { type: "string", description: "Marketplace name of the offering chosen for this slot." },
+            agentName:    { type: "string", description: "Marketplace display name of the seller agent." },
+            agentAddress: { type: "string", description: "Lowercased 0x-prefixed wallet of the seller." },
+            priceUsdc:    { type: "number", description: "Per-call USDC price of this offering." },
             role:         { type: "string", description: "What this offering contributes to the overall stack." },
             reputation:   { description: "Cached reputation summary. Null when the agent has no warm cache yet." },
             arenaParticipation: { description: "Cached Arena rank + last-week-pick flag. Null when the seller is not an Arena participant." },
