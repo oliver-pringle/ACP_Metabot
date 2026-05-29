@@ -53,10 +53,17 @@ public sealed class RiskPeerClients : IRiskPeerClients
         _revokeBotBase   = config["RevokeBot:BaseUrl"]     ?? "http://revokebot-api:5000/";
         _mevProtectBase  = config["MEVProtect:BaseUrl"]    ?? "http://mevprotect-api:5000/";
         _easIssuerBase   = config["EASIssuer:BaseUrl"]     ?? "http://easissuer-api:5000/";
-        _liquidGuardKey  = config["LIQUIDGUARD_API_KEY"]   ?? "";
-        _revokeBotKey    = config["REVOKEBOT_API_KEY"]     ?? "";
-        _mevProtectKey   = config["MEVPROTECT_API_KEY"]    ?? "";
-        _easIssuerKey    = config["EASISSUER_API_KEY"]     ?? "";
+        // Security 2026-05-28 (audit HIGH-02): docker-compose.yml emits these
+        // keys as LiquidGuard__ApiKey / RevokeBot__ApiKey / MEVProtect__ApiKey /
+        // EASIssuer__ApiKey (config keys `LiquidGuard:ApiKey` etc.). The previous
+        // code only read the flat LIQUIDGUARD_API_KEY-style names, so the keys
+        // resolved empty in production and the X-API-Key header was silently
+        // omitted on every cross-bot risk call. Read the hierarchical key first,
+        // then fall back to the legacy flat name for any operator still setting it.
+        _liquidGuardKey  = config["LiquidGuard:ApiKey"] ?? config["LIQUIDGUARD_API_KEY"] ?? "";
+        _revokeBotKey    = config["RevokeBot:ApiKey"]   ?? config["REVOKEBOT_API_KEY"]   ?? "";
+        _mevProtectKey   = config["MEVProtect:ApiKey"]  ?? config["MEVPROTECT_API_KEY"]  ?? "";
+        _easIssuerKey    = config["EASIssuer:ApiKey"]   ?? config["EASISSUER_API_KEY"]   ?? "";
     }
 
     public Task<JsonDocument?> GetHealthFactorAsync(string wallet, string chain, CancellationToken ct)
