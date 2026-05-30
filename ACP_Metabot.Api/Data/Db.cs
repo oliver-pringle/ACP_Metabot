@@ -554,6 +554,42 @@ public class Db
                 ON pulse_subscriptions(status, next_run_at);
             CREATE INDEX IF NOT EXISTS ix_pulse_subs_buyer
                 ON pulse_subscriptions(buyer_address);
+
+            -- v1.0 riskAttestPro premium $10 tier:
+            --   risk_snapshot_history    — 30-day trajectory store (composite + sub-components JSON)
+            --   risk_attest_pro_spend    — rolling $0.50/day LLM budget cap
+            --   risk_attest_pro_cache    — 1h wallet response cache w/ attestation UID
+            --   risk_attest_pro_bootstrap_state — idempotent EAS schema registration
+            CREATE TABLE IF NOT EXISTS risk_snapshot_history (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                wallet          TEXT NOT NULL,
+                chain           TEXT NOT NULL,
+                captured_at     TEXT NOT NULL,
+                score           INTEGER NOT NULL,
+                components_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_risk_snapshot_history_wallet
+                ON risk_snapshot_history(wallet, chain, captured_at DESC);
+
+            CREATE TABLE IF NOT EXISTS risk_attest_pro_spend (
+                day_utc       TEXT PRIMARY KEY,
+                llm_calls     INTEGER NOT NULL DEFAULT 0,
+                llm_cost_usd  REAL NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS risk_attest_pro_cache (
+                wallet_chain    TEXT PRIMARY KEY,
+                response_json   TEXT NOT NULL,
+                attestation_uid TEXT NOT NULL,
+                generated_at    TEXT NOT NULL,
+                expires_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS risk_attest_pro_bootstrap_state (
+                schema_uid    TEXT PRIMARY KEY,
+                registered_at TEXT NOT NULL,
+                tx_hash       TEXT
+            );
             ";
         await cmd.ExecuteNonQueryAsync();
 
