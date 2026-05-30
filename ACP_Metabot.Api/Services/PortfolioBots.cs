@@ -4,7 +4,7 @@
 // PortfolioRollupService to build the /v1/resources/portfolioRollup envelope.
 //
 // Why static + hardcoded:
-//   * The 13-bot list is stable (portfolio is considered complete per CLAUDE.md);
+//   * The 14-bot list is stable (portfolio is considered complete per CLAUDE.md);
 //     edits are once-per-quarter at most.
 //   * Sibling bots are reachable from this container only through the acp-shared
 //     docker bridge, which doesn't exist on a dev laptop. Hardcoding the
@@ -20,7 +20,7 @@
 // Sources of truth (per CLAUDE.md bot inventory table + memory/project_acp_*.md):
 //   - Wallet 1 (5/5):  TheMetaBot, DeFiEval, AgentEval, LiquidGuard, MEVProtect
 //   - Wallet 2 (5/5):  ChainlinkBot, ArenaBot, RevokeBot, EASIssuer, OracleBot
-//   - Wallet 3 (3/5):  WitnessBot, SolanaBot, ButlerBridgeBot
+//   - Wallet 3 (4/5):  WitnessBot, SolanaBot, ButlerBridgeBot, SecurityBot
 
 namespace ACP_Metabot.Api.Services;
 
@@ -183,7 +183,18 @@ public static class PortfolioBots
             Category: "payment-bridge",
             OfferingCount: 3,
             ResourceCount: 2,
-            SubscriptionTierCount: 0)
+            SubscriptionTierCount: 0),
+
+        new PortfolioBot(
+            Slug: "securitybot",
+            DisplayName: "TheSecurityBot",
+            AgentAddress: "0xa42b7122126245858c3cb0dcd0e4c151f3ea48d5",
+            AgentId: "019e7852-a08b-7f65-9ee4-20444e03e5e4",
+            Chains: new[] { "base" },
+            Category: "agent-security",
+            OfferingCount: 2,
+            ResourceCount: 2,
+            SubscriptionTierCount: 1)
     };
 
     // Cross-bot edges manually curated. Each edge captures "producer's data

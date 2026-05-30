@@ -89,6 +89,7 @@ public class AcpV2MarketplaceSource : IMarketplaceSource
         "0xa524de81819e213e8bb181fa0b3747a4a6c3a7e3", // TheArenaBot
         "0xbd9527bdbd61640f544bddd513ed9fcaf9387df8", // TheRevokeBot
         "0xe9b0f88f8f27a7033f4f9679e93ebcfe1a78f7fd", // TheEASIssuerBot
+        "0xa42b7122126245858c3cb0dcd0e4c151f3ea48d5", // TheSecurityBot
     };
 
     public AcpV2MarketplaceSource(

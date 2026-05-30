@@ -78,13 +78,13 @@ public class PortfolioRollupServiceTests : IDisposable
         Assert.True(portfolio.TryGetProperty("operator", out _));
         Assert.True(portfolio.TryGetProperty("website", out _));
         Assert.True(portfolio.TryGetProperty("totalBots", out var totalBots));
-        Assert.Equal(13, totalBots.GetInt32());
+        Assert.Equal(14, totalBots.GetInt32());
         Assert.True(portfolio.TryGetProperty("totalPaidOfferings", out _));
         Assert.True(portfolio.TryGetProperty("totalFreeResources", out _));
         Assert.True(portfolio.TryGetProperty("totalSubscriptions", out _));
 
         Assert.Equal(JsonValueKind.Array, bots.ValueKind);
-        Assert.Equal(13, bots.GetArrayLength());
+        Assert.Equal(14, bots.GetArrayLength());
 
         Assert.Equal(JsonValueKind.Array, edges.ValueKind);
         Assert.True(edges.GetArrayLength() > 0);
@@ -98,7 +98,7 @@ public class PortfolioRollupServiceTests : IDisposable
         var root = Roundtrip(rollup);
 
         var bots = root.GetProperty("bots");
-        Assert.Equal(13, bots.GetArrayLength());
+        Assert.Equal(14, bots.GetArrayLength());
 
         foreach (var bot in bots.EnumerateArray())
         {
