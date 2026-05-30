@@ -285,6 +285,13 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<RiskWatchWorker>()
 // "unavailable" sentinel — no need for a separate Noop registration.
 builder.Services.AddSingleton<IWitnessBotClient, WitnessBotClient>();
 
+// v1.0 riskAttestPro Task 7 — EAS schema bootstrap. Idempotent registration
+// of the riskAttestPro AgentRisk schema on first boot via the EASIssuer
+// cross-bot lane. v1.0 ships with the live registration deferred (worker
+// catches the NotImplementedException + LogWarning so the bot still boots);
+// v1.0.1 will plumb the injector to easissuer-api:5000/v1/internal/schema.
+builder.Services.AddHostedService<RiskAttestProSchemaBootstrapWorker>();
+
 // R12 Tier 1.2 — portfolioRollup service. Singleton so the 5-min cache is
 // shared across all requests. No sibling HTTP work in v1; v1.1 will plumb
 // sibling-probe via the existing IHttpClientFactory.
