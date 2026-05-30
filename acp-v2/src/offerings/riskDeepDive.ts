@@ -76,6 +76,7 @@ export const riskDeepDive: Offering = {
             },
             calldataHint: {
               type: "object",
+              description: "Action payload. For 'revoke' actions, ships signable EVM calldata (to / data / value) the buyer can broadcast directly. For 'rebalance' / 'close_position' actions in v1, ships a manual-review hint only (data field is empty).",
               required: ["to", "data", "value", "description"],
               properties: {
                 to: { type: "string", description: "Target contract address for the action (token contract for revokes, lending pool for rebalances)." },

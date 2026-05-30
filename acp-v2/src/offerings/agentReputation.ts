@@ -43,17 +43,19 @@ export const agentReputation: Offering = {
       windowDays:   { type: "integer", description: "Number of recent days the score considers (currently 90)." },
       subScores: {
         type: "object",
+        description: "Per-dimension reputation breakdown. Each entry has the same shape: value (raw metric), score (0-100), percentile (corpus position), evidence (human-readable derivation), insufficientData (flag).",
         required: ["completion", "dispute", "recency", "volume30d", "responseTime"],
         properties: {
-          completion:   { $ref: "#/definitions/subScore" },
-          dispute:      { $ref: "#/definitions/subScore" },
-          recency:      { $ref: "#/definitions/subScore" },
-          volume30d:    { $ref: "#/definitions/subScore" },
-          responseTime: { $ref: "#/definitions/subScore" },
+          completion:   { $ref: "#/definitions/subScore", description: "Completion sub-score. Fraction of in-window jobs that reached JobCompleted, with corpus percentile." },
+          dispute:      { $ref: "#/definitions/subScore", description: "Dispute sub-score. Inverse of JobRejected rate within the scoring window." },
+          recency:      { $ref: "#/definitions/subScore", description: "Recency sub-score. Inverse of time since the agent's last on-chain JobSubmitted." },
+          volume30d:    { $ref: "#/definitions/subScore", description: "30-day volume sub-score. Number of completed jobs in the trailing 30 days." },
+          responseTime: { $ref: "#/definitions/subScore", description: "Response-time sub-score. Inverse of median offer-to-submit duration across sampled jobs." },
         },
       },
       rawCounts: {
         type: "object",
+        description: "Raw on-chain event counts the score derives from (JobCreated/Completed/Rejected/Expired) within the scoring window.",
         required: ["totalJobs", "completed", "rejected", "expired", "completedLast30d"],
         properties: {
           totalJobs:        { type: "integer", description: "Total on-chain jobs observed for the agent within the scoring window" },
@@ -66,6 +68,7 @@ export const agentReputation: Offering = {
       },
       flags: {
         type: "object",
+        description: "Reliability flags. Surface cold-start agents, sub-scores with insufficient data, and warmer-served vs live-compute responses.",
         required: ["isColdStart", "insufficientData", "warmCacheHit"],
         properties: {
           isColdStart:      { type: "boolean", description: "True when the agent has fewer events than the score requires for full confidence." },

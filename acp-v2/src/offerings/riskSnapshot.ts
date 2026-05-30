@@ -86,6 +86,7 @@ export const riskSnapshot: Offering = {
         properties: {
           healthFactor: {
             type: "object",
+            description: "LiquidGuard lending-position component. Aggregates Aave V3 + Compound V3 + Morpho Blue health factors into a single liquidation-distance score.",
             required: ["score", "source", "details"],
             properties: {
               score: { type: "integer", minimum: 0, maximum: 100, description: "0-100 risk score for the lending health-factor component. Higher = safer." },
@@ -96,6 +97,7 @@ export const riskSnapshot: Offering = {
           },
           approvals: {
             type: "object",
+            description: "RevokeBot approvals component. Counts open token allowances and flags high-risk unlimited approvals to non-trusted spenders.",
             required: ["score", "source", "highRiskCount", "details"],
             properties: {
               score: { type: "integer", minimum: 0, maximum: 100, description: "0-100 score derived from open token approvals. Higher = fewer / safer." },
@@ -107,6 +109,7 @@ export const riskSnapshot: Offering = {
           },
           mevExposure: {
             type: "object",
+            description: "MEVProtect exposure component. Counts sandwich-attempt incidents and Flashbots Protect coverage stability over the trailing window.",
             required: ["score", "source", "details"],
             properties: {
               score: { type: "integer", minimum: 0, maximum: 100, description: "0-100 MEV-exposure score. Higher = less exposure." },
@@ -117,6 +120,7 @@ export const riskSnapshot: Offering = {
           },
           reputation: {
             type: "object",
+            description: "TheMetaBot reputation component. On-chain behavioural reputation when the wallet is itself an ACP agent; neutral 50 otherwise.",
             required: ["score", "source", "details"],
             properties: {
               score: { type: "integer", minimum: 0, maximum: 100, description: "0-100 on-chain behavioural reputation if the wallet is also an ACP agent. 50 (neutral) when no reputation row exists." },

@@ -1,5 +1,6 @@
 import { OFFERINGS } from "../src/offerings/registry.js";
 import { priceFor } from "../src/pricing.js";
+import { findMissingDescriptions } from "./check-property-descriptions.js";
 
 // Marketplace pre-flight check: app.virtuals.io caps offering names at 20 chars.
 // `npm run print-offerings` is the last gate before pasting blocks into the
@@ -40,6 +41,33 @@ import { priceFor } from "../src/pricing.js";
     console.error("");
     console.error("Trim the description in acp-v2/src/offerings/<name>.ts.");
     console.error("Keep core delivery info; move verbose rationale to the .md spec.");
+    process.exit(1);
+  }
+}
+
+// v1.10.x: portfolio convention P32 — every property in every
+// requirementSchema / deliverableSchema (including nested items.properties)
+// MUST carry a description. The marketplace operator dashboard flags missing
+// descriptions with a yellow warning + Butler Pro Mode routing weights schema
+// completeness. Walks recursively; calls findMissingDescriptions() which
+// shares its walker with the standalone `npm run` scanner.
+{
+  const issues = findMissingDescriptions(OFFERINGS);
+  if (issues.length > 0) {
+    const byOffering = new Map<string, typeof issues>();
+    for (const iss of issues) {
+      const k = iss.offering;
+      if (!byOffering.has(k)) byOffering.set(k, []);
+      byOffering.get(k)!.push(iss);
+    }
+    console.error(`ERROR: ${issues.length} propert${issues.length === 1 ? "y" : "ies"} missing description across ${byOffering.size} offering${byOffering.size === 1 ? "" : "s"}:`);
+    for (const [name, list] of Array.from(byOffering.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+      console.error(`  ${name}:`);
+      for (const iss of list) console.error(`    ${iss.schemaName}.${iss.path}`);
+    }
+    console.error("");
+    console.error("Add a `description` field to each flagged property in acp-v2/src/offerings/<name>.ts.");
+    console.error("Run `tsx scripts/check-property-descriptions.ts` for the standalone scan.");
     process.exit(1);
   }
 }
