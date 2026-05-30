@@ -43,6 +43,13 @@ const PRICE_USDC: Record<string, number> = {
   // v1.10 Phase 3 T5  -  4-signal scam-risk score. $0.05 matches searchNarrative
   // (also a one-shot augmented read with a 6h cache window).
   agentRiskCheck: 0.05,
+  // v1.0 riskAttestPro  -  TheMetaBot's premium tier. $10.00 is 10x risk_deep_dive
+  // ($1.00) because riskAttestPro fans out to 7 cross-bot sources at DEPTH (vs
+  // risk_deep_dive's 4 at headline) plus LLM narration plus base64 markdown
+  // compliance report plus an on-chain EAS attestation pointer. Premium tier
+  // priced for high-conviction wallet underwriting / institutional compliance
+  // (per portfolio pricing principle: loss-prevention 1-5% of prevented loss).
+  riskAttestPro: 10.00,
 };
 
 const DEFAULT_PRICE_USDC = 0.01;

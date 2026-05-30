@@ -31,6 +31,12 @@ import { agentSmokeCheck } from "./agentSmokeCheck.js";
 // and the Phase 3 plan.
 import { searchNarrative } from "./searchNarrative.js";
 import { agentRiskCheck } from "./agentRiskCheck.js";
+// v1.0 riskAttestPro — TheMetaBot's premium $10 tier. 7-lane cross-bot
+// orchestrator at DEPTH (LiquidGuard / RevokeBot / MEVProtect / TheMetaBot /
+// TheArenaBot / TheWitnessBot / history) delivering agent JSON + Haiku-narrated
+// executive summary + base64 markdown compliance report + on-chain EAS
+// attestation. Wraps C# POST /v1/risk/attest-pro (Task 8).
+import { riskAttestPro } from "./riskAttestPro.js";
 
 // v1.7.2: search / searchAgents / browseAgent moved from paid offerings to
 // free Resources (see acp-v2/src/resources.ts). The $0.01 price floor was
@@ -70,6 +76,9 @@ export const OFFERINGS: Record<string, Offering> = {
   // like agentReputation / arenaParticipants).
   searchNarrative,
   agentRiskCheck,
+  // v1.0 riskAttestPro ($10.00) — premium 7-lane cross-bot orchestrator.
+  // Endpoint: POST /v1/risk/attest-pro. 1h wallet-response cache.
+  riskAttestPro,
 };
 
 export function getOffering(name: string): Offering | undefined {

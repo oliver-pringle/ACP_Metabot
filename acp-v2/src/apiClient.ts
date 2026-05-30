@@ -324,6 +324,19 @@ export interface ApiClient {
     agentAddress: string;
     chainId?: number;
   }): Promise<unknown>;
+
+  // v1.0 riskAttestPro  -  premium $10 7-lane cross-bot risk briefing.
+  // Endpoint: POST /v1/risk/attest-pro. walletAddress is required + must match
+  // ^0x[0-9a-f]{40}$ (case-insensitive; the endpoint lowercases). chain
+  // defaults to 'base' when unset; only 'base'/'ethereum' accepted. fresh:true
+  // bypasses the 1h wallet-response cache. buyerSignature is surfaced forward
+  // for v1.1 strict-mode binding  -  accepted on v1.0 without enforcement.
+  riskAttestPro(req: {
+    walletAddress: string;
+    chain?: "base" | "ethereum";
+    buyerSignature?: string;
+    fresh?: boolean;
+  }): Promise<unknown>;
 }
 
 export function createApiClient(
@@ -480,6 +493,17 @@ export function createApiClient(
     // the endpoint when unset; only 1 and 8453 are accepted.
     agentRiskCheck: (req) =>
       request<unknown>("/v1/agentRiskCheck", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+
+    // v1.0 riskAttestPro  -  premium 7-lane cross-bot orchestrator. The C#
+    // endpoint validates walletAddress + lowercases, validates chain default
+    // 'base', honours fresh:true to bypass the 1h wallet cache, and decorates
+    // the response with cacheHit:true/false. buyerSignature is accepted but
+    // unused in v1.0 (v1.1 strict-mode binding hook).
+    riskAttestPro: (req) =>
+      request<unknown>("/v1/risk/attest-pro", {
         method: "POST",
         body: JSON.stringify(req),
       }),
