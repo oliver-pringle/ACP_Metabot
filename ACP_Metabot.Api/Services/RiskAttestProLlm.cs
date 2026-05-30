@@ -16,9 +16,10 @@
 // cap-hit. Spend writes are atomic via INSERT ... ON CONFLICT UPDATE on the
 // risk_attest_pro_spend (day_utc) row.
 //
-// Live wiring: LiveAnthropicCall throws NotImplementedException for v1.0;
-// production DI factory is deferred to v1.0.1. Tests inject a counting stub
-// via the injector ctor param.
+// Live wiring (v1.0.1): IClaudeClient is the shared Anthropic Messages client
+// also used by SearchNarrator + LlmQueryRewriter + StackComposerService.
+// Reads ANTHROPIC_API_KEY + Claude:Model from config. Tests still inject a
+// counting stub via the injector ctor param (injector takes precedence).
 
 using ACP_Metabot.Api.Data;
 using Microsoft.Extensions.Logging;
@@ -31,18 +32,39 @@ public sealed class RiskAttestProLlm
         Environment.GetEnvironmentVariable("RISK_ATTEST_PRO_LLM_DAILY_CAP_USD"),
         out var v) ? v : 0.50m;
 
+    const string SystemPrompt =
+        "You are a defensive-finance risk analyst. Given a JSON object of " +
+        "sub-component risk signals plus a final verdict and composite score, " +
+        "write a 3-5 sentence executive summary that (1) restates the verdict " +
+        "and score, (2) names the strongest 1-2 drivers from the components, " +
+        "and (3) calls out any source marked 'unavailable'. Be specific, cite " +
+        "component names verbatim, do not invent numbers, and output prose only " +
+        "— no JSON, no headers, no preamble.";
+
+    const int MaxOutTokens = 400;
+
+    // Conservative upper bound for the configured Claude:Model with ~1100 input
+    // tokens (system prompt + components JSON) and ~300 output tokens. Sonnet 4.6
+    // pricing ($3/1M in, $15/1M out) lands ~$0.0078/call; Haiku 4.5 ($1/$5) lands
+    // ~$0.0026. Using $0.01 makes the per-call charge conservative across either
+    // model so the daily cap engages slightly early rather than late.
+    const decimal EstimatedCostPerCallUsd = 0.01m;
+
     readonly Db _db;
     readonly ILogger<RiskAttestProLlm> _log;
+    readonly IClaudeClient? _claude;
     readonly Func<string, Task<(string text, decimal costUsd)>>? _injector;
 
     public RiskAttestProLlm(
         Db db,
         ILogger<RiskAttestProLlm> log,
-        Func<string, Task<(string text, decimal costUsd)>>? injector = null)
+        Func<string, Task<(string text, decimal costUsd)>>? injector = null,
+        IClaudeClient? claude = null)
     {
         _db = db;
         _log = log;
         _injector = injector;
+        _claude = claude;
     }
 
     public async Task<string> NarrateAsync(
@@ -67,14 +89,16 @@ public sealed class RiskAttestProLlm
         decimal costUsd;
         try
         {
-            var fn = _injector ?? LiveAnthropicCall;
-            var (t, c) = await fn(BuildPrompt(componentsJson, verdict, scorePro));
+            var prompt = BuildPrompt(componentsJson, verdict, scorePro);
+            var (t, c) = _injector is not null
+                ? await _injector(prompt)
+                : await LiveAnthropicCallAsync(prompt, ct);
             text = t;
             costUsd = c;
         }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "Haiku narration failed; using fallback");
+            _log.LogWarning(ex, "Anthropic narration failed; using fallback");
             return FallbackTemplate(verdict, scorePro);
         }
 
@@ -84,11 +108,16 @@ public sealed class RiskAttestProLlm
     }
 
     static string BuildPrompt(string componentsJson, string verdict, int scorePro) =>
-        $"You are a defensive-finance risk analyst. Read the JSON sub-components below and write a 3-5 sentence executive summary explaining the verdict and the dominant risk drivers. Be specific. Verdict: {verdict}. Composite score: {scorePro}/100.\n\nComponents:\n{componentsJson}";
+        $"Verdict: {verdict}. Composite score: {scorePro}/100.\n\nComponents:\n{componentsJson}";
 
-    static Task<(string text, decimal costUsd)> LiveAnthropicCall(string prompt) =>
-        throw new NotImplementedException(
-            "LiveAnthropicCall wired via DI factory in v1.0.1; tests use injector");
+    async Task<(string text, decimal costUsd)> LiveAnthropicCallAsync(string userPrompt, CancellationToken ct)
+    {
+        if (_claude is null)
+            throw new InvalidOperationException(
+                "IClaudeClient not available (DI missing or test injector not provided)");
+        var text = await _claude.CompleteAsync(SystemPrompt, userPrompt, MaxOutTokens, ct);
+        return (text.Trim(), EstimatedCostPerCallUsd);
+    }
 
     static string FallbackTemplate(string verdict, int scorePro) =>
         $"Verdict: {verdict} (score {scorePro}/100). Composite drivers spanned 7 cross-bot signals; review the rich JSON for per-source details. (LLM narration unavailable: daily budget cap hit. Engage operator if narration is required.)";
