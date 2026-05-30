@@ -292,6 +292,17 @@ builder.Services.AddSingleton<IWitnessBotClient, WitnessBotClient>();
 // v1.0.1 will plumb the injector to easissuer-api:5000/v1/internal/schema.
 builder.Services.AddHostedService<RiskAttestProSchemaBootstrapWorker>();
 
+// v1.0 riskAttestPro Task 8 — services backing /v1/risk/attest-pro.
+// Trajectory store, LLM narrator, the two test-shaped lookup seams over
+// the reputation cache + Arena client, and the 7-lane orchestrator.
+// Singletons (matching the RiskOrchestrationService singleton above) so
+// the in-memory state inside RiskAttestProLlm's caches survives the request.
+builder.Services.AddSingleton<RiskTrajectoryStore>();
+builder.Services.AddSingleton<RiskAttestProLlm>();
+builder.Services.AddSingleton<IRiskReputationLookup, RiskReputationLookup>();
+builder.Services.AddSingleton<IRiskArenaLookup, RiskArenaLookup>();
+builder.Services.AddSingleton<RiskAttestProService>();
+
 // R12 Tier 1.2 — portfolioRollup service. Singleton so the 5-min cache is
 // shared across all requests. No sibling HTTP work in v1; v1.1 will plumb
 // sibling-probe via the existing IHttpClientFactory.
@@ -1557,6 +1568,24 @@ app.MapPost("/v1/risk/attestation",
         return Results.BadRequest(new { error = "chain must be 'base' or 'ethereum'" });
     return Results.Ok(await svc.AttestationAsync(req.Wallet!, req.Chain, ct));
 }).RequireRateLimiting("public-compose");
+
+// v1.0 riskAttestPro Task 8 — POST /v1/risk/attest-pro ($10 premium tier).
+// Cross-bot 7-lane orchestrator (HF + approvals + MEV + reputation + Arena +
+// Witness + trajectory). 1h wallet response cache via the
+// risk_attest_pro_cache table; bypass with `fresh:true`. Floor breach (<4
+// of 7 lanes fresh) returns 502 INSUFFICIENT_SIGNALS. Live EAS-publish
+// wiring lands in v1.0.1; v1.0 ships with the schema bootstrap worker
+// (Task 7) stubbed and the attestation block populated from the service.
+app.MapPost("/v1/risk/attest-pro",
+    async (ACP_Metabot.Api.Endpoints.RiskAttestProRequest req,
+           Db db,
+           RiskAttestProService svc,
+           CancellationToken ct) =>
+    {
+        return await ACP_Metabot.Api.Endpoints.RiskAttestProEndpoint.HandleAsync(
+            req, db, svc.GenerateAsync, ct);
+    })
+    .RequireRateLimiting("public-compose");
 
 // Sub-creation is /v1/internal/* — gated by INTERNAL_API_KEY so only the ACP
 // sidecar (which knows the buyer paid escrow before invoking) can create a
