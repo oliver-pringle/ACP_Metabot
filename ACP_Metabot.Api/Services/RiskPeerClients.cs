@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 
 namespace ACP_Metabot.Api.Services;
@@ -146,4 +147,166 @@ public sealed class RiskPeerClients : IRiskPeerClients
             return null;
         }
     }
+}
+
+// ── WitnessBot peer client (v1.0 riskAttestPro Task 3) ───────────────────────
+//
+// Distinct from IRiskPeerClients because:
+//   - The response shape is a typed manifest (not opaque JsonDocument).
+//   - The orchestrator (Task 6) needs to distinguish "fresh + IsAcpAgent=false"
+//     (positive evidence a wallet has NOT been witnessed) from "unavailable"
+//     (transport-class failure that counts against the 4-of-7 floor).
+//
+// Endpoint: GET WITNESSBOT_BASE_URL/v1/resources/manifestByAgent?agentAddress=
+// Auth:    X-API-Key WITNESSBOT_API_KEY (portfolio cross-bot convention even
+//          though manifestByAgent is a free Resource — keeps the lane symmetric
+//          with LiquidGuard/RevokeBot/MEVProtect/EASIssuer).
+// 200 →   populated manifest, Status="fresh", IsAcpAgent=true
+// 404 →   no manifest, Status="fresh", IsAcpAgent=false (wallet not witnessed)
+// other → Status="unavailable", IsAcpAgent=false, Details=HTTP code / exception
+
+public sealed record WitnessManifest(
+    bool IsAcpAgent,
+    string? CatalogueHash,
+    string? SignerEoa,
+    string? SignedAt,
+    string? ManifestUid,
+    string Status,
+    string Details);
+
+public interface IWitnessBotClient
+{
+    Task<WitnessManifest> ManifestByAgentAsync(string agentAddress, CancellationToken ct = default);
+}
+
+public sealed class WitnessBotClient : IWitnessBotClient
+{
+    private readonly IHttpClientFactory _http;
+    private readonly ILogger<WitnessBotClient> _log;
+    private readonly string _baseUrl;
+    private readonly string _apiKey;
+
+    public WitnessBotClient(
+        IHttpClientFactory http,
+        IConfiguration config,
+        ILogger<WitnessBotClient> log)
+    {
+        _http = http;
+        _log = log;
+        // Match the neighbour-client pattern: hierarchical config key first,
+        // flat env-style fallback for any operator still setting it that way.
+        _baseUrl = config["WitnessBot:BaseUrl"]
+            ?? config["WITNESSBOT_BASE_URL"]
+            ?? "";
+        _apiKey = config["WitnessBot:ApiKey"]
+            ?? config["WITNESSBOT_API_KEY"]
+            ?? "";
+    }
+
+    public async Task<WitnessManifest> ManifestByAgentAsync(string agentAddress, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(_baseUrl) || string.IsNullOrWhiteSpace(_apiKey))
+        {
+            return new WitnessManifest(
+                IsAcpAgent: false,
+                CatalogueHash: null,
+                SignerEoa: null,
+                SignedAt: null,
+                ManifestUid: null,
+                Status: "unavailable",
+                Details: "WITNESSBOT_BASE_URL/API_KEY not set");
+        }
+
+        try
+        {
+            var http = _http.CreateClient();
+            http.Timeout = TimeSpan.FromSeconds(15);
+            var path = $"v1/resources/manifestByAgent?agentAddress={Uri.EscapeDataString(agentAddress)}";
+            var url = _baseUrl.EndsWith("/") ? _baseUrl + path : _baseUrl + "/" + path;
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.Add("X-API-Key", _apiKey);
+            req.Headers.Add("X-Caller", "themetabot");
+            using var resp = await http.SendAsync(req, ct);
+
+            if (resp.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                return new WitnessManifest(
+                    IsAcpAgent: false,
+                    CatalogueHash: null,
+                    SignerEoa: null,
+                    SignedAt: null,
+                    ManifestUid: null,
+                    Status: "fresh",
+                    Details: "no manifest");
+            }
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                var status = ((int)resp.StatusCode).ToString(CultureInfo.InvariantCulture);
+                _log.LogWarning("[risk-peer:witnessbot] manifestByAgent -> {Status}", status);
+                return new WitnessManifest(
+                    IsAcpAgent: false,
+                    CatalogueHash: null,
+                    SignerEoa: null,
+                    SignedAt: null,
+                    ManifestUid: null,
+                    Status: "unavailable",
+                    Details: $"HTTP {status}");
+            }
+
+            var stream = await resp.Content.ReadAsStreamAsync(ct);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+            var root = doc.RootElement;
+
+            string? catalogueHash = TryGetString(root, "catalogueHash");
+            string? signerEoa = TryGetString(root, "signerAddress")
+                ?? TryGetString(root, "signerEoa");
+            string? signedAt = TryGetString(root, "signedAt");
+            string? manifestUid = TryGetString(root, "manifestUid");
+
+            return new WitnessManifest(
+                IsAcpAgent: true,
+                CatalogueHash: catalogueHash,
+                SignerEoa: signerEoa,
+                SignedAt: signedAt,
+                ManifestUid: manifestUid,
+                Status: "fresh",
+                Details: "manifest current");
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[risk-peer:witnessbot] manifestByAgent failed");
+            return new WitnessManifest(
+                IsAcpAgent: false,
+                CatalogueHash: null,
+                SignerEoa: null,
+                SignedAt: null,
+                ManifestUid: null,
+                Status: "unavailable",
+                Details: ex.Message);
+        }
+    }
+
+    private static string? TryGetString(JsonElement root, string name)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        if (!root.TryGetProperty(name, out var el)) return null;
+        return el.ValueKind == JsonValueKind.String ? el.GetString() : null;
+    }
+}
+
+// Noop implementation — registered when env vars are unset OR for unit tests
+// that exercise the orchestrator without a real HttpClient. Always returns
+// the "unavailable" sentinel so the orchestrator treats it as a soft failure.
+public sealed class NoopWitnessBotClient : IWitnessBotClient
+{
+    public Task<WitnessManifest> ManifestByAgentAsync(string agentAddress, CancellationToken ct = default)
+        => Task.FromResult(new WitnessManifest(
+            IsAcpAgent: false,
+            CatalogueHash: null,
+            SignerEoa: null,
+            SignedAt: null,
+            ManifestUid: null,
+            Status: "unavailable",
+            Details: "noop client"));
 }

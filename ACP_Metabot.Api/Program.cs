@@ -277,6 +277,14 @@ builder.Services.AddSingleton<RiskOrchestrationService>();
 builder.Services.AddSingleton<RiskWatchWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RiskWatchWorker>());
 
+// v1.0 riskAttestPro Task 3 — WitnessBot peer client. Distinct from
+// IRiskPeerClients because the response is a typed manifest (not opaque
+// JsonDocument) and the orchestrator (Task 6) needs to distinguish the
+// "fresh + no manifest" 404 path from transport-class "unavailable" failures.
+// When WitnessBot:BaseUrl / :ApiKey are unset the client itself returns the
+// "unavailable" sentinel — no need for a separate Noop registration.
+builder.Services.AddSingleton<IWitnessBotClient, WitnessBotClient>();
+
 // R12 Tier 1.2 — portfolioRollup service. Singleton so the 5-min cache is
 // shared across all requests. No sibling HTTP work in v1; v1.1 will plumb
 // sibling-probe via the existing IHttpClientFactory.
