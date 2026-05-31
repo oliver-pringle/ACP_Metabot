@@ -30,6 +30,13 @@ public interface IRiskPeerClients
     Task<JsonDocument?> GetMevScoreAsync(string wallet, CancellationToken ct);
     Task<JsonDocument?> GetRevokeCalldataAsync(string wallet, string chain, string spender, string token, CancellationToken ct);
     Task<JsonDocument?> PublishAttestationAsync(object payload, CancellationToken ct);
+
+    // v1.0.2 — schema bootstrap helpers. Lookup is a read-only GET against
+    // EASIssuer's local DB (free); RegisterSchema burns mainnet ETH from
+    // EAS_OPERATOR_PRIVATE_KEY and is only invoked when an operator opts in
+    // via RISK_ATTEST_PRO_ENABLE_SCHEMA_REGISTER=true.
+    Task<JsonDocument?> LookupEasSchemaByStringAsync(string schemaString, CancellationToken ct);
+    Task<JsonDocument?> RegisterEasSchemaAsync(string schemaString, CancellationToken ct);
 }
 
 public sealed class RiskPeerClients : IRiskPeerClients
@@ -90,6 +97,15 @@ public sealed class RiskPeerClients : IRiskPeerClients
 
     public Task<JsonDocument?> PublishAttestationAsync(object payload, CancellationToken ct)
         => PostJsonAsync(_easIssuerBase, _easIssuerKey, "v1/internal/attest", payload, "easissuer", ct);
+
+    public Task<JsonDocument?> LookupEasSchemaByStringAsync(string schemaString, CancellationToken ct)
+        => GetJsonAsync(_easIssuerBase, _easIssuerKey,
+            $"v1/internal/schema/by-string?schemaString={Uri.EscapeDataString(schemaString)}",
+            "easissuer", ct);
+
+    public Task<JsonDocument?> RegisterEasSchemaAsync(string schemaString, CancellationToken ct)
+        => PostJsonAsync(_easIssuerBase, _easIssuerKey, "v1/schema/register",
+            new { schemaString }, "easissuer", ct);
 
     private async Task<JsonDocument?> GetJsonAsync(
         string baseUrl, string apiKey, string path, string peerName, CancellationToken ct)

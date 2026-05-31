@@ -72,6 +72,10 @@ public class RiskAttestProServiceTests : IDisposable
             => Task.FromResult(Calldata(wallet, chain, spender, token));
         public Task<JsonDocument?> PublishAttestationAsync(object payload, CancellationToken ct)
             => Task.FromResult(Publish(payload));
+        public Task<JsonDocument?> LookupEasSchemaByStringAsync(string schemaString, CancellationToken ct)
+            => Task.FromResult<JsonDocument?>(null);
+        public Task<JsonDocument?> RegisterEasSchemaAsync(string schemaString, CancellationToken ct)
+            => Task.FromResult<JsonDocument?>(null);
     }
 
     private sealed class FakeWitness : IWitnessBotClient
