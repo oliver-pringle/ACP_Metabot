@@ -176,9 +176,17 @@ public sealed class RiskOrchestrationService
         var chainNorm = NormalizeChain(chain);
         var snap = await _synth.ComputeAsync(wallet, chainNorm, ct);
 
-        // Schema UID — fixed for v1. WalletRiskSnapshot v1 schema registered
-        // out-of-band; v1.1 may auto-register on first call.
-        const string canonicalSchemaUid =
+        // Schema UID fallback only — EASIssuer's /v1/eas-publish response
+        // carries the real canonical schema UID for the wallet risk-snapshot
+        // attestation; we surface that to the buyer (see resp parse below).
+        // This placeholder is just so the field is non-null when the publish
+        // lane is unreachable. 2026-05-31 fix: prior code hard-coded the
+        // placeholder as if it were the real UID and shipped it to buyers
+        // alongside a real txHash from a different on-chain schema — the
+        // returned txHash anchored under EASIssuer's real canonical schema
+        // (0xdf20828670f73d47…0114f) but the response said it anchored under
+        // a 62-hex-char placeholder (not a valid EAS UID).
+        const string canonicalSchemaUidFallback =
             "0xdf208286c7c0b8a5d8f9e2a3b4c5d6e7f8901234567890abcdef0114f";
 
         // 2026-05-31 — wire shape now matches EASIssuer's EasPublishRequest.
@@ -213,6 +221,7 @@ public sealed class RiskOrchestrationService
         string? easAttestationUid = null;
         string? easTxHash = null;
         string? baseScanUrl = null;
+        string realSchemaUid = canonicalSchemaUidFallback;
         long blockNumber = 0;
 
         var resp = await _peers.PublishAttestationAsync(attestationRequest, ct);
@@ -226,6 +235,12 @@ public sealed class RiskOrchestrationService
                 easTxHash         = TryString(root, "txHash") ?? TryString(root, "easTxHash");
                 baseScanUrl       = TryString(root, "baseScanUrl")
                     ?? (string.IsNullOrEmpty(easTxHash) ? null : $"https://basescan.org/tx/{easTxHash}");
+                // Read the REAL canonical schema UID from EASIssuer's response
+                // instead of shipping the constant placeholder. EASIssuer knows
+                // the canonical UID at config time; we mirror it to the buyer.
+                var respSchemaUid = TryString(root, "schemaUid");
+                if (!string.IsNullOrEmpty(respSchemaUid))
+                    realSchemaUid = respSchemaUid;
                 if (root.TryGetProperty("blockNumber", out var bn))
                 {
                     if (bn.ValueKind == JsonValueKind.Number) blockNumber = bn.GetInt64();
@@ -252,7 +267,7 @@ public sealed class RiskOrchestrationService
         var merged = MergeWithKeyed(snapJson, "attestation", new
         {
             signature,
-            schemaUid = canonicalSchemaUid,
+            schemaUid = realSchemaUid,
             easAttestationUid,
             easTxHash,
             baseScanUrl,
