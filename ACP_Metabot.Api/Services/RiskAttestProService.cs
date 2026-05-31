@@ -52,7 +52,22 @@ public sealed record RiskAttestProResult(
     string ExpiresAt,
     string[] SourcesQueried,
     string[] SourcesUnavailable,
-    string ComponentsHash);
+    string ComponentsHash,
+    // v1.0.3 — on-chain EAS attestation. Null when publish lane is unreachable
+    // or returns 502 (graceful degradation per the contract). Cache-miss only:
+    // a cached result returned by the endpoint reads these from the persisted
+    // row. Schema UID is canonical seller-result schema (the new
+    // riskAttestPro AgentRisk schema 0xb7038e6b... is registered but not yet
+    // ABI-encoded — slated for v1.0.4).
+    RiskAttestPublishedAttestation? Attestation = null);
+
+public sealed record RiskAttestPublishedAttestation(
+    string AttestationUid,
+    string TxHash,
+    long BlockNumber,
+    string SchemaUid,
+    string SchemaUri,
+    string BaseScanUrl);
 
 public sealed class InsufficientSignalsException : Exception
 {
@@ -249,6 +264,31 @@ public sealed class RiskAttestProService
             _log.LogWarning(ex, "[riskAttestPro] trajectory persistence failed for {Wallet}", w);
         }
 
+        // v1.0.3 — on-chain EAS attestation. Best-effort: any failure (peer
+        // unreachable, EAS not configured, gas exhausted) returns the result
+        // with Attestation=null. Cache-miss-only by design — the endpoint
+        // already short-circuits cache hits with the persisted UID, so this
+        // path only fires when there's no row for (wallet,chain) within 1h.
+        // Per-call gas cost on Base mainnet is ~$0.04 (well under the $10
+        // offering price). Schema UID = canonical seller-result schema
+        // 0xdf208286…0114f; the riskAttestPro AgentRisk schema 0xb7038e6b…
+        // is registered but its custom ABI encoding is slated for v1.0.4.
+        RiskAttestPublishedAttestation? published = null;
+        try
+        {
+            published = await PublishAttestationAsync(
+                wallet: w,
+                chain: c,
+                componentsHash: componentsHash,
+                componentsJson: canonicalJson,
+                generatedAt: now,
+                ct: ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[riskAttestPro] EAS publish failed for {Wallet} — returning result with Attestation=null", w);
+        }
+
         return new RiskAttestProResult(
             Verdict: verdict,
             ScorePro: scorePro,
@@ -263,7 +303,8 @@ public sealed class RiskAttestProService
             ExpiresAt: now.AddHours(24).UtcDateTime.ToString("O", CultureInfo.InvariantCulture),
             SourcesQueried: sourcesQueried,
             SourcesUnavailable: unavailable.ToArray(),
-            ComponentsHash: componentsHash);
+            ComponentsHash: componentsHash,
+            Attestation: published);
     }
 
     // ── Verdict / grade thresholds ──────────────────────────────────────────
@@ -669,5 +710,101 @@ public sealed class RiskAttestProService
             sorted[key] = components[key].DeepClone();
         }
         return sorted.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+    }
+
+    // v1.0.3 — call EASIssuer's /v1/eas-publish via the shared peer client
+    // and return a typed Attestation record on success. Returns null on any
+    // class of failure (peer unreachable, response shape unexpected,
+    // EAS_NOT_CONFIGURED, EAS_PUBLISH_FAILED). The buyer still gets the
+    // verdict + components + summary + markdown — only the on-chain anchor
+    // degrades.
+    private async Task<RiskAttestPublishedAttestation?> PublishAttestationAsync(
+        string wallet,
+        string chain,
+        string componentsHash,
+        string componentsJson,
+        DateTimeOffset generatedAt,
+        CancellationToken ct)
+    {
+        // Hash the canonical components JSON to a deterministic resultHash.
+        // The componentsHash from ToCanonicalJson is the SAME value but kept
+        // separate so the contract is unambiguous: resultHash = SHA256(canonicalJson).
+        var resultHashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(componentsJson));
+        var resultHashHex = "0x" + Convert.ToHexString(resultHashBytes).ToLowerInvariant();
+
+        // SchemaUri must use https:// or ipfs:// per EASIssuer's
+        // IsAcceptableUri validator (added in the 2026-05-28 audit).
+        const string schemaUri = "https://api.acp-metabot.dev/easissuer/schemas/riskAttestPro-v1.json";
+
+        // JobId is bytes32 — use the componentsHash (already 32-byte hex).
+        var jobId = componentsHash.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+            ? componentsHash
+            : "0x" + componentsHash;
+
+        var payload = new
+        {
+            jobId,
+            seller = wallet,
+            resultHash = resultHashHex,
+            schemaUri,
+            metadata = new
+            {
+                wallet,
+                chain,
+                generatedAt = generatedAt.UtcDateTime.ToString("O", CultureInfo.InvariantCulture),
+                componentsHash,
+                resultType = "riskAttestPro-v1",
+            }
+        };
+
+        JsonDocument? resp;
+        try { resp = await _peers.PublishAttestationAsync(payload, ct); }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[riskAttestPro] PublishAttestationAsync threw");
+            return null;
+        }
+
+        if (resp is null) return null;
+
+        try
+        {
+            using (resp)
+            {
+                var root = resp.RootElement;
+                if (!root.TryGetProperty("attestationUid", out var uidEl) || uidEl.ValueKind != JsonValueKind.String)
+                    return null;
+                var uid = uidEl.GetString() ?? "";
+                var txHash = root.TryGetProperty("txHash", out var txEl) && txEl.ValueKind == JsonValueKind.String
+                    ? (txEl.GetString() ?? "") : "";
+                long blockNumber = 0L;
+                if (root.TryGetProperty("blockNumber", out var bnEl))
+                {
+                    if (bnEl.ValueKind == JsonValueKind.Number)
+                        blockNumber = bnEl.GetInt64();
+                    else if (bnEl.ValueKind == JsonValueKind.String && long.TryParse(bnEl.GetString(), out var bnParsed))
+                        blockNumber = bnParsed;
+                }
+                var schemaUid = root.TryGetProperty("schemaUid", out var sEl) && sEl.ValueKind == JsonValueKind.String
+                    ? (sEl.GetString() ?? "") : "";
+
+                var baseScan = !string.IsNullOrEmpty(txHash)
+                    ? $"https://basescan.org/tx/{txHash}"
+                    : "";
+
+                return new RiskAttestPublishedAttestation(
+                    AttestationUid: uid,
+                    TxHash: txHash,
+                    BlockNumber: blockNumber,
+                    SchemaUid: schemaUid,
+                    SchemaUri: schemaUri,
+                    BaseScanUrl: baseScan);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "[riskAttestPro] EAS publish response parse failed");
+            return null;
+        }
     }
 }

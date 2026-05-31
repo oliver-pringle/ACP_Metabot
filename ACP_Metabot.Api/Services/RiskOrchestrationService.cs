@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using ACP_Metabot.Api.Data;
 
@@ -180,13 +181,31 @@ public sealed class RiskOrchestrationService
         const string canonicalSchemaUid =
             "0xdf208286c7c0b8a5d8f9e2a3b4c5d6e7f8901234567890abcdef0114f";
 
+        // 2026-05-31 — wire shape now matches EASIssuer's EasPublishRequest.
+        // Pre-fix this posted to a path that didn't exist (/v1/internal/attest)
+        // with a payload shape EASIssuer didn't recognise, so EVERY paid
+        // risk_attestation call silently degraded to easAttestationUid=null.
+        var snapAnon = SerialiseSnapshot(snap);
+        var snapJsonString = JsonSerializer.Serialize(snapAnon);
+        var resultHashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(snapJsonString));
+        var resultHashHex = "0x" + Convert.ToHexString(resultHashBytes).ToLowerInvariant();
+        // jobId is bytes32 — use the resultHash bytes directly so it's
+        // deterministic + content-bound for the snapshot.
+        var jobIdHex = resultHashHex;
+        const string schemaUri = "https://api.acp-metabot.dev/easissuer/schemas/walletRiskSnapshot-v1.json";
+
         var attestationRequest = new
         {
-            schemaUid = canonicalSchemaUid,
-            recipient = wallet,
-            payload = new
+            jobId = jobIdHex,
+            seller = wallet,
+            resultHash = resultHashHex,
+            schemaUri,
+            metadata = new
             {
-                snapshot = SerialiseSnapshot(snap)
+                wallet,
+                chain = chainNorm,
+                generatedAt = snap.GeneratedAt,
+                resultType = "walletRiskSnapshot-v1",
             }
         };
 
@@ -205,18 +224,27 @@ public sealed class RiskOrchestrationService
                 signature         = TryString(root, "signature");
                 easAttestationUid = TryString(root, "attestationUid") ?? TryString(root, "easAttestationUid");
                 easTxHash         = TryString(root, "txHash") ?? TryString(root, "easTxHash");
-                baseScanUrl       = TryString(root, "baseScanUrl");
-                if (root.TryGetProperty("blockNumber", out var bn) && bn.ValueKind == JsonValueKind.Number)
-                    blockNumber = bn.GetInt64();
+                baseScanUrl       = TryString(root, "baseScanUrl")
+                    ?? (string.IsNullOrEmpty(easTxHash) ? null : $"https://basescan.org/tx/{easTxHash}");
+                if (root.TryGetProperty("blockNumber", out var bn))
+                {
+                    if (bn.ValueKind == JsonValueKind.Number) blockNumber = bn.GetInt64();
+                    else if (bn.ValueKind == JsonValueKind.String && long.TryParse(bn.GetString(), out var bnParsed))
+                        blockNumber = bnParsed;
+                }
             }
             catch (Exception ex)
             {
                 _log.LogDebug(ex, "[risk] attestation response parse failed");
             }
         }
-        else
+
+        // Only mark "attestation" as fallback if we genuinely got no UID back —
+        // peer-reachable-but-EAS-misconfigured returns a 502/503 envelope
+        // (PublishAttestationAsync swallows that to null), in which case
+        // easAttestationUid stays null and the fallback is honest.
+        if (string.IsNullOrEmpty(easAttestationUid))
         {
-            // EASIssuer unreachable — surface in fallbacks.
             snap.Fallbacks.Add("attestation");
         }
 

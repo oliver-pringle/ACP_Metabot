@@ -247,16 +247,15 @@ public static class RiskAttestProEndpoint
     }
 
     /// <summary>
-    /// Pulls <c>attestation.uid</c> off the result (when present) for cache-
-    /// row indexing. v1.0 typically returns no attestation block; v1.0.1
-    /// will populate it once the EAS-publish factory lands.
+    /// Pulls the real EAS <c>AttestationUid</c> off the result when v1.0.3
+    /// publish succeeded; falls back to <c>ComponentsHash</c> so the cache
+    /// row's attestation_uid column stays non-empty + queryable by ops even
+    /// when the on-chain anchor is unavailable.
     /// </summary>
     private static string? ExtractAttestationUid(RiskAttestProResult result)
     {
-        // The result record doesn't carry an Attestation property today;
-        // when v1.0.1 adds one, lift this to navigate result.Attestation.Uid.
-        // For v1.0 we use ComponentsHash as a stable per-wallet identifier
-        // so the cache_uid column is non-empty + queryable by ops.
+        if (result.Attestation is { AttestationUid: { Length: > 0 } realUid })
+            return realUid;
         return result.ComponentsHash;
     }
 }

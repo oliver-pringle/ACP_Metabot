@@ -95,8 +95,14 @@ public sealed class RiskPeerClients : IRiskPeerClients
         return PostJsonAsync(_revokeBotBase, _revokeBotKey, "v1/internal/revoke_calldata", body, "revokebot", ct);
     }
 
+    // 2026-05-31 (v1.0.3 + risk_attestation un-degrade): EASIssuer's real
+    // route is /v1/eas-publish (the attest_eas_publish $0.20 paid offering).
+    // The legacy path here was /v1/internal/attest, which doesn't exist —
+    // every prior PublishAttestationAsync call silently 404'd → returned
+    // null → callers logged "attestation" in their Fallbacks. risk_attestation
+    // ($0.50) and riskAttestPro v1.0.3 both now get a real EAS anchor.
     public Task<JsonDocument?> PublishAttestationAsync(object payload, CancellationToken ct)
-        => PostJsonAsync(_easIssuerBase, _easIssuerKey, "v1/internal/attest", payload, "easissuer", ct);
+        => PostJsonAsync(_easIssuerBase, _easIssuerKey, "v1/eas-publish", payload, "easissuer", ct);
 
     public Task<JsonDocument?> LookupEasSchemaByStringAsync(string schemaString, CancellationToken ct)
         => GetJsonAsync(_easIssuerBase, _easIssuerKey,
