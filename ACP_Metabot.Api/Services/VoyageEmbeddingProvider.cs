@@ -60,8 +60,9 @@ public class VoyageEmbeddingProvider : IEmbeddingProvider
             if (!resp.IsSuccessStatusCode)
             {
                 var body = await resp.Content.ReadAsStringAsync(ct);
+                // P30/P11 (audit #6): full body stays in .Body (debug) but out of the logged message.
                 throw new VoyageApiException((int)resp.StatusCode, body,
-                    $"Voyage embeddings call failed: {(int)resp.StatusCode} {resp.StatusCode} — {body}");
+                    $"Voyage embeddings call failed: HTTP {(int)resp.StatusCode} (body {body.Length} chars)");
             }
             var parsed = await resp.Content.ReadFromJsonAsync<VoyageResponse>(cancellationToken: ct)
                 ?? throw new InvalidOperationException("Voyage returned empty body");
@@ -104,8 +105,9 @@ public class VoyageEmbeddingProvider : IEmbeddingProvider
             if (!resp.IsSuccessStatusCode)
             {
                 var body = await resp.Content.ReadAsStringAsync(ct);
+                // P30/P11 (audit #6): full body stays in .Body (debug) but out of the logged message.
                 throw new VoyageApiException((int)resp.StatusCode, body,
-                    $"Voyage query embedding failed: {(int)resp.StatusCode} — {body}");
+                    $"Voyage query embedding failed: HTTP {(int)resp.StatusCode} (body {body.Length} chars)");
             }
             var parsed = await resp.Content.ReadFromJsonAsync<VoyageResponse>(cancellationToken: ct)
                 ?? throw new InvalidOperationException("Voyage returned empty body");

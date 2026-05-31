@@ -62,8 +62,12 @@ public class ClaudeApiClient : IClaudeClient
             if (!resp.IsSuccessStatusCode)
             {
                 var body = await resp.Content.ReadAsStringAsync(ct);
+                // P30/P11 (audit #6): keep the full upstream body in the structured .Body
+                // field (debug-only access) but NOT in the exception MESSAGE, which is what
+                // standard logging emits - an Anthropic error body can echo prompt fragments
+                // / policy detail and must not land in error logs.
                 throw new ClaudeApiException((int)resp.StatusCode, body,
-                    $"Anthropic Messages call failed: {(int)resp.StatusCode} — {body}");
+                    $"Anthropic Messages call failed: HTTP {(int)resp.StatusCode} (body {body.Length} chars)");
             }
             var parsed = await resp.Content.ReadFromJsonAsync<MessagesResponse>(cancellationToken: ct)
                 ?? throw new InvalidOperationException("Anthropic returned empty body");
