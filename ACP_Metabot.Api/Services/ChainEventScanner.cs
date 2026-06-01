@@ -98,7 +98,7 @@ public class ChainEventScanner
         var rpcTimeout = TimeSpan.FromSeconds(
             Math.Max(5, config.GetValue<int?>("Reputation:RpcTimeoutSeconds") ?? 60));
         Nethereum.JsonRpc.Client.ClientBase.ConnectionTimeout = rpcTimeout;
-        var rpcClient = new Nethereum.JsonRpc.Client.RpcClient(new Uri(rpcUrl));
+        var rpcClient = new Nethereum.JsonRpc.Client.RpcClient(new Uri(RpcSafe.RequireHttps(rpcUrl, "BASE_RPC_URL")));
         _web3 = new Web3(rpcClient);
 
         var enumRpcUrl = config["BASE_RPC_URL_ENUM"]
@@ -106,7 +106,7 @@ public class ChainEventScanner
         if (!string.IsNullOrWhiteSpace(enumRpcUrl)
             && !string.Equals(enumRpcUrl, rpcUrl, StringComparison.OrdinalIgnoreCase))
         {
-            var enumClient = new Nethereum.JsonRpc.Client.RpcClient(new Uri(enumRpcUrl));
+            var enumClient = new Nethereum.JsonRpc.Client.RpcClient(new Uri(RpcSafe.RequireHttps(enumRpcUrl, "BASE_RPC_URL_ENUM")));
             _enumWeb3 = new Web3(enumClient);
             _logger.LogInformation(
                 "[chain-scan] enumerative RPC client ready (separate from per-agent); url={Url}",
