@@ -440,6 +440,33 @@ public class Db
                 PRIMARY KEY (agent_address, chain_id)
             );
 
+            -- ACPPurchaser Path A (R16 #1 cold-start fix). acppurchaser_daily_spend
+            -- is the atomic per-buyer/day USDC cap backstop; acppurchaser_audit is
+            -- the per-attempt ledger. See docs/superpowers/specs/2026-06-01-acppurchaser-pathA-design.md
+            CREATE TABLE IF NOT EXISTS acppurchaser_daily_spend (
+                buyer_key   TEXT NOT NULL,
+                day_iso     TEXT NOT NULL,
+                total_usd   REAL NOT NULL DEFAULT 0.0,
+                updated_at  TEXT NOT NULL,
+                PRIMARY KEY (buyer_key, day_iso)
+            );
+
+            CREATE TABLE IF NOT EXISTS acppurchaser_audit (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                outer_job_id    TEXT,
+                buyer_key       TEXT NOT NULL,
+                target_agent    TEXT NOT NULL,
+                target_offering TEXT NOT NULL,
+                downstream_usd  REAL,
+                service_fee_usd REAL,
+                inner_job_id    TEXT,
+                state           TEXT NOT NULL,
+                reason          TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_acppurchaser_audit_buyer ON acppurchaser_audit(buyer_key, created_at DESC);
+
             -- v1.6 #1 v0.1: reputation_feeds tracks ReputationAggregator
             -- contracts deployed by ChainlinkBot's POST /feed-address on behalf
             -- of high-reputation agents in our corpus. One row per agent; the

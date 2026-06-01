@@ -182,6 +182,11 @@ builder.Services.AddSingleton<SearchService>();
 // SearchService for in-corpus category lookup (pricing-outlier signal);
 // degrades gracefully when the corpus hasn't refreshed yet.
 builder.Services.AddSingleton<AgentRiskScorer>();
+// ACPPurchaser Path A (R16 #1 cold-start fix). IAgentRiskSource seams the
+// scorer for the verdict logic; PurchaserService owns quote/precheck/settle.
+builder.Services.AddSingleton<IAgentRiskSource, AgentRiskScorerSource>();
+builder.Services.AddSingleton<PurchaserBudgetService>();
+builder.Services.AddSingleton<PurchaserService>();
 builder.Services.AddSingleton<CrossPresenceBuilder>();
 builder.Services.AddSingleton<AgentSearchService>();
 builder.Services.AddSingleton<StackComposerService>();
@@ -1157,6 +1162,18 @@ app.MapPost("/v1/buyer/budget-check",
     return Results.Ok(await svc.PreHireBudgetCheckAsync(req.OfferingIds));
 }).RequireRateLimiting("public-compose");
 
+// ACPPurchaser Path A — purchase_quote ($0.02). Pre-flight cost + safety verdict.
+// The sidecar resolves the live downstream price (C# can't speak ACP) and passes
+// downstreamUsdc + fixedPrice; this endpoint adds the risk verdict + escrow total.
+app.MapPost("/v1/buyer/purchase/quote",
+    async (PurchaseQuoteRequest req, PurchaserService svc, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(req.TargetAgent))
+        return Results.BadRequest(new { error = "targetAgent required" });
+    var q = await svc.QuoteAsync(req.TargetAgent, req.DownstreamUsdc, req.FixedPrice, ct);
+    return Results.Ok(q);
+}).RequireRateLimiting("public-compose");
+
 app.MapPost("/v1/seller/coaching",
     async (SellerCoachingRequest req, V17PaidOfferingsService svc, CancellationToken ct) =>
 {
@@ -1592,6 +1609,25 @@ app.MapPost("/v1/risk/attest-pro",
 // risk-watch subscription. The previous /v1/risk/watch route was publicly
 // callable and would let anyone schedule a 30-day daily-tick worker against
 // an arbitrary wallet+webhookUrl without payment proof.
+
+// ACPPurchaser Path A — internal precheck/settle (sidecar-only, X-API-Key gated).
+// precheck = fixed/maxFunds/risk gate + atomic per-buyer/day cap reservation + audit.
+// settle = audit state transition + refund-the-reservation on REJECTED.
+app.MapPost("/v1/internal/buyer/purchase/precheck",
+    async (PurchasePrecheckRequest req, PurchaserService svc, CancellationToken ct) =>
+{
+    var r = await svc.PrecheckAsync(req.OuterJobId, req.BuyerKey, req.TargetAgent, req.TargetOffering,
+        req.DownstreamUsdc, req.MaxFundsUsdc, ct);
+    return Results.Ok(r);
+});
+
+app.MapPost("/v1/internal/buyer/purchase/settle",
+    async (PurchaseSettleRequest req, PurchaserService svc, CancellationToken ct) =>
+{
+    await svc.SettleAsync(req.OuterJobId, req.BuyerKey, req.State, req.InnerJobId, req.Reason, req.DownstreamUsdc, ct);
+    return Results.Ok(new { ok = true });
+});
+
 app.MapPost("/v1/internal/risk/watch",
     async (RiskWatchRequest req, RiskOrchestrationService svc, CancellationToken ct) =>
 {
@@ -2957,6 +2993,10 @@ public record AgentReputationRequest(string AgentAddress);
 public record ArenaParticipantsBulkRequest(string[] Addresses);
 public record BuyerOrchestrationRequest(string UseCase, double? BudgetUsdc, int? MaxOfferings);
 public record BudgetCheckRequest(long[] OfferingIds);
+// ACPPurchaser Path A request DTOs.
+public record PurchaseQuoteRequest(string TargetAgent, decimal DownstreamUsdc, bool FixedPrice);
+public record PurchasePrecheckRequest(string OuterJobId, string BuyerKey, string TargetAgent, string TargetOffering, decimal DownstreamUsdc, decimal MaxFundsUsdc);
+public record PurchaseSettleRequest(string OuterJobId, string BuyerKey, string State, string? InnerJobId, string? Reason, decimal DownstreamUsdc);
 public record SellerCoachingRequest(string Agent);
 public record V1Tov2MigrationRequest(string Agent);
 

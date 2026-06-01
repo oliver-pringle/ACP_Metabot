@@ -58,4 +58,19 @@ public class DbTests : IDisposable
             },
             names);
     }
+
+    [Fact]
+    public async Task InitAsync_creates_acppurchaser_tables()
+    {
+        await _db.InitializeSchemaAsync();
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"SELECT name FROM sqlite_master WHERE type='table'
+                            AND name IN ('acppurchaser_daily_spend','acppurchaser_audit');";
+        var found = new List<string>();
+        await using var rdr = await cmd.ExecuteReaderAsync();
+        while (await rdr.ReadAsync()) found.Add(rdr.GetString(0));
+        Assert.Contains("acppurchaser_daily_spend", found);
+        Assert.Contains("acppurchaser_audit", found);
+    }
 }
