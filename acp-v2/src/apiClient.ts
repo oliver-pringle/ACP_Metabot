@@ -271,6 +271,10 @@ export interface ApiClient {
   arenaParticipants(req: { addresses: string[] }): Promise<unknown>;
   buyerOrchestrate(req: { useCase: string; budgetUsdc?: number; maxOfferings?: number }): Promise<unknown>;
   budgetCheck(req: { offeringIds: number[] }): Promise<unknown>;
+  // ACPPurchaser Path A (R16 #1 cold-start fix).
+  purchaseQuote(req: { targetAgent: string; downstreamUsdc: number; fixedPrice: boolean }): Promise<unknown>;
+  purchasePrecheck(req: { outerJobId: string; buyerKey: string; targetAgent: string; targetOffering: string; downstreamUsdc: number; maxFundsUsdc: number }): Promise<{ ok: boolean; reason?: string; downstreamUsdc: number }>;
+  purchaseSettle(req: { outerJobId: string; buyerKey: string; state: string; innerJobId?: string | null; reason?: string | null; downstreamUsdc: number }): Promise<unknown>;
   sellerCoaching(req: { agent: string }): Promise<unknown>;
   v1Tov2Migration(req: { agent: string }): Promise<unknown>;
 
@@ -432,6 +436,13 @@ export function createApiClient(
       request<unknown>("/v1/buyer/orchestrate", { method: "POST", body: JSON.stringify(req) }),
     budgetCheck: (req) =>
       request<unknown>("/v1/buyer/budget-check", { method: "POST", body: JSON.stringify(req) }),
+    purchaseQuote: (req) =>
+      request<unknown>("/v1/buyer/purchase/quote", { method: "POST", body: JSON.stringify(req) }),
+    purchasePrecheck: (req) =>
+      request<{ ok: boolean; reason?: string; downstreamUsdc: number }>(
+        "/v1/internal/buyer/purchase/precheck", { method: "POST", body: JSON.stringify(req) }),
+    purchaseSettle: (req) =>
+      request<unknown>("/v1/internal/buyer/purchase/settle", { method: "POST", body: JSON.stringify(req) }),
     sellerCoaching: (req) =>
       request<unknown>("/v1/seller/coaching", { method: "POST", body: JSON.stringify(req) }),
     v1Tov2Migration: (req) =>

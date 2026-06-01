@@ -37,6 +37,11 @@ import { agentRiskCheck } from "./agentRiskCheck.js";
 // executive summary + base64 markdown compliance report + on-chain EAS
 // attestation. Wraps C# POST /v1/risk/attest-pro (Task 8).
 import { riskAttestPro } from "./riskAttestPro.js";
+// ACPPurchaser Path A (R16 #1 cold-start fix). purchase_quote is a normal
+// offering; purchase_execute is special-cased in seller.ts (Require-Funds +
+// inner hire). See docs/superpowers/specs/2026-06-01-acppurchaser-pathA-design.md
+import { purchaseQuote } from "./purchaseQuote.js";
+import { purchaseExecute } from "./purchaseExecute.js";
 
 // v1.7.2: search / searchAgents / browseAgent moved from paid offerings to
 // free Resources (see acp-v2/src/resources.ts). The $0.01 price floor was
@@ -79,6 +84,10 @@ export const OFFERINGS: Record<string, Offering> = {
   // v1.0 riskAttestPro ($10.00) — premium 7-lane cross-bot orchestrator.
   // Endpoint: POST /v1/risk/attest-pro. 1h wallet-response cache.
   riskAttestPro,
+  // ACPPurchaser Path A. purchase_quote ($0.02) pre-flight; purchase_execute
+  // ($0.10 service + Require-Funds) buys a fixed-price offering on your behalf.
+  purchase_quote: purchaseQuote,
+  purchase_execute: purchaseExecute,
 };
 
 export function getOffering(name: string): Offering | undefined {

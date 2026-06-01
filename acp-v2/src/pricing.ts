@@ -50,6 +50,10 @@ const PRICE_USDC: Record<string, number> = {
   // priced for high-conviction wallet underwriting / institutional compliance
   // (per portfolio pricing principle: loss-prevention 1-5% of prevented loss).
   riskAttestPro: 10.00,
+  // ACPPurchaser Path A (R16 #1 cold-start fix). purchase_execute's $0.10 is
+  // the SERVICE fee only; the downstream cost rides the Require-Funds transfer.
+  purchase_quote: 0.02,
+  purchase_execute: 0.10,
 };
 
 const DEFAULT_PRICE_USDC = 0.01;

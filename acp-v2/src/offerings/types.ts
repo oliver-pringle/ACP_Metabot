@@ -1,10 +1,13 @@
 import type { ValidationResult } from "../validators.js";
 import type { ApiClient } from "../apiClient.js";
-import type { JobSession } from "@virtuals-protocol/acp-node-v2";
+import type { JobSession, AcpAgent } from "@virtuals-protocol/acp-node-v2";
 
 export interface OfferingContext {
   client: ApiClient;
   session: JobSession;
+  // ACPPurchaser Path A: purchase_quote resolves the live downstream price via
+  // the agent (C# can't speak ACP). Other offerings ignore it.
+  agent: AcpAgent;
 }
 
 export interface Offering {

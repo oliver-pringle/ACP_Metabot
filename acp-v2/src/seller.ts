@@ -1,5 +1,7 @@
-import { AcpAgent } from "@virtuals-protocol/acp-node-v2";
+import { AcpAgent, AssetToken } from "@virtuals-protocol/acp-node-v2";
 import type { JobSession, JobRoomEntry } from "@virtuals-protocol/acp-node-v2";
+import { getChain } from "./chain.js";
+import { PurchaserBuyer } from "./purchaserBuyer.js";
 import { loadEnv } from "./env.js";
 import { createProvider } from "./provider.js";
 import { createApiClient } from "./apiClient.js";
@@ -9,10 +11,18 @@ import { toDeliverable } from "./deliverable.js";
 import { listOfferings, getOffering } from "./offerings/registry.js";
 import { listResources } from "./resources.js";
 
-type PendingJob = {
-  offeringName: string;
-  requirement: Record<string, unknown>;
-};
+type PendingJob =
+  | { kind: "normal"; offeringName: string; requirement: Record<string, unknown> }
+  | {
+      kind: "execute";
+      offeringName: "purchase_execute";
+      requirement: Record<string, unknown>;
+      targetAgent: string;
+      targetOffering: string;
+      innerRequirement: Record<string, unknown>;
+      downstreamUsdc: number;
+      buyerKey: string;
+    };
 
 async function main() {
   const env = loadEnv();
@@ -26,12 +36,25 @@ async function main() {
   const provider = await createProvider(env);
   const agent = await AcpAgent.create({ provider });
 
+  // ACPPurchaser Path A: this single agent is BOTH seller and (for
+  // purchase_execute) buyer. The PurchaserBuyer owns inner hires on the same
+  // wallet; inner-job events are routed to it (see the entry handler).
+  const chainId = getChain(env.chain).id;
+  const purchaser = new PurchaserBuyer(agent, chainId);
+
   // Keyed by session.jobId so state survives across entries without mutating
   // the SDK session object. Cleared on terminal events.
   const pending = new Map<string, PendingJob>();
 
   agent.on("entry", async (session: JobSession, entry: JobRoomEntry) => {
     try {
+      // Inner hires (ACPPurchaser purchase_execute) ride this same agent. Route
+      // their events to the buyer engine and stop — they are NOT seller jobs.
+      if (purchaser.isInnerJob(session.jobId)) {
+        await purchaser.handleInnerEntry(session, entry);
+        return;
+      }
+
       if (entry.kind === "system") {
         switch (entry.event.type) {
           case "job.created":
@@ -104,10 +127,52 @@ async function main() {
       return;
     }
 
+    if (offeringName === "purchase_execute") {
+      const targetAgent = String(requirement.targetAgent);
+      const targetOffering = String(requirement.targetOffering);
+      const maxFundsUsdc = Number(requirement.maxFundsUsdc);
+      const innerRequirement = (requirement.requirement ?? {}) as Record<string, unknown>;
+
+      // Resolve the downstream price live; reject non-fixed / not-found here.
+      const detail = await agent.getAgentByWalletAddress(targetAgent);
+      const off = detail?.offerings.find((o) => o.name === targetOffering);
+      if (!off) {
+        await session.sendMessage(`target offering not found: ${targetAgent}/${targetOffering}`);
+        return;
+      }
+      const fixedPrice = (off.priceType || "").toLowerCase() === "fixed";
+      if (!fixedPrice) {
+        await session.sendMessage("purchase_execute v1 supports fixed-price targets only");
+        return;
+      }
+      const downstreamUsdc = Number(off.priceValue);
+
+      const buyerKey = job.clientAddress;
+      const pre = await client.purchasePrecheck({
+        outerJobId: session.jobId, buyerKey, targetAgent, targetOffering, downstreamUsdc, maxFundsUsdc,
+      });
+      if (!pre.ok) {
+        await session.sendMessage(`precheck rejected: ${pre.reason}`);
+        return;
+      }
+
+      // Service fee = our budget; downstream cost = the fund request to our own wallet.
+      await session.setBudgetWithFundRequest(
+        AssetToken.usdc(0.1, session.chainId),
+        AssetToken.usdc(downstreamUsdc, session.chainId),
+        env.walletAddress as `0x${string}`,
+      );
+      pending.set(session.jobId, {
+        kind: "execute", offeringName: "purchase_execute", requirement,
+        targetAgent, targetOffering, innerRequirement, downstreamUsdc, buyerKey,
+      });
+      return;
+    }
+
     const price = await priceForAssetToken(offeringName, requirement, session.chainId);
     await session.setBudget(price);
 
-    pending.set(session.jobId, { offeringName, requirement });
+    pending.set(session.jobId, { kind: "normal", offeringName, requirement });
   }
 
   async function handleJobFunded(session: JobSession) {
@@ -116,7 +181,29 @@ async function main() {
       console.warn(`[seller] job.funded without stashed requirement, jobId=${session.jobId}`);
       return;
     }
-    const outcome = await route(stash.offeringName, stash.requirement, { client, session });
+    if (stash.kind === "execute") {
+      const hire = await purchaser.hireOnBehalf(stash.targetAgent, stash.targetOffering, stash.innerRequirement, 240_000);
+      if (hire.status === "completed" && hire.deliverableParsed !== undefined) {
+        const deliverable = {
+          status: "DELIVERED", targetAgent: stash.targetAgent, targetOffering: stash.targetOffering,
+          innerJobId: hire.jobId, downstreamUsdc: stash.downstreamUsdc, serviceFeeUsdc: 0.1,
+          deliverable: hire.deliverableParsed, reason: "",
+        };
+        await session.submit(await toDeliverable(session.jobId, deliverable));
+        await client.purchaseSettle({ outerJobId: session.jobId, buyerKey: stash.buyerKey, state: "DELIVERED",
+          innerJobId: hire.jobId, reason: null, downstreamUsdc: stash.downstreamUsdc });
+        console.log(`[seller] purchase_execute DELIVERED jobId=${session.jobId} inner=${hire.jobId}`);
+      } else {
+        const reason = `downstream_failed:${hire.status}${hire.error ? `:${hire.error}` : ""}`;
+        await session.reject(reason);
+        await client.purchaseSettle({ outerJobId: session.jobId, buyerKey: stash.buyerKey, state: "REJECTED",
+          innerJobId: hire.jobId || null, reason, downstreamUsdc: stash.downstreamUsdc });
+        console.log(`[seller] purchase_execute REJECTED jobId=${session.jobId} reason=${reason}`);
+      }
+      return;
+    }
+
+    const outcome = await route(stash.offeringName, stash.requirement, { client, session, agent });
     if (!outcome.ok) {
       await session.sendMessage(`execution failed: ${outcome.reason}`);
       return;
