@@ -193,7 +193,14 @@ async function main() {
           innerJobId: hire.jobId, downstreamUsdc: stash.downstreamUsdc, serviceFeeUsdc: 0.1,
           deliverable: hire.deliverableParsed, reason: "",
         };
-        await session.submit(await toDeliverable(session.jobId, deliverable));
+        // Require-Funds job: the submit MUST carry the transferAmount so the
+        // FundTransferHook executes the fund transfer (downstream cost) to our
+        // wallet — the destination set in setBudgetWithFundRequest. A plain
+        // submit() reverts (0x3224cff4) because the fund request is unsettled.
+        await session.submit(
+          await toDeliverable(session.jobId, deliverable),
+          AssetToken.usdc(stash.downstreamUsdc, session.chainId),
+        );
         await client.purchaseSettle({ outerJobId: session.jobId, buyerKey: stash.buyerKey, state: "DELIVERED",
           innerJobId: hire.jobId, reason: null, downstreamUsdc: stash.downstreamUsdc });
         console.log(`[seller] purchase_execute DELIVERED jobId=${session.jobId} inner=${hire.jobId}`);
