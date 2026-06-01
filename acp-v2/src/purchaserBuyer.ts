@@ -13,6 +13,10 @@ export interface HireResult {
 interface PendingHire {
   jobId: string;
   funded: boolean;
+  // P61 drain guard: the max USDC we will fund the inner job for. The TARGET
+  // seller sets the inner on-chain budget (attacker-controlled, NOT bound to the
+  // listed price we quoted) — we MUST refuse to fund above this cap.
+  maxInnerUsdc: number;
   deliverable?: string;
   resolve: (r: HireResult) => void;
   startedAt: number;
@@ -38,14 +42,19 @@ export class PurchaserBuyer {
     return this.pending.has(jobId);
   }
 
-  /** Serialized: queue behind any in-flight inner hire. */
+  /**
+   * Serialized: queue behind any in-flight inner hire.
+   * @param maxInnerUsdc P61 cap — never fund the inner job above this (the quoted
+   *   fixed price). The target's self-set on-chain budget is not trusted.
+   */
   async hireOnBehalf(
     targetAgent: string,
     targetOffering: string,
     requirement: Record<string, unknown>,
+    maxInnerUsdc: number,
     timeoutMs: number
   ): Promise<HireResult> {
-    const run = this.chain.then(() => this.doHire(targetAgent, targetOffering, requirement, timeoutMs));
+    const run = this.chain.then(() => this.doHire(targetAgent, targetOffering, requirement, maxInnerUsdc, timeoutMs));
     // keep the chain alive regardless of this hire's outcome
     this.chain = run.then(() => undefined, () => undefined);
     return run;
@@ -55,6 +64,7 @@ export class PurchaserBuyer {
     targetAgent: string,
     targetOffering: string,
     requirement: Record<string, unknown>,
+    maxInnerUsdc: number,
     timeoutMs: number
   ): Promise<HireResult> {
     const detail = await this.agent.getAgentByWalletAddress(targetAgent);
@@ -64,11 +74,11 @@ export class PurchaserBuyer {
 
     const jobIdBig = await this.agent.createJobFromOffering(this.chainId, offering, targetAgent, requirement);
     const jobId = jobIdBig.toString();
-    console.log(`[purchaser] inner job ${jobId} created -> ${detail.name}/${targetOffering}`);
+    console.log(`[purchaser] inner job ${jobId} created -> ${detail.name}/${targetOffering} (cap ${maxInnerUsdc} USDC)`);
 
     return await new Promise<HireResult>((resolve) => {
       const startedAt = Date.now();
-      const p: PendingHire = { jobId, funded: false, resolve, startedAt };
+      const p: PendingHire = { jobId, funded: false, maxInnerUsdc, resolve, startedAt };
       this.pending.set(jobId, p);
       p.timer = setTimeout(() => {
         if (this.pending.has(jobId)) {
@@ -92,13 +102,33 @@ export class PurchaserBuyer {
     const ev = entry.event;
     try {
       switch (ev.type) {
-        case "budget.set":
-          if (!p.funded) {
-            p.funded = true;
-            await session.fund(); // funds the inner downstream cost from our wallet
-            console.log(`[purchaser] funded inner job ${jobId}`);
+        case "budget.set": {
+          if (p.funded) return;
+          // P61 DRAIN GUARD. The target seller sets the inner on-chain budget; it
+          // is attacker-controlled and NOT bound to the listed price we quoted. An
+          // attacker lists at $0.01, then setBudget(500) on the inner job → a no-arg
+          // session.fund() would escrow 500 from Metabot's float. So: read the inner
+          // budget, REFUSE to fund anything over the quoted cap (leave it unfunded —
+          // it expires on-chain, no USDC leaves our wallet), refuse any unexpected
+          // inner fund-request, and fund the EXACT verified budget (never no-arg).
+          const job = session.job;
+          if (!job) { this.settle(jobId, "error", "inner_job_not_loaded"); return; }
+          const innerBudgetUsdc = job.budget.amount;
+          if (!(innerBudgetUsdc <= p.maxInnerUsdc + 1e-9)) {
+            console.warn(`[purchaser] REFUSING inner job ${jobId}: budget ${innerBudgetUsdc} > cap ${p.maxInnerUsdc} USDC (P61)`);
+            this.settle(jobId, "rejected", `inner_budget_${innerBudgetUsdc}_exceeds_cap_${p.maxInnerUsdc}`);
+            return;
           }
+          if (job.getFundRequestIntent()) {
+            console.warn(`[purchaser] REFUSING inner job ${jobId}: unexpected fund-request intent (P61)`);
+            this.settle(jobId, "rejected", "inner_requires_funds_unsupported");
+            return;
+          }
+          p.funded = true;
+          await session.fund(job.budget); // explicit, verified <= cap (never no-arg)
+          console.log(`[purchaser] funded inner job ${jobId} (${innerBudgetUsdc} USDC, cap ${p.maxInnerUsdc})`);
           return;
+        }
         case "job.completed":
           if (!p.deliverable) await this.recoverDeliverable(jobId, p);
           this.settle(jobId, "completed");

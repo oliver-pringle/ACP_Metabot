@@ -182,7 +182,11 @@ async function main() {
       return;
     }
     if (stash.kind === "execute") {
-      const hire = await purchaser.hireOnBehalf(stash.targetAgent, stash.targetOffering, stash.innerRequirement, 240_000);
+      // P61: cap the inner fund at the quoted downstream price (precheck already
+      // guarantees downstreamUsdc <= maxFundsUsdc). The buyer engine refuses to
+      // fund any inner on-chain budget above this.
+      const hire = await purchaser.hireOnBehalf(
+        stash.targetAgent, stash.targetOffering, stash.innerRequirement, stash.downstreamUsdc, 240_000);
       if (hire.status === "completed" && hire.deliverableParsed !== undefined) {
         const deliverable = {
           status: "DELIVERED", targetAgent: stash.targetAgent, targetOffering: stash.targetOffering,

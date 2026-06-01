@@ -170,6 +170,14 @@ must not block the seller event loop; the inner hire runs in the funded-job hand
 is already async per job.)
 
 ## 6. Safety model (layered; cap is a backstop, not the primary guard)
+0. **Inner-fund cap (P61, HIGH — MUST).** The TARGET seller sets the inner job's on-chain
+   budget; it is attacker-controlled and NOT bound to the listed `priceValue` we quoted.
+   The buyer engine NEVER calls the no-arg `session.fund()` — it reads the inner budget and
+   **refuses to fund any amount above the quoted cap** (`downstreamUsdc`), leaving the
+   inflated inner job unfunded (it expires; no USDC leaves Metabot's wallet), and refuses
+   any unexpected inner fund-request. Without this an attacker lists at $0.01 then
+   `setBudget(500)` to drain the wallet. Enforced at fund time in `purchaserBuyer.ts`
+   (the C# precheck has zero visibility into the later on-chain budget).
 1. **Escrow-locked reimbursement** — the buyer's `downstreamCost` is locked before the bot
    fronts; primary protection against loss.
 2. **Buyer-authorized ceiling** — `maxFundsUsdc` in the requirement; bot never exceeds it.
