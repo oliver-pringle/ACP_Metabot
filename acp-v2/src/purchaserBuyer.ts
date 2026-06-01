@@ -32,11 +32,15 @@ interface PendingHire {
 export class PurchaserBuyer {
   private readonly pending = new Map<string, PendingHire>();
   private chain: Promise<void> = Promise.resolve();
+  private readonly selfAddr: string;
 
   constructor(
     private readonly agent: AcpAgent,
-    private readonly chainId: number
-  ) {}
+    private readonly chainId: number,
+    walletAddress: string,
+  ) {
+    this.selfAddr = walletAddress.toLowerCase();
+  }
 
   isInnerJob(jobId: string): boolean {
     return this.pending.has(jobId);
@@ -98,6 +102,21 @@ export class PurchaserBuyer {
     const jobId = session.jobId;
     const p = this.pending.get(jobId);
     if (!p) return;
+
+    // v1.1 fail-fast: a message from the downstream SELLER (not our own
+    // requirement message) BEFORE it sets a budget is a rejection — validation
+    // error, "malformed requirement", unsupported, etc. Surface it immediately
+    // and fail the hire instead of waiting out the full timeout.
+    if (entry.kind === "message") {
+      const from = (entry.from ?? "").toLowerCase();
+      if (!p.funded && from !== this.selfAddr) {
+        const msg = ((entry.content ?? "").trim().slice(0, 300)) || "(no content)";
+        console.warn(`[purchaser] inner job ${jobId} downstream rejected pre-fund: ${msg}`);
+        this.settle(jobId, "rejected", `downstream_rejected: ${msg}`);
+      }
+      return;
+    }
+
     if (entry.kind !== "system") return;
     const ev = entry.event;
     try {

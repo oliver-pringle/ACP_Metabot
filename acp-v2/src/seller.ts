@@ -21,6 +21,7 @@ type PendingJob =
       targetOffering: string;
       innerRequirement: Record<string, unknown>;
       downstreamUsdc: number;
+      downstreamSlaMinutes: number;
       buyerKey: string;
     };
 
@@ -40,7 +41,7 @@ async function main() {
   // purchase_execute) buyer. The PurchaserBuyer owns inner hires on the same
   // wallet; inner-job events are routed to it (see the entry handler).
   const chainId = getChain(env.chain).id;
-  const purchaser = new PurchaserBuyer(agent, chainId);
+  const purchaser = new PurchaserBuyer(agent, chainId, env.walletAddress);
 
   // Keyed by session.jobId so state survives across entries without mutating
   // the SDK session object. Cleared on terminal events.
@@ -164,7 +165,8 @@ async function main() {
       );
       pending.set(session.jobId, {
         kind: "execute", offeringName: "purchase_execute", requirement,
-        targetAgent, targetOffering, innerRequirement, downstreamUsdc, buyerKey,
+        targetAgent, targetOffering, innerRequirement, downstreamUsdc,
+        downstreamSlaMinutes: Number(off.slaMinutes) || 5, buyerKey,
       });
       return;
     }
@@ -182,11 +184,16 @@ async function main() {
       return;
     }
     if (stash.kind === "execute") {
+      // v1.1: inner timeout = the downstream's own SLA (min 1 min, capped at 8 min
+      // to leave room for our submit within the outer 10-min SLA), not a hardcoded
+      // 240s — so a slow-but-valid downstream isn't cut off early. (Fast rejections
+      // fail-fast via the downstream-message handler in purchaserBuyer.)
+      const innerTimeoutMs = Math.min(Math.max(stash.downstreamSlaMinutes, 1) * 60_000, 480_000);
       // P61: cap the inner fund at the quoted downstream price (precheck already
       // guarantees downstreamUsdc <= maxFundsUsdc). The buyer engine refuses to
       // fund any inner on-chain budget above this.
       const hire = await purchaser.hireOnBehalf(
-        stash.targetAgent, stash.targetOffering, stash.innerRequirement, stash.downstreamUsdc, 240_000);
+        stash.targetAgent, stash.targetOffering, stash.innerRequirement, stash.downstreamUsdc, innerTimeoutMs);
       if (hire.status === "completed" && hire.deliverableParsed !== undefined) {
         const deliverable = {
           status: "DELIVERED", targetAgent: stash.targetAgent, targetOffering: stash.targetOffering,
