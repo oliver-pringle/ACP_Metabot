@@ -383,8 +383,12 @@ export function createApiClient(
         });
         if (res.ok) return (await res.json()) as T;
 
-        const text = await res.text();
-        const err = new Error(`acp-metabot-api ${res.status}: ${text}`);
+        // P63: never embed the upstream response body in the thrown Error — it
+        // can carry RPC API keys (P9) and internal route detail, and router.ts /
+        // seller.ts relay err.message to the paying buyer. Log the body
+        // server-side; throw an opaque, status-tagged message.
+        console.error(`[apiClient] ${init?.method ?? "GET"} ${path} -> ${res.status}: ${await res.text()}`);
+        const err = new Error(`upstream error (status ${res.status}) [${init?.method ?? "GET"} ${path}]`);
         if (res.status >= 400 && res.status < 500) {
           // Client error  -  do not retry.
           throw err;
@@ -393,7 +397,8 @@ export function createApiClient(
       } catch (err) {
         // AbortError, network errors, JSON parse errors -> retryable.
         // 4xx Errors thrown above are also caught here, so re-throw them.
-        if (err instanceof Error && /^acp-metabot-api 4\d\d:/.test(err.message)) {
+        // (Matches the opaque message minted above — body is never embedded.)
+        if (err instanceof Error && /^upstream error \(status 4\d\d\)/.test(err.message)) {
           throw err;
         }
         lastError = err;

@@ -22,6 +22,11 @@ export async function route(
     const result = await offering.execute(requirement, ctx);
     return { ok: true, result };
   } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    // P63: never forward upstream error text to the buyer — the internal API's
+    // thrown Error embeds status + response body, which can carry RPC API keys
+    // (P9) and internal route detail. Log server-side; return an opaque code.
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`[router] offering "${offeringName}" execution failed: ${detail}`);
+    return { ok: false, reason: "internal_error" };
   }
 }
