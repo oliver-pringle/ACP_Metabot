@@ -215,7 +215,7 @@ public sealed class StackPurchaserService
         await using var conn = _db.OpenConnection();
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"UPDATE acppurchaser_audit SET state=$s, inner_job_id=$ij, reason=$r, updated_at=$now
-            WHERE outer_job_id=$ojid AND state IN ('PRECHECK','PENDING');";
+            WHERE outer_job_id=$ojid AND state = 'PRECHECK';";
         cmd.Parameters.AddWithValue("$s", state);
         cmd.Parameters.AddWithValue("$ij", innerJobIds ?? (object)DBNull.Value);
         cmd.Parameters.AddWithValue("$r", reason ?? (object)DBNull.Value);
