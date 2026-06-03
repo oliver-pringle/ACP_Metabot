@@ -467,6 +467,23 @@ public class Db
             );
             CREATE INDEX IF NOT EXISTS ix_acppurchaser_audit_buyer ON acppurchaser_audit(buyer_key, created_at DESC);
 
+            -- Stack Purchase Router (v1): a price-bound curated plan persisted by
+            -- stack_quote and validated/consumed by stack_execute. steps_json is the
+            -- serialized List<StackPlanStep> (agent, offering, role, quoted price,
+            -- risk tier, inner requirement). expires_at bounds stale-price execution.
+            CREATE TABLE IF NOT EXISTS acppurchaser_stack_quotes (
+                quote_id              TEXT PRIMARY KEY,
+                buyer_key             TEXT NOT NULL,
+                subject               TEXT NOT NULL,
+                steps_json            TEXT NOT NULL,
+                total_downstream_usd  REAL NOT NULL,
+                execute_fee_usd       REAL NOT NULL,
+                expires_at            TEXT NOT NULL,
+                created_at            TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_acppurchaser_stack_quotes_buyer
+                ON acppurchaser_stack_quotes(buyer_key, created_at DESC);
+
             -- v1.6 #1 v0.1: reputation_feeds tracks ReputationAggregator
             -- contracts deployed by ChainlinkBot's POST /feed-address on behalf
             -- of high-reputation agents in our corpus. One row per agent; the
