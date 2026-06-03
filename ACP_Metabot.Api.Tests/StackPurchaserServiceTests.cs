@@ -67,6 +67,23 @@ public class StackPurchaserServiceTests : IDisposable
         return (svc, comp, risk, offs);
     }
 
+    private (StackPurchaserService svc, FakeComposer comp, FakeRisk risk, FakeOfferings offs) BuildLowCap(decimal capUsdc)
+    {
+        var lowCapCfg = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:Sqlite"] = $"Data Source={_dbPath}",
+            ["ACPPURCHASER_DAILY_CAP_USDC"] = capUsdc.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        }).Build();
+        var budget = new PurchaserBudgetService(_db, lowCapCfg, NullLogger<PurchaserBudgetService>.Instance);
+        var comp = new FakeComposer();
+        var risk = new FakeRisk();
+        var offs = new FakeOfferings();
+        int n = 0;
+        var svc = new StackPurchaserService(_db, new StackQuoteStore(_db), budget, risk, comp, offs,
+            idFactory: () => $"stk_{++n}", NullLogger<StackPurchaserService>.Instance);
+        return (svc, comp, risk, offs);
+    }
+
     private const string A1 = "0x1111111111111111111111111111111111111111";
     private const string A2 = "0x2222222222222222222222222222222222222222";
     private const string SUBJECT = "0x9999999999999999999999999999999999999999";
@@ -100,7 +117,9 @@ public class StackPurchaserServiceTests : IDisposable
 
         var q = await svc.QuoteAsync(SUBJECT, "x", 1.0m, 5, default);
 
-        Assert.Equal("BLOCK", q.Verdict); // zero kept
+        Assert.Equal("BLOCK", q.Verdict);
+        Assert.Empty(q.Steps);
+        Assert.Contains("no_buyable_steps", q.Reasons);
         Assert.Contains(q.DroppedCandidates, d => d.Reason == "not_fixed_price");
     }
 
@@ -115,6 +134,9 @@ public class StackPurchaserServiceTests : IDisposable
         var q = await svc.QuoteAsync(SUBJECT, "x", 1.0m, 5, default);
 
         Assert.Contains(q.DroppedCandidates, d => d.Reason == "risk_critical");
+        Assert.Equal("BLOCK", q.Verdict);
+        Assert.Empty(q.Steps);
+        Assert.Contains("no_buyable_steps", q.Reasons);
     }
 
     [Fact]
@@ -127,6 +149,9 @@ public class StackPurchaserServiceTests : IDisposable
         var q = await svc.QuoteAsync(SUBJECT, "x", 1.0m, 5, default);
 
         Assert.Contains(q.DroppedCandidates, d => d.Reason == "subject_unmappable");
+        Assert.Equal("BLOCK", q.Verdict);
+        Assert.Empty(q.Steps);
+        Assert.Contains("no_buyable_steps", q.Reasons);
     }
 
     [Fact]
@@ -160,6 +185,22 @@ public class StackPurchaserServiceTests : IDisposable
         Assert.Single(stored.Steps);
         Assert.Equal("agentAddress", System.Linq.Enumerable.First(stored.Steps[0].InnerRequirement.Keys));
         Assert.Equal(SUBJECT.ToLowerInvariant(), stored.Steps[0].InnerRequirement["agentAddress"]?.ToString());
+    }
+
+    [Fact]
+    public async Task Precheck_rejects_when_daily_cap_exceeded()
+    {
+        // Cap of $0.01; a single 0.05 step exceeds it → daily_cap_exceeded.
+        var (svc, comp, _, offs) = BuildLowCap(0.01m);
+        comp.Entries.Add(new("risk_snapshot", "MetaBot", A1, 0.05, "risk"));
+        offs.Map[(A1, "risk_snapshot")] = ("fixed", ADDR_SCHEMA);
+
+        var q = await svc.QuoteAsync(SUBJECT, "screen this wallet", 1.0m, 5, default);
+        Assert.Equal("PROCEED", q.Verdict); // quote passes — cap not checked at quote time
+
+        var r = await svc.PrecheckAsync("outer_cap", "0xbuyer", q.QuoteId, SUBJECT, default);
+        Assert.False(r.Ok);
+        Assert.Equal("daily_cap_exceeded", r.Reason);
     }
 
     // ── Task 4: PrecheckAsync ─────────────────────────────────────────────────

@@ -198,7 +198,7 @@ public sealed class StackPurchaserService
              inner_job_id, state, reason, created_at, updated_at)
             VALUES ($ojid, $bk, $ta, $to, $d, $sf, $ij, $s, $r, $now, $now);";
         cmd.Parameters.AddWithValue("$ojid", outerJobId);
-        cmd.Parameters.AddWithValue("$bk", buyerKey);
+        cmd.Parameters.AddWithValue("$bk", buyerKey.ToLowerInvariant());
         cmd.Parameters.AddWithValue("$ta", targetAgent);
         cmd.Parameters.AddWithValue("$to", targetOffering);
         cmd.Parameters.AddWithValue("$d", (double)downstreamUsd);
@@ -214,13 +214,14 @@ public sealed class StackPurchaserService
     {
         await using var conn = _db.OpenConnection();
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"UPDATE acppurchaser_audit SET state=$s, inner_job_id=$ij, reason=$r, updated_at=$now
-            WHERE outer_job_id=$ojid AND state = 'PRECHECK';";
-        cmd.Parameters.AddWithValue("$s", state);
-        cmd.Parameters.AddWithValue("$ij", innerJobIds ?? (object)DBNull.Value);
-        cmd.Parameters.AddWithValue("$r", reason ?? (object)DBNull.Value);
+        cmd.CommandText = @"UPDATE acppurchaser_audit
+            SET state=$st, inner_job_id=COALESCE($ij, inner_job_id), reason=COALESCE($rn, reason), updated_at=$now
+            WHERE id = (SELECT id FROM acppurchaser_audit WHERE outer_job_id=$oj ORDER BY id DESC LIMIT 1);";
+        cmd.Parameters.AddWithValue("$st", state);
+        cmd.Parameters.AddWithValue("$ij", (object?)innerJobIds ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$rn", (object?)reason ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$now", DateTime.UtcNow.ToString("O"));
-        cmd.Parameters.AddWithValue("$ojid", outerJobId);
+        cmd.Parameters.AddWithValue("$oj", outerJobId);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 }

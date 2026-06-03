@@ -1201,6 +1201,8 @@ app.MapPost("/v1/buyer/stack/quote",
         return Results.BadRequest(new { error = "invalid_subject", message = "subject must be a 0x EVM address" });
     if (string.IsNullOrWhiteSpace(req.Intent))
         return Results.BadRequest(new { error = "invalid_intent" });
+    if (req.MaxFundsUsdc <= 0)
+        return Results.BadRequest(new { error = "invalid_maxFundsUsdc", message = "maxFundsUsdc must be a positive number" });
     var result = await svc.QuoteAsync(req.Subject, req.Intent, req.MaxFundsUsdc, req.MaxSteps ?? 5, ct);
     return Results.Ok(result);
 }).RequireRateLimiting("public-compose");
