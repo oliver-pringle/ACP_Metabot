@@ -42,6 +42,11 @@ import { riskAttestPro } from "./riskAttestPro.js";
 // inner hire). See docs/superpowers/specs/2026-06-01-acppurchaser-pathA-design.md
 import { purchaseQuote } from "./purchaseQuote.js";
 import { purchaseExecute } from "./purchaseExecute.js";
+// Stack Purchase Router (T10). stack_quote is a normal offering (calls C#
+// QuoteAsync); stack_execute is special-cased in seller.ts (Require-Funds +
+// N serialised inner hires, all-or-nothing). See plans/2026-06-03-stack-purchase-router.md
+import { stackQuote } from "./stackQuote.js";
+import { stackExecute } from "./stackExecute.js";
 
 // v1.7.2: search / searchAgents / browseAgent moved from paid offerings to
 // free Resources (see acp-v2/src/resources.ts). The $0.01 price floor was
@@ -88,6 +93,10 @@ export const OFFERINGS: Record<string, Offering> = {
   // ($0.10 service + Require-Funds) buys a fixed-price offering on your behalf.
   purchase_quote: purchaseQuote,
   purchase_execute: purchaseExecute,
+  // Stack Purchase Router. stack_quote ($0.05) curates a price-bound plan;
+  // stack_execute ($0.25 service + Require-Funds) executes it all-or-nothing.
+  stack_quote: stackQuote,
+  stack_execute: stackExecute,
 };
 
 export function getOffering(name: string): Offering | undefined {

@@ -54,6 +54,10 @@ const PRICE_USDC: Record<string, number> = {
   // the SERVICE fee only; the downstream cost rides the Require-Funds transfer.
   purchase_quote: 0.02,
   purchase_execute: 0.10,
+  // Stack Purchase Router (T7). stack_quote ($0.05) curation + screening;
+  // stack_execute ($0.25) is the service fee only — downstream rides Require-Funds.
+  stack_quote: 0.05,
+  stack_execute: 0.25,
 };
 
 const DEFAULT_PRICE_USDC = 0.01;

@@ -275,6 +275,15 @@ export interface ApiClient {
   purchaseQuote(req: { targetAgent: string; downstreamUsdc: number; fixedPrice: boolean }): Promise<unknown>;
   purchasePrecheck(req: { outerJobId: string; buyerKey: string; targetAgent: string; targetOffering: string; downstreamUsdc: number; maxFundsUsdc: number }): Promise<{ ok: boolean; reason?: string; downstreamUsdc: number }>;
   purchaseSettle(req: { outerJobId: string; buyerKey: string; state: string; innerJobId?: string | null; reason?: string | null; downstreamUsdc: number }): Promise<unknown>;
+  // Stack Purchase Router (T11). stackQuote delegates to C# /v1/buyer/stack/quote;
+  // stackPrecheck/stackSettle are internal-only (X-API-Key gated).
+  stackQuote(req: { subject: string; intent: string; maxFundsUsdc: number; maxSteps?: number }): Promise<unknown>;
+  stackPrecheck(req: { outerJobId: string; buyerKey: string; quoteId: string; subject: string }): Promise<{
+    ok: boolean; reason?: string;
+    steps: Array<{ targetAgent: string; targetOffering: string; role: string; quotedPriceUsdc: number; riskTier: string; innerRequirement: Record<string, unknown> }>;
+    totalDownstreamUsdc: number;
+  }>;
+  stackSettle(req: { outerJobId: string; buyerKey: string; state: string; innerJobIds?: string | null; reason?: string | null; totalDownstreamUsd: number }): Promise<unknown>;
   sellerCoaching(req: { agent: string }): Promise<unknown>;
   v1Tov2Migration(req: { agent: string }): Promise<unknown>;
 
@@ -448,6 +457,13 @@ export function createApiClient(
         "/v1/internal/buyer/purchase/precheck", { method: "POST", body: JSON.stringify(req) }),
     purchaseSettle: (req) =>
       request<unknown>("/v1/internal/buyer/purchase/settle", { method: "POST", body: JSON.stringify(req) }),
+    // Stack Purchase Router (T11)
+    stackQuote: (req) =>
+      request<unknown>("/v1/buyer/stack/quote", { method: "POST", body: JSON.stringify(req) }),
+    stackPrecheck: (req) =>
+      request("/v1/internal/buyer/stack/precheck", { method: "POST", body: JSON.stringify(req) }),
+    stackSettle: (req) =>
+      request<unknown>("/v1/internal/buyer/stack/settle", { method: "POST", body: JSON.stringify(req) }),
     sellerCoaching: (req) =>
       request<unknown>("/v1/seller/coaching", { method: "POST", body: JSON.stringify(req) }),
     v1Tov2Migration: (req) =>
