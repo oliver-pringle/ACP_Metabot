@@ -37,8 +37,12 @@ public class JobSubmittedEvent : IEventDTO
 [Event("JobCompleted")]
 public class JobCompletedEvent : IEventDTO
 {
-    [Parameter("uint256", "jobId",  1, true)]  public System.Numerics.BigInteger JobId  { get; set; }
-    [Parameter("bytes32", "reason", 2, false)] public byte[] Reason { get; set; } = Array.Empty<byte>();
+    // Canonical ABI: JobCompleted(uint256 indexed jobId, address indexed evaluator, bytes32 reason).
+    // The indexed `evaluator` is part of the signature — omitting it computes the wrong topic0,
+    // so the log filter matches ZERO completed jobs. See ChainEventScannerAbiSignatureTests.
+    [Parameter("uint256", "jobId",     1, true)]  public System.Numerics.BigInteger JobId      { get; set; }
+    [Parameter("address", "evaluator", 2, true)]  public string Evaluator { get; set; } = "";
+    [Parameter("bytes32", "reason",    3, false)] public byte[] Reason { get; set; } = Array.Empty<byte>();
 }
 
 [Event("JobRejected")]
@@ -487,7 +491,7 @@ public class ChainEventScanner
                     await GetBlockTimeAsync((long)log.Log.BlockNumber.Value, ct);
             }
 
-            // JobCompleted: topic1 = jobId (indexed only)
+            // JobCompleted: topic1 = jobId (indexed), topic2 = evaluator (indexed) — filter on jobId only.
             var completedBatch = await RunChunkedAsync(completedHandler,
                 (fromBP, toBP) => completedHandler.CreateFilterInput(
                     topicJobIds, fromBP, toBP),
