@@ -129,6 +129,10 @@ public sealed class StackPurchaserService
             reasons, expires.ToString("O"));
     }
 
+    // v1 scope note: prices are NOT re-resolved live at precheck time; the plan is bound
+    // at the quoted price from stack_quote. The P61 per-step cap enforced by the buyer
+    // engine (hireOnBehalf maxInnerUsdc = quotedPrice) refuses any inner on-chain budget
+    // that exceeds the quote, causing a step failure → full all-or-nothing refund.
     public async Task<StackPrecheckResult> PrecheckAsync(
         string outerJobId, string buyerKey, string quoteId, string subject, CancellationToken ct)
     {

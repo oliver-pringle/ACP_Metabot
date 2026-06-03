@@ -188,7 +188,7 @@ async function main() {
       const pre = await client.stackPrecheck({ outerJobId: session.jobId, buyerKey, quoteId, subject });
       if (!pre.ok) { await session.sendMessage(`stack precheck rejected: ${pre.reason}`); return; }
       if (pre.totalDownstreamUsdc > maxFundsUsdc) {
-        await session.sendMessage(`stack total ${pre.totalDownstreamUsdc} exceeds maxFundsUsdc ${maxFundsUsdc}`);
+        await session.sendMessage("stack total exceeds your maxFundsUsdc ceiling");
         return;
       }
 
@@ -238,7 +238,7 @@ async function main() {
       // fund any inner on-chain budget above this.
       const hire = await purchaser.hireOnBehalf(
         stash.targetAgent, stash.targetOffering, stash.innerRequirement, stash.downstreamUsdc, innerTimeoutMs);
-      if (hire.status === "completed" && hire.deliverableParsed !== undefined) {
+      if (hire.status === "completed" && hire.deliverableParsed != null) {
         const deliverable = {
           status: "DELIVERED", targetAgent: stash.targetAgent, targetOffering: stash.targetOffering,
           innerJobId: hire.jobId, downstreamUsdc: stash.downstreamUsdc, serviceFeeUsdc: 0.1,
@@ -266,6 +266,11 @@ async function main() {
     }
 
     if (stash.kind === "stack") {
+      if (stash.steps.length === 0) {
+        await session.reject("no_steps");
+        await client.stackSettle({ outerJobId: session.jobId, buyerKey: stash.buyerKey, state: "REJECTED", innerJobIds: null, reason: "no_steps", totalDownstreamUsd: stash.totalDownstreamUsdc });
+        return;
+      }
       const results: Array<{
         targetAgent: string; targetOffering: string; role: string; status: string;
         innerJobId: string | null; deliverable?: unknown; error?: string;
@@ -280,7 +285,7 @@ async function main() {
         const hire = await purchaser.hireOnBehalf(
           step.targetAgent, step.targetOffering, step.innerRequirement, step.quotedPriceUsdc, innerTimeoutMs,
         );
-        if (hire.status === "completed" && hire.deliverableParsed !== undefined) {
+        if (hire.status === "completed" && hire.deliverableParsed != null) {
           results.push({
             targetAgent: step.targetAgent, targetOffering: step.targetOffering, role: step.role,
             status: "delivered", innerJobId: hire.jobId, deliverable: hire.deliverableParsed,

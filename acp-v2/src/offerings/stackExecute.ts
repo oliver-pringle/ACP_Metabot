@@ -24,7 +24,7 @@ export const stackExecute: Offering = {
   slaMinutes: 30,
   deliverableSchema: {
     type: "object",
-    required: ["status", "subject", "steps"],
+    required: ["status", "subject", "steps", "downstreamChargedUsdc", "executeFeeUsdc", "reason"],
     properties: {
       status: { type: "string", description: "DELIVERED (all steps delivered) | REJECTED (any step failed; full refund)." },
       subject: { type: "string", description: "The subject address the stack analysed." },
