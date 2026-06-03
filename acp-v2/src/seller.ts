@@ -23,6 +23,14 @@ type PendingJob =
       downstreamUsdc: number;
       downstreamSlaMinutes: number;
       buyerKey: string;
+    }
+  | {
+      kind: "stack";
+      offeringName: "stack_execute";
+      steps: Array<{ targetAgent: string; targetOffering: string; role: string; quotedPriceUsdc: number; innerRequirement: Record<string, unknown> }>;
+      totalDownstreamUsdc: number;
+      buyerKey: string;
+      subject: string;
     };
 
 async function main() {
@@ -171,6 +179,42 @@ async function main() {
       return;
     }
 
+    if (offeringName === "stack_execute") {
+      const quoteId = String(requirement.quoteId);
+      const subject = String(requirement.subject);
+      const maxFundsUsdc = Number(requirement.maxFundsUsdc);
+      const buyerKey = job.clientAddress;
+
+      const pre = await client.stackPrecheck({ outerJobId: session.jobId, buyerKey, quoteId, subject });
+      if (!pre.ok) { await session.sendMessage(`stack precheck rejected: ${pre.reason}`); return; }
+      if (pre.totalDownstreamUsdc > maxFundsUsdc) {
+        await session.sendMessage(`stack total ${pre.totalDownstreamUsdc} exceeds maxFundsUsdc ${maxFundsUsdc}`);
+        return;
+      }
+
+      // Escrow: our flat fee (0.25) as budget + the quoted total downstream as a
+      // fund request to our own wallet (Require-Funds), exactly like purchase_execute.
+      await session.setBudgetWithFundRequest(
+        AssetToken.usdc(0.25, session.chainId),
+        AssetToken.usdc(pre.totalDownstreamUsdc, session.chainId),
+        env.walletAddress as `0x${string}`,
+      );
+      pending.set(session.jobId, {
+        kind: "stack", offeringName: "stack_execute",
+        steps: pre.steps.map((s) => ({
+          targetAgent: s.targetAgent,
+          targetOffering: s.targetOffering,
+          role: s.role,
+          quotedPriceUsdc: s.quotedPriceUsdc,
+          innerRequirement: s.innerRequirement,
+        })),
+        totalDownstreamUsdc: pre.totalDownstreamUsdc,
+        buyerKey,
+        subject,
+      });
+      return;
+    }
+
     const price = await priceForAssetToken(offeringName, requirement, session.chainId);
     await session.setBudget(price);
 
@@ -217,6 +261,67 @@ async function main() {
         await client.purchaseSettle({ outerJobId: session.jobId, buyerKey: stash.buyerKey, state: "REJECTED",
           innerJobId: hire.jobId || null, reason, downstreamUsdc: stash.downstreamUsdc });
         console.log(`[seller] purchase_execute REJECTED jobId=${session.jobId} reason=${reason}`);
+      }
+      return;
+    }
+
+    if (stash.kind === "stack") {
+      const results: Array<{
+        targetAgent: string; targetOffering: string; role: string; status: string;
+        innerJobId: string | null; deliverable?: unknown; error?: string;
+      }> = [];
+      let allOk = true;
+      let failReason = "";
+      // Per-step inner timeout: bounded so N serial hires fit within the 30-min outer
+      // SLA. Reserve 2 min for submit/overhead; divide the remaining 28 min equally.
+      const innerTimeoutMs = Math.min(180_000, Math.floor((28 * 60_000) / Math.max(stash.steps.length, 1)));
+
+      for (const step of stash.steps) {
+        const hire = await purchaser.hireOnBehalf(
+          step.targetAgent, step.targetOffering, step.innerRequirement, step.quotedPriceUsdc, innerTimeoutMs,
+        );
+        if (hire.status === "completed" && hire.deliverableParsed !== undefined) {
+          results.push({
+            targetAgent: step.targetAgent, targetOffering: step.targetOffering, role: step.role,
+            status: "delivered", innerJobId: hire.jobId, deliverable: hire.deliverableParsed,
+          });
+        } else {
+          allOk = false;
+          failReason = `downstream_failed:${step.targetOffering}:${hire.status}${hire.error ? `:${hire.error}` : ""}`;
+          results.push({
+            targetAgent: step.targetAgent, targetOffering: step.targetOffering, role: step.role,
+            status: "failed", innerJobId: hire.jobId || null, error: hire.error,
+          });
+          break; // all-or-nothing: stop on first failure
+        }
+      }
+
+      const innerIds = results.map((r) => r.innerJobId).filter(Boolean).join(",");
+      if (allOk) {
+        const deliverable = {
+          status: "DELIVERED", subject: stash.subject, steps: results,
+          downstreamChargedUsdc: stash.totalDownstreamUsdc, executeFeeUsdc: 0.25, reason: "",
+        };
+        // Require-Funds: submit MUST carry the full fund-request transferAmount so the
+        // FundTransferHook executes the transfer — no partial. transferAmount === the
+        // fund request set in setBudgetWithFundRequest (totalDownstreamUsdc).
+        await session.submit(
+          await toDeliverable(session.jobId, deliverable),
+          AssetToken.usdc(stash.totalDownstreamUsdc, session.chainId),
+        );
+        await client.stackSettle({
+          outerJobId: session.jobId, buyerKey: stash.buyerKey, state: "DELIVERED",
+          innerJobIds: innerIds, reason: null, totalDownstreamUsd: stash.totalDownstreamUsdc,
+        });
+        console.log(`[seller] stack_execute DELIVERED jobId=${session.jobId} steps=${results.length}`);
+      } else {
+        // ALL-OR-NOTHING: reject → no submit → no transferAmount → full escrow refunded.
+        await session.reject(failReason);
+        await client.stackSettle({
+          outerJobId: session.jobId, buyerKey: stash.buyerKey, state: "REJECTED",
+          innerJobIds: innerIds || null, reason: failReason, totalDownstreamUsd: stash.totalDownstreamUsdc,
+        });
+        console.log(`[seller] stack_execute REJECTED jobId=${session.jobId} reason=${failReason}`);
       }
       return;
     }
