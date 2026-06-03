@@ -190,6 +190,21 @@ builder.Services.AddSingleton<PurchaserService>();
 builder.Services.AddSingleton<CrossPresenceBuilder>();
 builder.Services.AddSingleton<AgentSearchService>();
 builder.Services.AddSingleton<StackComposerService>();
+// Stack Purchase Router (Task 6). StackComposerService already registered above.
+// StackQuoteStore persists price-bound plans; adapters seam the composer + repo
+// so StackPurchaserService is unit-testable without LLM or chain.
+builder.Services.AddSingleton<StackQuoteStore>();
+builder.Services.AddSingleton<IStackComposerSource, StackComposerAdapter>();
+builder.Services.AddSingleton<IStackOfferingSource, StackOfferingAdapter>();
+builder.Services.AddSingleton<StackPurchaserService>(sp => new StackPurchaserService(
+    sp.GetRequiredService<Db>(),
+    sp.GetRequiredService<StackQuoteStore>(),
+    sp.GetRequiredService<PurchaserBudgetService>(),
+    sp.GetRequiredService<IAgentRiskSource>(),
+    sp.GetRequiredService<IStackComposerSource>(),
+    sp.GetRequiredService<IStackOfferingSource>(),
+    idFactory: () => $"stk_{Guid.NewGuid():N}",
+    sp.GetRequiredService<ILogger<StackPurchaserService>>()));
 // SSRF-safe outbound HTTP primitive — shared by WebhookDeliveryService,
 // MarketplacePulseService, and RiskWatchWorker. Owns one HttpClient with
 // AllowAutoRedirect=false and per-hop WebhookUrlValidator. Must be a
@@ -1174,6 +1189,22 @@ app.MapPost("/v1/buyer/purchase/quote",
     return Results.Ok(q);
 }).RequireRateLimiting("public-compose");
 
+// Stack Purchase Router — stack_quote ($0.05). Curate intent → bound plan.
+// Public (rate-limited). Validates subject is a 0x EVM address + intent non-empty.
+// buyerKey is "" at quote time; bound at precheck (first caller claims the quote).
+app.MapPost("/v1/buyer/stack/quote",
+    async (StackQuoteRequest req, StackPurchaserService svc, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Subject) ||
+        !System.Text.RegularExpressions.Regex.IsMatch(
+            req.Subject.Trim().ToLowerInvariant(), "^0x[0-9a-f]{40}$"))
+        return Results.BadRequest(new { error = "invalid_subject", message = "subject must be a 0x EVM address" });
+    if (string.IsNullOrWhiteSpace(req.Intent))
+        return Results.BadRequest(new { error = "invalid_intent" });
+    var result = await svc.QuoteAsync(req.Subject, req.Intent, req.MaxFundsUsdc, req.MaxSteps ?? 5, ct);
+    return Results.Ok(result);
+}).RequireRateLimiting("public-compose");
+
 app.MapPost("/v1/seller/coaching",
     async (SellerCoachingRequest req, V17PaidOfferingsService svc, CancellationToken ct) =>
 {
@@ -1625,6 +1656,20 @@ app.MapPost("/v1/internal/buyer/purchase/settle",
     async (PurchaseSettleRequest req, PurchaserService svc, CancellationToken ct) =>
 {
     await svc.SettleAsync(req.OuterJobId, req.BuyerKey, req.State, req.InnerJobId, req.Reason, req.DownstreamUsdc, ct);
+    return Results.Ok(new { ok = true });
+});
+
+// Stack Purchase Router — internal endpoints (sidecar-only, X-API-Key gated).
+// precheck = validate quote + bind buyer + atomic cap reservation + audit.
+// settle  = audit state transition + full refund-the-reservation on REJECTED.
+app.MapPost("/v1/internal/buyer/stack/precheck",
+    async (StackPrecheckRequest req, StackPurchaserService svc, CancellationToken ct) =>
+    Results.Ok(await svc.PrecheckAsync(req.OuterJobId, req.BuyerKey, req.QuoteId, req.Subject, ct)));
+
+app.MapPost("/v1/internal/buyer/stack/settle",
+    async (StackSettleRequest req, StackPurchaserService svc, CancellationToken ct) =>
+{
+    await svc.SettleAsync(req.OuterJobId, req.BuyerKey, req.State, req.InnerJobIds, req.Reason, req.TotalDownstreamUsd, ct);
     return Results.Ok(new { ok = true });
 });
 
@@ -2997,6 +3042,10 @@ public record BudgetCheckRequest(long[] OfferingIds);
 public record PurchaseQuoteRequest(string TargetAgent, decimal DownstreamUsdc, bool FixedPrice);
 public record PurchasePrecheckRequest(string OuterJobId, string BuyerKey, string TargetAgent, string TargetOffering, decimal DownstreamUsdc, decimal MaxFundsUsdc);
 public record PurchaseSettleRequest(string OuterJobId, string BuyerKey, string State, string? InnerJobId, string? Reason, decimal DownstreamUsdc);
+// Stack Purchase Router request DTOs (Task 6).
+public record StackQuoteRequest(string Subject, string Intent, decimal MaxFundsUsdc, int? MaxSteps);
+public record StackPrecheckRequest(string OuterJobId, string BuyerKey, string QuoteId, string Subject);
+public record StackSettleRequest(string OuterJobId, string BuyerKey, string State, string? InnerJobIds, string? Reason, decimal TotalDownstreamUsd);
 public record SellerCoachingRequest(string Agent);
 public record V1Tov2MigrationRequest(string Agent);
 
