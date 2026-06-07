@@ -24,3 +24,10 @@ data/*.db-*
 # OS
 .DS_Store
 Thumbs.db
+
+# --- ruflo vector store / print dumps / IDE cache (cleanup guard 2026-06-07) ---
+ruvector.db
+ruvector.db-*
+offerings.txt
+print-offerings.out
+print-resources.out
