@@ -15,7 +15,7 @@ import type { Offering } from "./types.js";
 export const marketplaceGap: Offering = {
   name: "marketplaceGap",
   description:
-    "Ranks ACP marketplace categories by an opportunity score (lower saturation + reasonable volume = higher score) and tags each with a recommendation: high_volume_low_density, medium_volume_emerging, niche_underserved, balanced, or saturated_avoid. v1.10.1 adds a marketplace slice (v1/v2/both, default v2 — the marketplace new ACP bots actually deploy to). Pass marketplace:both for the pre-v1.10.1 combined-corpus view. Optional category filter for deep-dive on a single category.",
+    "Ranks ACP marketplace categories by an opportunity score (lower saturation + reasonable volume = higher score) and tags each with a recommendation: high_volume_low_density, medium_volume_emerging, niche_underserved, balanced, or saturated_avoid. v1.10.1 adds a marketplace slice (v1/v2/both, default v2  --  the marketplace new ACP bots actually deploy to). Pass marketplace:both for the pre-v1.10.1 combined-corpus view. Optional category filter for deep-dive on a single category.",
   requirementSchema: {
     type: "object",
     properties: {
@@ -35,7 +35,7 @@ export const marketplaceGap: Offering = {
         type: "string",
         enum: ["v1", "v2", "both"],
         description:
-          "Which marketplace pool to compute saturation against. 'v1' = acpx.virtuals.io legacy pool. 'v2' (default) = api.acp.virtuals.io modern pool — the relevant denominator for new ACP-v2 bot decisions. 'both' = combined pool, matches the pre-v1.10.1 unfiltered response. Near-duplicate edges count across marketplaces — a V1↔V2 near-dup pair marks both ids as saturated in their respective slice.",
+          "Which marketplace pool to compute saturation against. 'v1' = acpx.virtuals.io legacy pool. 'v2' (default) = api.acp.virtuals.io modern pool  --  the relevant denominator for new ACP-v2 bot decisions. 'both' = combined pool, matches the pre-v1.10.1 unfiltered response. Near-duplicate edges count across marketplaces  --  a V1↔V2 near-dup pair marks both ids as saturated in their respective slice.",
       },
     },
     required: [],
@@ -79,7 +79,7 @@ export const marketplaceGap: Offering = {
                 "niche_underserved",
                 "balanced",
               ],
-              description: "Decision-grade taxonomy: avoid, prime, solid, small-but-open, neutral. Thresholds are global — when marketplace=v2 is selected most categories will fall into niche_underserved or balanced (V2 has lower per-category density today).",
+              description: "Decision-grade taxonomy: avoid, prime, solid, small-but-open, neutral. Thresholds are global  --  when marketplace=v2 is selected most categories will fall into niche_underserved or balanced (V2 has lower per-category density today).",
             },
           },
         },

@@ -4,7 +4,7 @@
 // PortfolioRollupService to build the /v1/resources/portfolioRollup envelope.
 //
 // Why static + hardcoded:
-//   * The 14-bot list is stable (portfolio is considered complete per CLAUDE.md);
+//   * The 15-bot list is stable (portfolio is considered complete per CLAUDE.md);
 //     edits are once-per-quarter at most.
 //   * Sibling bots are reachable from this container only through the acp-shared
 //     docker bridge, which doesn't exist on a dev laptop. Hardcoding the
@@ -20,7 +20,7 @@
 // Sources of truth (per CLAUDE.md bot inventory table + memory/project_acp_*.md):
 //   - Wallet 1 (5/5):  TheMetaBot, DeFiEval, AgentEval, LiquidGuard, MEVProtect
 //   - Wallet 2 (5/5):  ChainlinkBot, ArenaBot, RevokeBot, EASIssuer, OracleBot
-//   - Wallet 3 (4/5):  WitnessBot, SolanaBot, ButlerBridgeBot, SecurityBot
+//   - Wallet 3 (5/100): WitnessBot, SolanaBot, ButlerBridgeBot, SecurityBot, ConciergeBot
 
 namespace ACP_Metabot.Api.Services;
 
@@ -194,7 +194,19 @@ public static class PortfolioBots
             Category: "agent-security",
             OfferingCount: 2,
             ResourceCount: 2,
-            SubscriptionTierCount: 1)
+            SubscriptionTierCount: 1),
+
+        // R18 (2026-06-07): 15th bot, was missing from the rollup (totalBots showed 14).
+        new PortfolioBot(
+            Slug: "conciergebot",
+            DisplayName: "TheConciergeBot",
+            AgentAddress: "0xe7068d66905adb9d266d0dc0612d3b3658242b61",
+            AgentId: "019e8a23-e185-73cf-acf4-7aff3e0fca84",
+            Chains: new[] { "base" },
+            Category: "concierge-router",
+            OfferingCount: 2,            // route_stack + portfolio_run (live count overrides)
+            ResourceCount: 0,            // echoStatus deleted R18; live count overrides once re-indexed
+            SubscriptionTierCount: 0)
     };
 
     // Cross-bot edges manually curated. Each edge captures "producer's data

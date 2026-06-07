@@ -8,8 +8,8 @@ export interface Price {
 // v1.7.2: search / searchAgents / browseAgent demoted from $0.01 paid
 // offerings to free Resources. See acp-v2/src/resources.ts.
 const PRICE_USDC: Record<string, number> = {
-  today: 0.02,
-  composeStack: 0.50,
+  today: 0.05,
+  composeStack: 0.05,   // R18 2026-06-07: $0.50 -> $0.05; dominated by buyerOrchestrate $0.10 (strict superset). Full fold to buyerOrchestrate is a v-next change (acp-find docs lockstep).
   watchOffering: 0.50,
   agentReputation: 0.05,
   // v1.7 paid offerings
@@ -24,7 +24,7 @@ const PRICE_USDC: Record<string, number> = {
   risk_compare:     0.20,
   risk_attestation: 0.50,
   // v1.9 marketplace gap finder.
-  // raw lookup) and composeStack ($0.50 stack synthesis): structured ranking
+  // raw lookup) and composeStack ($0.05 stack synthesis): structured ranking
   // + recommendation tags over already-computed saturation data.
   marketplaceGap: 0.30,
   // R12 Tier 1.3
@@ -45,11 +45,39 @@ const PRICE_USDC: Record<string, number> = {
   riskAttestPro: 10.00,
   // ACPPurchaser Path A (R16 #1 cold-start fix). purchase_execute's $0.10 is
   // the SERVICE fee only; the downstream cost rides the Require-Funds transfer.
-  purchase_quote: 0.02,
+  purchase_quote: 0.05,
   purchase_execute: 0.10,
 };
 
 const DEFAULT_PRICE_USDC = 0.01;
+
+// Subscription pricing for recurring offerings.
+// Each entry maps offering_name -> array of { priceUsdc, durationDays } tiers.
+export interface SubscriptionPrice {
+  priceUsdc: number;
+  durationDays: number;
+}
+
+const SUBSCRIPTION_PRICES: Record<string, SubscriptionPrice[]> = {
+  daily_risk_watch: [
+    { priceUsdc: 1.00, durationDays: 30 },
+    { priceUsdc: 1.50, durationDays: 7 },
+    { priceUsdc: 5.00, durationDays: 30 },
+    { priceUsdc: 13.00, durationDays: 90 },
+  ],
+  marketplacePulseSub: [
+    { priceUsdc: 1.00, durationDays: 30 },
+    { priceUsdc: 1.00, durationDays: 7 },
+    { priceUsdc: 4.00, durationDays: 30 },
+    { priceUsdc: 10.00, durationDays: 90 },
+  ],
+};
+
+export function subscriptionPricesFor(
+  offeringName: string
+): SubscriptionPrice[] {
+  return SUBSCRIPTION_PRICES[offeringName] ?? [];
+}
 
 export function priceFor(offeringName: string): Price {
   const amount = PRICE_USDC[offeringName] ?? DEFAULT_PRICE_USDC;

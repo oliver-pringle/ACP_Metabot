@@ -312,6 +312,9 @@ builder.Services.AddSingleton<RiskAttestProService>();
 // shared across all requests. No sibling HTTP work in v1; v1.1 will plumb
 // sibling-probe via the existing IHttpClientFactory.
 builder.Services.AddSingleton<PortfolioRollupService>();
+// R18 (2026-06-07) — agentic-commerce discovery manifest. Read-only projection
+// of the live portfolioRollup; backs /.well-known/agentic-commerce.json + /llms.txt.
+builder.Services.AddSingleton<DiscoveryManifestService>();
 
 builder.Services.AddOpenApi();
 
@@ -661,7 +664,14 @@ app.Use(async (ctx, next) =>
                            StringComparison.OrdinalIgnoreCase)
                     || path.StartsWithSegments("/v1/internal",
                            StringComparison.OrdinalIgnoreCase);
+    // R18: public agentic-commerce discovery surface — no X-API-Key. /.well-known/*
+    // and /llms.txt are meant to be crawler-reachable (matches the serious-vendor
+    // cohort). Only the manifest endpoints are mapped under these prefixes; any
+    // other path 404s. This is the fix for the gateway returning 401 on the
+    // discovery paths.
     if (path.Equals("/health", StringComparison.OrdinalIgnoreCase) ||
+        path.Equals("/llms.txt", StringComparison.OrdinalIgnoreCase) ||
+        path.StartsWithSegments("/.well-known", StringComparison.OrdinalIgnoreCase) ||
         (path.StartsWithSegments("/v1", StringComparison.OrdinalIgnoreCase) && !isInternalV1))
     {
         await next();
@@ -2545,6 +2555,25 @@ app.MapGet("/v1/resources/portfolioRollup", async (
 {
     var rollup = await svc.GetRollupAsync(ct);
     return Results.Ok(rollup);
+}).RequireRateLimiting("public-resources");
+
+// ─── R18 — agentic-commerce discovery manifest ──────────────────────────────
+// Public, no X-API-Key (whitelisted above). Read-only projection of the live
+// portfolioRollup so it never goes stale. Matches the Strumly/Johnny-Suede
+// discovery pattern; closes the gateway-401 gap on the discovery paths.
+// NOTE: x402.json is intentionally NOT published — ButlerBridge still boots
+// stub-x402; payment_rails advertises "virtuals-acp" only until that cutover.
+app.MapGet("/.well-known/agentic-commerce.json", async (
+    DiscoveryManifestService svc, CancellationToken ct) =>
+{
+    return Results.Ok(await svc.BuildAgenticCommerceAsync(ct));
+}).RequireRateLimiting("public-resources");
+
+app.MapGet("/llms.txt", async (
+    DiscoveryManifestService svc, CancellationToken ct) =>
+{
+    var body = await svc.BuildLlmsTxtAsync(ct);
+    return Results.Text(body, "text/plain; charset=utf-8");
 }).RequireRateLimiting("public-resources");
 
 // Cross-agent Resource search. LIKE-based match on name + description +

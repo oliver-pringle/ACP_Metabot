@@ -9,8 +9,7 @@ export const v1Tov2Migration: Offering = {
     "Per-offering V1->V2 migration plan for a single agent. Returns the V1 vs V2 split, overall verdict " +
     "(MIGRATE_RECOMMENDED / ALREADY_V2 / PARTIAL_MIGRATION), and an ordered list of migration steps  -  most-" +
     "hired V1 offering first. Each step lists the V2 marketplace requirements you must satisfy " +
-    "(slaMinutes >= 5, deliverableSchema, subscription tier flavor where appropriate). Pairs with the free " +
-    "/v1/resources/marketplaceVersionMap Resource  -  start free, upgrade to this when you want the full plan.",
+    "(slaMinutes >= 5, deliverableSchema, subscription tier flavor where appropriate). Check the free marketplaceVersionMap Resource first.",
   requirementSchema: {
     type: "object",
     properties: {

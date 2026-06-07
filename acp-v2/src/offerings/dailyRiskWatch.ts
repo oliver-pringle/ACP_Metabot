@@ -109,9 +109,10 @@ export const dailyRiskWatch: Offering = {
     maxTicks: 90,
     maxDurationDays: 90,
     tiers: [
-      { name: "weekly",    priceUsd: 1.50, durationDays: 7 },
-      { name: "monthly",   priceUsd: 5.00, durationDays: 30 },
-      { name: "quarterly", priceUsd: 13.00, durationDays: 90 },
+      { name: "basic_30d",  priceUsd: 1.00, durationDays: 30 },
+      { name: "weekly",     priceUsd: 1.50, durationDays: 7 },
+      { name: "monthly",    priceUsd: 5.00, durationDays: 30 },
+      { name: "quarterly",  priceUsd: 13.00, durationDays: 90 },
     ],
   },
   validate(req) {
