@@ -18,6 +18,9 @@ export async function route(
   if (!validation.valid) {
     return { ok: false, reason: validation.reason ?? "validation failed" };
   }
+  if (!offering.execute) {
+    return { ok: false, reason: `offering ${offeringName} has no execute() (subscription offering should be handled separately)` };
+  }
   try {
     const result = await offering.execute(requirement, ctx);
     return { ok: true, result };

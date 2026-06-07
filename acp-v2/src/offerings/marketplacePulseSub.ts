@@ -94,6 +94,17 @@ export const marketplacePulseSub: Offering = {
     expiresAt: "2026-06-18T12:00:00Z",
     ticksPurchased: 30,
   },
+  subscription: {
+    pricePerTickUsdc: 0.133333,
+    minIntervalSeconds: 86400,
+    maxTicks: 90,
+    maxDurationDays: 90,
+    tiers: [
+      { name: "weekly",    priceUsd: 1.00, durationDays: 7 },
+      { name: "monthly",   priceUsd: 4.00, durationDays: 30 },
+      { name: "quarterly", priceUsd: 10.00, durationDays: 90 },
+    ],
+  },
   validate(req) {
     const u = requireString(req.webhookUrl, "webhookUrl", 2048);
     if (!u.valid) return u;

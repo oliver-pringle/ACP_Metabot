@@ -103,6 +103,17 @@ export const dailyRiskWatch: Offering = {
     ticksPurchased: 30,
     expiresAt: "2026-06-13T16:09:05Z",
   },
+  subscription: {
+    pricePerTickUsdc: 0.166667,
+    minIntervalSeconds: 86400,
+    maxTicks: 90,
+    maxDurationDays: 90,
+    tiers: [
+      { name: "weekly",    priceUsd: 1.50, durationDays: 7 },
+      { name: "monthly",   priceUsd: 5.00, durationDays: 30 },
+      { name: "quarterly", priceUsd: 13.00, durationDays: 90 },
+    ],
+  },
   validate(req) {
     const w = requireString(req.wallet, "wallet", 128);
     if (!w.valid) return w;

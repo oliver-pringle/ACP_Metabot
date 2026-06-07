@@ -10,6 +10,32 @@ export interface OfferingContext {
   agent: AcpAgent;
 }
 
+/// Marketplace tier  -  what app.virtuals.io's "Add Job - Subscription Tiers"
+/// form takes. Each subscription offering MUST declare >=1 tier; multiple
+/// tiers let buyers pick a duration/commitment (weekly/monthly/quarterly).
+/// Marketplace UI restricts duration to {7, 15, 30, 90} days.
+export interface SubscriptionTier {
+  /// Tier name, <=20 chars, snake_case (e.g. "monthly", "30d_watch").
+  name: string;
+  /// Flat USD price for the entire tier duration (NOT per-tick).
+  priceUsd: number;
+  /// Tier duration in days; must be one of 7, 15, 30, or 90.
+  durationDays: 7 | 15 | 30 | 90;
+}
+
+export interface SubscriptionConfig {
+  // Internal billing fields  -  used by the bot's worker loop / per-tick HMAC
+  // delivery. NOT shown on the marketplace; the marketplace shows `tiers`.
+  pricePerTickUsdc: number;
+  minIntervalSeconds: number;
+  maxTicks: number;
+  maxDurationDays: number;
+
+  /// Marketplace registration tiers. At least one. Buyer picks one at hire time.
+  /// Required since 2026-05-10.
+  tiers: SubscriptionTier[];
+}
+
 export interface Offering {
   name: string;
   description: string;
@@ -22,5 +48,8 @@ export interface Offering {
   // Required since 2026-05-10: estimated max time in minutes from hire to deliverable (min 5).
   slaMinutes: number;
   validate(req: Record<string, unknown>): ValidationResult;
-  execute(req: Record<string, unknown>, ctx: OfferingContext): Promise<unknown>;
+
+  // Exactly one of the following two MUST be set.
+  execute?(req: Record<string, unknown>, ctx: OfferingContext): Promise<unknown>;
+  subscription?: SubscriptionConfig;
 }

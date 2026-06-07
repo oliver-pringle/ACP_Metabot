@@ -23,18 +23,11 @@ const PRICE_USDC: Record<string, number> = {
   risk_deep_dive:   1.00,
   risk_compare:     0.20,
   risk_attestation: 0.50,
-  // 30-day subscription. Per-tick price tracked separately; the marketplace
-  // registration is the flat $5.00 bundle.
-  daily_risk_watch: 5.00,
-  // v1.9 marketplace gap finder. Positioned between arenaParticipants ($0.05
+  // v1.9 marketplace gap finder.
   // raw lookup) and composeStack ($0.50 stack synthesis): structured ranking
   // + recommendation tags over already-computed saturation data.
   marketplaceGap: 0.30,
-  // v1.9 marketplace pulse subscription. $4.00 = 30 daily ticks ~= $0.13/tick,
-  // ~15% above today's per-call price (per the portfolio subscription
-  // gradient principle in memory project_acp_pricing_review_shipped.md).
-  marketplacePulseSub: 4.00,
-  // R12 Tier 1.3  -  static-analysis smoke check. $0.10 = 2x preHireBudgetCheck
+  // R12 Tier 1.3
   // because this returns a verdict, not just a price tally.
   agent_smoke_check: 0.10,
   // v1.10 Phase 3 T4  -  Claude-narrated top-5 summary. $0.05 = same floor as
