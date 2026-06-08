@@ -618,6 +618,8 @@ public class Db
                 tx_hash       TEXT
             );
 
+            -- SecurityBot integration: latest-scan cache (security_verdicts) + full
+            -- scan-history log (security_scan_history). Populated by SecurityScanWorker.
             CREATE TABLE IF NOT EXISTS security_verdicts (
                 agent_address    TEXT PRIMARY KEY,          -- lower-cased
                 status           TEXT NOT NULL,             -- scanned | not_auditable | error

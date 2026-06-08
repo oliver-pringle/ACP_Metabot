@@ -771,6 +771,10 @@ public class DbMigrationTests : IDisposable
     //                 + agent_risk_cache schema tests
     // -----------------------------------------------------------------
 
+    // -----------------------------------------------------------------
+    // SecurityBot integration — security_verdicts + security_scan_history schema tests
+    // -----------------------------------------------------------------
+
     [Fact]
     public async Task InitializeSchema_CreatesSecurityVerdictsTable()
     {
@@ -787,9 +791,15 @@ public class DbMigrationTests : IDisposable
 
             await using var conn = db.OpenConnection();
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText =
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='security_verdicts';";
-            Assert.Equal("security_verdicts", (string?)await cmd.ExecuteScalarAsync());
+            cmd.CommandText = @"
+                SELECT name FROM sqlite_master
+                WHERE name IN ('security_verdicts','ix_security_verdicts_status_scanned')
+                ORDER BY name;";
+            var names = new List<string>();
+            await using (var rdr = await cmd.ExecuteReaderAsync())
+                while (await rdr.ReadAsync()) names.Add(rdr.GetString(0));
+            Assert.Contains("security_verdicts", names);
+            Assert.Contains("ix_security_verdicts_status_scanned", names);
         }
         finally
         {
@@ -816,9 +826,15 @@ public class DbMigrationTests : IDisposable
 
             await using var conn = db.OpenConnection();
             await using var cmd = conn.CreateCommand();
-            cmd.CommandText =
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='security_scan_history';";
-            Assert.Equal("security_scan_history", (string?)await cmd.ExecuteScalarAsync());
+            cmd.CommandText = @"
+                SELECT name FROM sqlite_master
+                WHERE name IN ('security_scan_history','ix_security_scan_history_agent_scanned')
+                ORDER BY name;";
+            var names = new List<string>();
+            await using (var rdr = await cmd.ExecuteReaderAsync())
+                while (await rdr.ReadAsync()) names.Add(rdr.GetString(0));
+            Assert.Contains("security_scan_history", names);
+            Assert.Contains("ix_security_scan_history_agent_scanned", names);
         }
         finally
         {
