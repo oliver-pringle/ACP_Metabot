@@ -15,12 +15,13 @@ public class TheSecurityBotClientTests
         private readonly HttpStatusCode _code;
         private readonly string _body;
         public HttpRequestMessage? LastRequest;
+        public string? LastBody;
         public StubHandler(HttpStatusCode code, string body) { _code = code; _body = body; }
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken ct)
         {
             LastRequest = request;
-            if (request.Content is not null) await request.Content.ReadAsStringAsync(ct);
+            if (request.Content is not null) LastBody = await request.Content.ReadAsStringAsync(ct);
             return new HttpResponseMessage(_code)
             {
                 Content = new StringContent(_body, Encoding.UTF8, "application/json")
@@ -101,6 +102,7 @@ public class TheSecurityBotClientTests
         Assert.Null(v.Score);
         Assert.Null(v.Grade);
         Assert.Null(r.RawFindingsJson);
+        Assert.Equal("NOT_AUDITABLE", r.RawVerdict);
     }
 
     [Fact]
@@ -148,6 +150,8 @@ public class TheSecurityBotClientTests
         Assert.Equal("test-key", string.Join("", handler.LastRequest.Headers.GetValues("X-API-Key")));
         Assert.Equal(HttpMethod.Post, handler.LastRequest.Method);
         Assert.EndsWith("v1/internal/scan", handler.LastRequest.RequestUri!.ToString());
+        Assert.Contains("agentAddress", handler.LastBody!);
+        Assert.Contains("0xABC", handler.LastBody!);
     }
 
     [Fact]
