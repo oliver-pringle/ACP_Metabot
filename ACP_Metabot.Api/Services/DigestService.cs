@@ -17,6 +17,7 @@ public class DigestService
     private readonly ReputationService _reputation;
     private readonly SaturationCalculator _saturation;
     private readonly AgentResourcesRepository? _resourcesRepo;
+    private readonly SecurityVerdictRepository? _securityRepo;
 
     private const int MaxNewOfferings = 25;
     private const int MaxGainers = 25;
@@ -27,24 +28,30 @@ public class DigestService
     private readonly Dictionary<string, (DateTime Bucket, DigestResult Result)> _cache = new();
     private readonly SemaphoreSlim _lock = new(1, 1);
 
-    private static string CacheKey(int days, string? mv, HashSet<string>? chain, double? price)
+    private static string CacheKey(int days, string? mv, HashSet<string>? chain, double? price, bool sec)
     {
         var c = chain is null ? "" : string.Join(",", chain.OrderBy(s => s));
-        return $"d={days}|m={mv ?? ""}|c={c}|p={price?.ToString() ?? ""}";
+        return $"d={days}|m={mv ?? ""}|c={c}|p={price?.ToString() ?? ""}|s={(sec ? 1 : 0)}";
     }
 
     public DigestService(OfferingRepository repo, ReputationService reputation,
-        SaturationCalculator saturation, AgentResourcesRepository? resourcesRepo = null)
+        SaturationCalculator saturation, AgentResourcesRepository? resourcesRepo = null,
+        SecurityVerdictRepository? securityRepo = null)
     {
         _repo = repo;
         _reputation = reputation;
         _saturation = saturation;
         _resourcesRepo = resourcesRepo;
+        _securityRepo = securityRepo;
     }
 
-    // Backward-compat overload — delegate to 4-arg version.
+    // Backward-compat overload — delegate to the full version.
     public Task<DigestResult> BuildAsync(int windowDays, string? marketplaceFilter = null)
-        => BuildAsync(windowDays, marketplaceFilter, chainFilter: null, priceMaxUsdc: null);
+        => BuildAsync(windowDays, marketplaceFilter, chainFilter: null, priceMaxUsdc: null, includeSecurity: true);
+
+    public Task<DigestResult> BuildAsync(int windowDays, string? marketplaceFilter,
+        HashSet<string>? chainFilter, double? priceMaxUsdc)
+        => BuildAsync(windowDays, marketplaceFilter, chainFilter, priceMaxUsdc, includeSecurity: true);
 
     /// <summary>
     /// Filterable overload. Optional <paramref name="chainFilter"/> (lowercased
@@ -52,11 +59,11 @@ public class DigestService
     /// fields. Hourly cache keyed on the full filter tuple.
     /// </summary>
     public async Task<DigestResult> BuildAsync(int windowDays, string? marketplaceFilter,
-        HashSet<string>? chainFilter, double? priceMaxUsdc)
+        HashSet<string>? chainFilter, double? priceMaxUsdc, bool includeSecurity)
     {
         var hourBucket = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month,
             DateTime.UtcNow.Day, DateTime.UtcNow.Hour, 0, 0, DateTimeKind.Utc);
-        var key = CacheKey(windowDays, marketplaceFilter, chainFilter, priceMaxUsdc);
+        var key = CacheKey(windowDays, marketplaceFilter, chainFilter, priceMaxUsdc, includeSecurity);
 
         if (_cache.TryGetValue(key, out var entry) && entry.Bucket == hourBucket)
             return entry.Result;
@@ -67,7 +74,7 @@ public class DigestService
             if (_cache.TryGetValue(key, out entry) && entry.Bucket == hourBucket)
                 return entry.Result;
 
-            var fresh = await BuildUncachedAsync(windowDays, marketplaceFilter, chainFilter, priceMaxUsdc);
+            var fresh = await BuildUncachedAsync(windowDays, marketplaceFilter, chainFilter, priceMaxUsdc, includeSecurity);
             _cache[key] = (hourBucket, fresh);
             return fresh;
         }
@@ -75,7 +82,7 @@ public class DigestService
     }
 
     private async Task<DigestResult> BuildUncachedAsync(int windowDays, string? marketplaceFilter,
-        HashSet<string>? chainFilter, double? priceMaxUsdc)
+        HashSet<string>? chainFilter, double? priceMaxUsdc, bool includeSecurity)
     {
         var nowUtc = DateTime.UtcNow;
         var sinceUtc = nowUtc.AddDays(-windowDays);
@@ -126,6 +133,24 @@ public class DigestService
         if (gainers.Count > MaxGainers)
             gainers = gainers.Take(MaxGainers).ToList();
 
+        // Security enrichment (decoupled cache; populated by SecurityScanWorker).
+        IReadOnlyDictionary<string, SecurityVerdict> verdicts =
+            new Dictionary<string, SecurityVerdict>();
+        if (includeSecurity && _securityRepo is not null && newOfferings.Count > 0)
+        {
+            var addrs = newOfferings.Select(o => o.AgentAddress.ToLowerInvariant()).Distinct().ToList();
+            verdicts = await _securityRepo.GetManyAsync(addrs);
+        }
+
+        OfferingSecurity? SecurityFor(string agentAddress)
+        {
+            if (!includeSecurity) return null;
+            var key2 = agentAddress.ToLowerInvariant();
+            return verdicts.TryGetValue(key2, out var v)
+                ? OfferingSecurity.FromVerdict(v)
+                : OfferingSecurity.Pending;
+        }
+
         var newOfferingDtos = newOfferings.Select(o => new NewOffering(
             OfferingId: o.Id,
             AgentName: o.AgentName,
@@ -137,7 +162,8 @@ public class DigestService
             Chain: o.Chain,
             FirstSeenAt: o.FirstSeenAt.ToString("O", CultureInfo.InvariantCulture),
             Reputation: _reputation.BuildSearchSummary(o),
-            MarketplaceVersion: o.MarketplaceVersion)).ToArray();
+            MarketplaceVersion: o.MarketplaceVersion,
+            Security: SecurityFor(o.AgentAddress))).ToArray();
 
         // Sub-task A: newAgents + windowStart + partial flag
         var (newAgentsTotal, newAgentsTop) = await _repo.ListNewAgentsSinceAsync(

@@ -966,7 +966,7 @@ async Task<IResult> HandleReputation(AgentReputationRequest req,
 }
 
 async Task<IResult> HandleDigest(int? days, string? marketplace,
-    string[]? chain, double? priceMaxUsdc, DigestService svc)
+    string[]? chain, double? priceMaxUsdc, bool? includeSecurity, DigestService svc)
 {
     var window = days is null ? 1 : Math.Clamp(days.Value, 1, 90);
     var marketplaceFilter = NormalizeMarketplace(marketplace);
@@ -987,7 +987,7 @@ async Task<IResult> HandleDigest(int? days, string? marketplace,
     if (priceMaxUsdc is double cap && (double.IsNaN(cap) || cap < 0))
         return Results.BadRequest(new { error = "priceMaxUsdc must be a non-negative number" });
 
-    var result = await svc.BuildAsync(window, marketplaceFilter, chainFilter, priceMaxUsdc);
+    var result = await svc.BuildAsync(window, marketplaceFilter, chainFilter, priceMaxUsdc, includeSecurity ?? true);
     return Results.Ok(result);
 }
 
@@ -1064,7 +1064,7 @@ app.MapPost("/search", HandleSearch);
 app.MapPost("/composeStack", HandleCompose);
 app.MapPost("/agentReputation", HandleReputation);
 app.MapGet("/digest", (int? days, string? marketplace, string[]? chain, double? priceMaxUsdc, DigestService svc)
-    => HandleDigest(days, marketplace, chain, priceMaxUsdc, svc));
+    => HandleDigest(days, marketplace, chain, priceMaxUsdc, includeSecurity: null, svc));
 app.MapGet("/agent/{address}", (string address,
     OfferingRepository repo, ReputationService reputation,
     CrossPresenceBuilder crossPresence, PricePercentileCalculator pricePercentile,
@@ -1760,8 +1760,8 @@ app.MapGet("/v1/agentReputationHistory",
         AgentReputationHistoryRepository histRepo)
     => HandleReputationHistory(agent, days, histRepo))
     .RequireRateLimiting("public-reputation");
-app.MapGet("/v1/digest", (int? days, string? marketplace, string[]? chain, double? priceMaxUsdc, DigestService svc)
-    => HandleDigest(days, marketplace, chain, priceMaxUsdc, svc))
+app.MapGet("/v1/digest", (int? days, string? marketplace, string[]? chain, double? priceMaxUsdc, bool? includeSecurity, DigestService svc)
+    => HandleDigest(days, marketplace, chain, priceMaxUsdc, includeSecurity, svc))
     .RequireRateLimiting("public-digest");
 app.MapGet("/v1/agent/{address}", (string address,
     OfferingRepository repo, ReputationService reputation,

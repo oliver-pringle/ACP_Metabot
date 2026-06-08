@@ -15,7 +15,9 @@ public record NewOffering(
     [property: JsonPropertyName("reputation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         ReputationSummary? Reputation,
     [property: JsonPropertyName("marketplaceVersion")]
-        string MarketplaceVersion = "v1");
+        string MarketplaceVersion = "v1",
+    [property: JsonPropertyName("security"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        OfferingSecurity? Security = null);
 
 public record OfferingGainer(
     [property: JsonPropertyName("offeringId")]   long OfferingId,
