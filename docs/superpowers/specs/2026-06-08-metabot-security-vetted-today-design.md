@@ -44,6 +44,63 @@ SecurityScanWorker (C#, Metabot.Api)
    Repository: `SecurityVerdictRepository` (Upsert, GetByAgent, GetStaleAgents(ttl, limit),
    GetMany(addresses)).
 
+1b. **`security_scan_history` store (Metabot SQLite, ADO.NET) — append-only**
+   The `security_verdicts` table above is a *latest-verdict cache* (PK
+   `agent_address`, upserted each scan — a new scan OVERWRITES the prior row). It
+   drives the fast single-row-per-agent `/v1/digest` join and the stale/TTL
+   selection. It deliberately keeps only the most recent result.
+
+   To durably retain **the results of every scan on a bot** (not just the latest),
+   the worker ALSO appends one immutable row per scan to `security_scan_history`.
+   This mirrors Metabot's existing latest-cache + append-history split
+   (`agent_reputation_cache` + `agent_reputation_history`, `risk_attest_pro_cache`
+   + `risk_snapshot_history`) — Metabot persists history in its OWN database.
+
+   **Why Metabot owns it (not read-through to SecurityBot):** SecurityBot already
+   persists every scan to its own `scans` + `scan_findings` tables — but exposes
+   NO read-by-agent endpoint (only a private `GetMostRecentByAgentAsync`), so that
+   data is not queryable from outside SecurityBot. "The database" in the request =
+   Metabot's DB, where the worker runs and owns the scan cadence. A read-through
+   would couple Metabot to SecurityBot on a hot path and make it a critical
+   dependency for Metabot's own audit features. (Decision confirmed 2026-06-08.)
+
+   Columns: `id` (INTEGER PK AUTOINCREMENT — surrogate, truly append-only, NO
+   natural-key uniqueness so re-scans append rather than overwrite),
+   `agent_address` (text, lower-cased), `scanned_at` (ISO-8601 "O", normalized to
+   UTC so the string `ORDER BY` is valid), `status` (`scanned` | `not_auditable` |
+   `error`), `score` (int?), `grade` (text?), `observable_count` (int?),
+   `finding_count` (int?), `severity_counts` (json text?), `verdict` (text? — the
+   raw SecurityBot discriminator, e.g. `PASS`/`NOT_AUDITABLE`), `corpus_version`
+   (text?), `findings_json` (text? — the FULL raw `findings[]` array verbatim),
+   `last_error` (text? — server-side only). Indexed `(agent_address, scanned_at
+   DESC)`. WAL.
+
+   The summary columns (`score`/`grade`/`observable_count`/`finding_count`/
+   `severity_counts`) are denormalized from `findings_json` so the deferred read
+   surface can list scans without re-parsing the blob; they intentionally
+   duplicate the cache's headline fields (same idiom as `risk_snapshot_history`).
+   `corpus_version` is a forward-compat placeholder — the `/v1/internal/scan`
+   response does not expose it today, so it is intentionally stored null (not a
+   wiring bug); SecurityBot stamps it internally and may surface it later.
+
+   **What each scan persists:** every `SecurityScanWorker` tick, for each agent,
+   does TWO writes — (a) `UpsertAsync` the latest-verdict cache row (unchanged),
+   then (b) `AppendAsync` one new history row carrying the full result incl. the
+   raw `findings_json`. A `not_auditable` or `error` scan still appends a row (null
+   score/findings + the reason) so the timeline is complete and gaps are explained.
+   `pending` is a synthetic *digest-only* status for an unscanned agent and is
+   NEVER written to history.
+
+   **Write ordering / durability:** cache upsert first (so the digest stays
+   correct), then the history append, on separate connections (no shared
+   transaction — keeps the one-connection-per-repo-call idiom). A crash strictly
+   between the two writes loses that one history row; the next scan re-captures the
+   agent. This at-least-once behaviour is an accepted tradeoff for an audit log.
+
+   **The digest reads the cache, never the history.** `/v1/digest` enrichment
+   batch-joins `security_verdicts` only. The history's raw findings/evidence MUST
+   NOT reach the public digest surface (P9/P10).
+
 2. **`TheSecurityBotClient` (C#, cross-bot HTTP)**
    - BaseUrl `http://securitybot-api:5000` (env `THESECURITYBOT_BASE_URL`, default that).
    - `X-API-Key` from `THESECURITYBOT_API_KEY` (= SecurityBot's `INTERNAL_API_KEY`).
@@ -89,6 +146,13 @@ SecurityScanWorker (C#, Metabot.Api)
 - `error`: short TTL `SECURITY_SCAN_ERROR_TTL_HOURS` (default 6) — retry soon.
 - Each verdict carries `scanned_at` + `corpus_version` so consumers can judge freshness;
   the digest surfaces `scannedAt`.
+- `security_scan_history` is an immutable log — never re-scanned on, no TTL. The
+  TTL/stale logic operates purely on the `security_verdicts` cache. **Growth note:**
+  history is append-only with no pruning this iteration; the worst case is the
+  6-hour `error` retry cadence (a persistently-failing agent ≈ 1.4k rows/yr) plus
+  the size of `findings_json` for findings-heavy agents — bounded, but monitor the
+  table size on the droplet. A `PruneOlderThanAsync` (mirror of the reputation
+  history repo's) is the escape hatch if it ever warrants.
 
 ## Cost
 
@@ -129,3 +193,22 @@ worker time spread across ticks; steady-state re-scan load ≈ `N / 7 days`.
 - A separate composite tool (enrichment is inline on the existing digest).
 - Re-scanning on every digest request (decoupled cache only).
 - Plugin republish / marketplace re-registration (separate, manual).
+- Pruning/retention job for `security_scan_history` (append-only for now; prune
+  method deferred until volume warrants).
+- A read endpoint/plugin tool to query `security_scan_history` (the user asked only
+  that results be SAVED; the read surface is specced + deferred — see below).
+
+## Read surface (deferred — specced, not built)
+
+Persistence (above) is in scope; the read surface is deferred. When built it
+mirrors `agentReputationHistory` exactly:
+- Gateway route `GET /v1/securityScanHistory?agent=0x..&limit=N` (limit clamped
+  1–100, default 20), handler `HandleSecurityScanHistory(string agent, int? limit,
+  SecurityScanHistoryRepository histRepo)` — lower-case the address BEFORE the
+  `^0x[0-9a-f]{40}$` validation (the regex rejects uppercase), then
+  `ListByAgentAsync(addr, limit)`, returning `{ agentAddress, count, history:
+  [{ scannedAt, status, score, grade, verdict, findingCount, severityCounts }, …] }`.
+  The public list returns SUMMARY fields only; **raw `findings_json` is never
+  returned by the public endpoint — it stays server-side in this design** (P9/P10).
+- Plugin tool `acp_agent_security_history` in `acp-find-mcp` (args: `agentAddress`
+  required, `limit?` 1–100 default 20), mirroring `acp_agent_reputation_history`.

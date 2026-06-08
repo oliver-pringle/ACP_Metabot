@@ -21,12 +21,14 @@
 ## File Structure
 
 **Create:**
-- `ACP_Metabot.Api/Models/SecurityVerdict.cs` — the cached-verdict row record + the public `OfferingSecurity` digest DTO.
+- `ACP_Metabot.Api/Models/SecurityVerdict.cs` — the cached-verdict row record, the public `OfferingSecurity` digest DTO, and the append-only `ScanHistoryRow` record.
 - `ACP_Metabot.Api/Data/SecurityVerdictRepository.cs` — ADO.NET repo (Upsert / GetByAgent / GetMany / GetStaleAgents).
+- `ACP_Metabot.Api/Data/SecurityScanHistoryRepository.cs` — ADO.NET repo for the append-only scan-history store (AppendAsync / ListByAgentAsync).
 - `ACP_Metabot.Api/Services/AcpClients/InternalConnectCallbacks.cs` — P39 connect-time IP pin (lifted verbatim from PrivateTrader/OracleBot).
-- `ACP_Metabot.Api/Services/TheSecurityBotClient.cs` — `ITheSecurityBotClient` + impl; maps `/v1/internal/scan` → `SecurityVerdict`, never throws into the worker loop.
-- `ACP_Metabot.Api/Services/SecurityScanWorker.cs` — BackgroundService; batch-scan stale agents, gentle rate.
+- `ACP_Metabot.Api/Services/TheSecurityBotClient.cs` — `ITheSecurityBotClient` + impl; maps `/v1/internal/scan` → `ScanResult` (cache verdict + raw findings JSON), never throws into the worker loop.
+- `ACP_Metabot.Api/Services/SecurityScanWorker.cs` — BackgroundService; batch-scan stale agents, gentle rate; writes the latest-cache row AND appends a full history row per scan.
 - `ACP_Metabot.Api.Tests/SecurityVerdictRepositoryTests.cs`
+- `ACP_Metabot.Api.Tests/SecurityScanHistoryRepositoryTests.cs`
 - `ACP_Metabot.Api.Tests/TheSecurityBotClientTests.cs`
 - `ACP_Metabot.Api.Tests/SecurityScanWorkerTests.cs`
 - `ACP_Metabot.Api.Tests/DigestServiceSecurityTests.cs`
@@ -85,13 +87,46 @@ public async Task InitializeSchema_CreatesSecurityVerdictsTable()
 }
 ```
 
+Add a SECOND fact (same class) for the append-only history table — see Task 1b's table:
+
+```csharp
+[Fact]
+public async Task InitializeSchema_CreatesSecurityScanHistoryTable()
+{
+    var dbPath = Path.Combine(Path.GetTempPath(), $"acp_metabot_secscanhist_schema_{Guid.NewGuid():N}.db");
+    try
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:Sqlite"] = $"Data Source={dbPath}"
+            }).Build();
+        var db = new Db(config);
+        await db.InitializeSchemaAsync();
+
+        await using var conn = db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='security_scan_history';";
+        Assert.Equal("security_scan_history", (string?)await cmd.ExecuteScalarAsync());
+    }
+    finally
+    {
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        try { File.Delete(dbPath); } catch { }
+        try { File.Delete(dbPath + "-wal"); } catch { }
+        try { File.Delete(dbPath + "-shm"); } catch { }
+    }
+}
+```
+
 If `DbMigrationTests.cs` lacks `using Microsoft.Extensions.Configuration;` / `using ACP_Metabot.Api.Data;`, add them at the top.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `dotnet test ACP_Metabot.Api.Tests --filter "FullyQualifiedName~InitializeSchema_CreatesSecurityVerdictsTable"`
+Run: `dotnet test ACP_Metabot.Api.Tests --filter "FullyQualifiedName~InitializeSchema_Creates"`
 (working dir: `C:\code_crypto\ACP\ACP_Metabot\ACP_Metabot`)
-Expected: FAIL — query returns null (table does not exist).
+Expected: BOTH facts FAIL — queries return null (tables do not exist).
 
 - [ ] **Step 3: Add the table to the schema block**
 
@@ -114,18 +149,45 @@ In `ACP_Metabot.Api/Data/Db.cs`, inside `InitializeSchemaAsync`, append this tab
 
             CREATE INDEX IF NOT EXISTS ix_security_verdicts_status_scanned
                 ON security_verdicts(status, scanned_at);
+
+            -- Scan-history: append-only log of EVERY SecurityBot scan per agent
+            -- (the user asked that the results of each scan be saved, not just the
+            -- latest). security_verdicts above is the latest-only cache that drives
+            -- the digest join; THIS table retains the full result of each scan incl.
+            -- the raw findings JSON. Surrogate id PK (no natural-key uniqueness) so
+            -- re-scans APPEND, never overwrite. Mirrors risk_snapshot_history.
+            CREATE TABLE IF NOT EXISTS security_scan_history (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_address    TEXT NOT NULL,             -- lower-cased
+                scanned_at       TEXT NOT NULL,             -- ISO-8601 round-trip ("O"), UTC-normalized
+                status           TEXT NOT NULL,             -- scanned | not_auditable | error
+                score            INTEGER,
+                grade            TEXT,
+                observable_count INTEGER,
+                finding_count    INTEGER,
+                severity_counts  TEXT,                      -- json {severity: count}
+                verdict          TEXT,                      -- raw SecurityBot verdict discriminator (PASS / NOT_AUDITABLE / ...)
+                corpus_version   TEXT,                      -- forward-compat placeholder; scan response doesn't expose it yet (null today)
+                findings_json    TEXT,                      -- FULL raw findings[] array verbatim; the durable per-scan result
+                last_error       TEXT                       -- server-side only; never surfaced
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_security_scan_history_agent_scanned
+                ON security_scan_history(agent_address, scanned_at DESC);
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+> Append both tables inside the SAME `cmd.CommandText` string (the one `ExecuteNonQueryAsync` runs the whole multi-statement block). The history table mirrors Metabot's OWN truly-append-only idiom `risk_snapshot_history` (Db.cs:590-599) — surrogate `INTEGER PK AUTOINCREMENT` + `(natural_key, captured_at DESC)` index — NOT the composite-PK overwrite of `agent_reputation_history`.
 
-Run: `dotnet test ACP_Metabot.Api.Tests --filter "FullyQualifiedName~InitializeSchema_CreatesSecurityVerdictsTable"`
-Expected: PASS.
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `dotnet test ACP_Metabot.Api.Tests --filter "FullyQualifiedName~InitializeSchema_Creates"`
+Expected: BOTH facts PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add ACP_Metabot.Api/Data/Db.cs ACP_Metabot.Api.Tests/DbMigrationTests.cs
-git commit -m "feat(metabot): add security_verdicts cache table"
+git commit -m "feat(metabot): add security_verdicts cache + security_scan_history tables"
 ```
 
 ---
@@ -196,6 +258,33 @@ public record OfferingSecurity(
 }
 ```
 
+Then append the append-only history row record to the SAME file (keeps all security models together):
+
+```csharp
+/// <summary>
+/// One immutable security_scan_history row — the FULL result of a single scan,
+/// retained append-only (never overwritten). Mirrors the latest-cache
+/// SecurityVerdict but adds the raw findings JSON + raw verdict discriminator and
+/// an autoincrement Id. Written by SecurityScanWorker every tick, alongside the
+/// latest-cache upsert. findings_json / last_error are server-side only and are
+/// NEVER surfaced on the public digest (P9 / P10).
+/// </summary>
+public sealed record ScanHistoryRow(
+    long Id,
+    string AgentAddress,          // lower-cased
+    string ScannedAt,             // ISO-8601 "O"
+    string Status,                // SecurityStatus.* — scanned | not_auditable | error (never 'pending')
+    int? Score,
+    string? Grade,
+    int? ObservableCount,
+    int? FindingCount,
+    string? SeverityCountsJson,
+    string? Verdict,              // raw SecurityBot verdict discriminator (PASS / NOT_AUDITABLE / ...)
+    string? CorpusVersion,
+    string? FindingsJson,         // full raw findings[] array verbatim
+    string? LastError);
+```
+
 - [ ] **Step 2: Build to verify it compiles**
 
 Run: `dotnet build ACP_Metabot.Api`
@@ -205,7 +294,7 @@ Expected: Build succeeded, 0 errors.
 
 ```bash
 git add ACP_Metabot.Api/Models/SecurityVerdict.cs
-git commit -m "feat(metabot): add SecurityVerdict + OfferingSecurity models"
+git commit -m "feat(metabot): add SecurityVerdict + OfferingSecurity + ScanHistoryRow models"
 ```
 
 ---
@@ -566,6 +655,244 @@ git commit -m "feat(metabot): SecurityVerdictRepository (upsert/get/getMany/stal
 
 ---
 
+### Task 3b: `SecurityScanHistoryRepository` (append-only scan history)
+
+**Files:**
+- Create: `ACP_Metabot.Api/Data/SecurityScanHistoryRepository.cs`
+- Test: `ACP_Metabot.Api.Tests/SecurityScanHistoryRepositoryTests.cs`
+
+This is the durable answer to "save the results of each scan." A separate repo (not extending `SecurityVerdictRepository`) — distinct table, distinct lifecycle (append vs upsert-cache), distinct read shape — mirroring how Metabot keeps `AgentReputationCacheRepository` separate from `AgentReputationHistoryRepository`. Depends on Task 1 (table) + Task 2 (`ScanHistoryRow`); independent of the client/worker.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `ACP_Metabot.Api.Tests/SecurityScanHistoryRepositoryTests.cs` (temp-DB setup identical to `SecurityVerdictRepositoryTests`: build `Db` + `InitializeSchemaAsync` in the ctor; `ClearAllPools` + delete in `Dispose`; `_repo = new SecurityScanHistoryRepository(_db);`):
+
+```csharp
+using ACP_Metabot.Api.Data;
+using ACP_Metabot.Api.Models;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Configuration;
+
+namespace ACP_Metabot.Api.Tests;
+
+public class SecurityScanHistoryRepositoryTests : IDisposable
+{
+    private readonly string _dbPath;
+    private readonly Db _db;
+    private readonly SecurityScanHistoryRepository _repo;
+
+    public SecurityScanHistoryRepositoryTests()
+    {
+        _dbPath = Path.Combine(Path.GetTempPath(), $"acp_metabot_secscanhist_test_{Guid.NewGuid():N}.db");
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:Sqlite"] = $"Data Source={_dbPath}"
+            }).Build();
+        _db = new Db(config);
+        _db.InitializeSchemaAsync().GetAwaiter().GetResult();
+        _repo = new SecurityScanHistoryRepository(_db);
+    }
+
+    public void Dispose()
+    {
+        SqliteConnection.ClearAllPools();
+        try { File.Delete(_dbPath); } catch { }
+        try { File.Delete(_dbPath + "-wal"); } catch { }
+        try { File.Delete(_dbPath + "-shm"); } catch { }
+    }
+
+    [Fact]
+    public async Task Append_ThenList_RoundtripsAndLowercases()
+    {
+        var iso = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc).ToString("O");
+        var findings = "[{\"patternId\":\"P9\",\"severity\":\"High\",\"evidence\":\"x\"}]";
+        await _repo.AppendAsync("0xABC", iso, SecurityStatus.Scanned, 90, "A", 11, 1, "{\"High\":1}", "PASS", "2026-06-08", findings, null);
+
+        var rows = await _repo.ListByAgentAsync("0xabc");
+        Assert.Single(rows);
+        Assert.Equal("0xabc", rows[0].AgentAddress);          // lower-cased on write
+        Assert.Equal(SecurityStatus.Scanned, rows[0].Status);
+        Assert.Equal(90, rows[0].Score);
+        Assert.Equal(findings, rows[0].FindingsJson);          // full findings JSON round-trips
+        Assert.Equal("PASS", rows[0].Verdict);
+    }
+
+    [Fact]
+    public async Task Append_Twice_SameAgent_ProducesTwoRows_NotOverwrite()
+    {
+        var iso1 = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc).ToString("O");
+        var iso2 = new DateTime(2026, 6, 2, 0, 0, 0, DateTimeKind.Utc).ToString("O");
+        await _repo.AppendAsync("0xa", iso1, SecurityStatus.Scanned, 70, "C", 11, 2, "{}", "PASS", null, "[]", null);
+        await _repo.AppendAsync("0xa", iso2, SecurityStatus.Scanned, 95, "A", 11, 0, "{}", "PASS", null, "[]", null);
+
+        var rows = await _repo.ListByAgentAsync("0xa");
+        Assert.Equal(2, rows.Count);                           // append, not upsert
+        Assert.Equal(iso2, rows[0].ScannedAt);                 // newest first
+        Assert.Equal(95, rows[0].Score);
+        Assert.Equal(70, rows[1].Score);
+    }
+
+    [Fact]
+    public async Task Append_ErrorScan_StoresNullFindings_AndReason()
+    {
+        var iso = DateTime.UtcNow.ToString("O");
+        await _repo.AppendAsync("0xe", iso, SecurityStatus.Error, null, null, null, null, null, null, null, null, "HTTP 500");
+        var rows = await _repo.ListByAgentAsync("0xe");
+        Assert.Single(rows);
+        Assert.Equal(SecurityStatus.Error, rows[0].Status);
+        Assert.Null(rows[0].FindingsJson);
+        Assert.Equal("HTTP 500", rows[0].LastError);
+    }
+
+    [Fact]
+    public async Task List_RespectsLimit_NewestFirst()
+    {
+        for (int i = 0; i < 5; i++)
+            await _repo.AppendAsync("0xa", new DateTime(2026, 6, 1 + i, 0, 0, 0, DateTimeKind.Utc).ToString("O"),
+                SecurityStatus.Scanned, 80 + i, "B", 11, 0, "{}", "PASS", null, "[]", null);
+        var rows = await _repo.ListByAgentAsync("0xa", limit: 2);
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(84, rows[0].Score);                       // most recent
+    }
+
+    [Fact]
+    public async Task List_UnknownAgent_ReturnsEmpty()
+        => Assert.Empty(await _repo.ListByAgentAsync("0xnope"));
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `dotnet test ACP_Metabot.Api.Tests --filter "FullyQualifiedName~SecurityScanHistoryRepositoryTests"`
+Expected: FAIL to compile — `SecurityScanHistoryRepository` does not exist.
+
+- [ ] **Step 3: Write the repository**
+
+Create `ACP_Metabot.Api/Data/SecurityScanHistoryRepository.cs`:
+
+```csharp
+using ACP_Metabot.Api.Models;
+
+namespace ACP_Metabot.Api.Data;
+
+/// <summary>
+/// Append-only persistence for EVERY SecurityBot scan (the security_scan_history
+/// table). One immutable row per scan, retaining the full result incl. the raw
+/// findings JSON — the durable answer to "save the results of each scan on a bot".
+/// security_verdicts (SecurityVerdictRepository) remains the latest-only cache;
+/// THIS repo never updates or deletes, it only inserts and lists. Addresses are
+/// stored + queried lower-cased (matching SecurityVerdictRepository). The
+/// surrogate-id PK + (agent_address, scanned_at DESC) index structurally mirror
+/// risk_snapshot_history; AgentReputationHistoryRepository is the structural
+/// reference only (it does NOT lower-case addresses — do not copy that).
+/// </summary>
+public sealed class SecurityScanHistoryRepository
+{
+    private readonly Db _db;
+
+    public SecurityScanHistoryRepository(Db db) => _db = db;
+
+    /// <summary>
+    /// Append one immutable history row for a completed scan. Never overwrites —
+    /// each call inserts a new autoincrement row, so two scans of the same agent
+    /// yield two rows. <paramref name="findingsJson"/> is the full raw findings[]
+    /// array (may be null for not_auditable / error scans). <paramref name="rawVerdict"/>
+    /// is SecurityBot's raw verdict discriminator (PASS / NOT_AUDITABLE / ...).
+    /// </summary>
+    public async Task AppendAsync(
+        string agentAddress, string scannedAt, string status,
+        int? score, string? grade, int? observableCount, int? findingCount,
+        string? severityCountsJson, string? rawVerdict, string? corpusVersion,
+        string? findingsJson, string? lastError, CancellationToken ct = default)
+    {
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            INSERT INTO security_scan_history
+                (agent_address, scanned_at, status, score, grade, observable_count,
+                 finding_count, severity_counts, verdict, corpus_version,
+                 findings_json, last_error)
+            VALUES ($a, $at, $st, $sc, $gr, $oc, $fc, $sevc, $vd, $cv, $fj, $err);";
+        cmd.Parameters.AddWithValue("$a",   agentAddress.ToLowerInvariant());
+        cmd.Parameters.AddWithValue("$at",  scannedAt);
+        cmd.Parameters.AddWithValue("$st",  status);
+        cmd.Parameters.AddWithValue("$sc",  (object?)score ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$gr",  (object?)grade ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$oc",  (object?)observableCount ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$fc",  (object?)findingCount ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$sevc",(object?)severityCountsJson ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$vd",  (object?)rawVerdict ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$cv",  (object?)corpusVersion ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$fj",  (object?)findingsJson ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$err", (object?)lastError ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>
+    /// Most recent <paramref name="limit"/> scans for an agent, newest first.
+    /// Empty when the agent has never been scanned. limit clamped 1–100.
+    /// (Read surface is deferred; this method backs tests + a future endpoint.)
+    /// </summary>
+    public async Task<IReadOnlyList<ScanHistoryRow>> ListByAgentAsync(
+        string agentAddress, int limit = 20, CancellationToken ct = default)
+    {
+        if (limit < 1) limit = 1;
+        if (limit > 100) limit = 100;
+
+        await using var conn = _db.OpenConnection();
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT id, agent_address, scanned_at, status, score, grade,
+                   observable_count, finding_count, severity_counts, verdict,
+                   corpus_version, findings_json, last_error
+            FROM security_scan_history
+            WHERE agent_address = $a
+            ORDER BY scanned_at DESC, id DESC
+            LIMIT $limit;";
+        cmd.Parameters.AddWithValue("$a",     agentAddress.ToLowerInvariant());
+        cmd.Parameters.AddWithValue("$limit", limit);
+
+        var list = new List<ScanHistoryRow>(capacity: limit);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            list.Add(Map(reader));
+        return list;
+    }
+
+    private static ScanHistoryRow Map(Microsoft.Data.Sqlite.SqliteDataReader r) => new(
+        Id:                 r.GetInt64(0),
+        AgentAddress:       r.GetString(1),
+        ScannedAt:          r.GetString(2),
+        Status:             r.GetString(3),
+        Score:              r.IsDBNull(4)  ? null : r.GetInt32(4),
+        Grade:              r.IsDBNull(5)  ? null : r.GetString(5),
+        ObservableCount:    r.IsDBNull(6)  ? null : r.GetInt32(6),
+        FindingCount:       r.IsDBNull(7)  ? null : r.GetInt32(7),
+        SeverityCountsJson: r.IsDBNull(8)  ? null : r.GetString(8),
+        Verdict:            r.IsDBNull(9)  ? null : r.GetString(9),
+        CorpusVersion:      r.IsDBNull(10) ? null : r.GetString(10),
+        FindingsJson:       r.IsDBNull(11) ? null : r.GetString(11),
+        LastError:          r.IsDBNull(12) ? null : r.GetString(12));
+}
+```
+
+> `PruneOlderThanAsync` is intentionally OMITTED (append-only, no pruning this iteration — see the spec's retention stance). Add later mirroring `AgentReputationHistoryRepository.PruneOlderThanAsync` if droplet table size warrants.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `dotnet test ACP_Metabot.Api.Tests --filter "FullyQualifiedName~SecurityScanHistoryRepositoryTests"`
+Expected: PASS (5 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add ACP_Metabot.Api/Data/SecurityScanHistoryRepository.cs ACP_Metabot.Api.Tests/SecurityScanHistoryRepositoryTests.cs
+git commit -m "feat(metabot): SecurityScanHistoryRepository (append-only scan history)"
+```
+
+---
+
 ### Task 4: P39 connect-callback (lift into Metabot)
 
 **Files:**
@@ -688,7 +1015,7 @@ git commit -m "feat(metabot): add P39 InternalConnectCallbacks for cross-bot cli
 - Create: `ACP_Metabot.Api/Services/TheSecurityBotClient.cs`
 - Test: `ACP_Metabot.Api.Tests/TheSecurityBotClientTests.cs`
 
-The client maps `/v1/internal/scan` responses to a `SecurityVerdict` and NEVER throws into the worker loop (a non-2xx / transport failure becomes `status=error`). The status discriminator is the upstream `verdict` field: `"NOT_AUDITABLE"` → `not_auditable`; otherwise → `scanned`.
+The client maps `/v1/internal/scan` responses to a `ScanResult` — the latest-cache `SecurityVerdict` PLUS the raw `findings[]` JSON + raw verdict discriminator the worker needs to append a full history row from ONE scan call (no second round-trip). It NEVER throws into the worker loop (a non-2xx / transport / parse failure becomes `status=error`). The status discriminator is the upstream `verdict` field: `"NOT_AUDITABLE"` → `not_auditable`; otherwise → `scanned`. `scanned_at` is normalized to UTC ISO-8601 `"O"` (…Z) so `security_scan_history`'s string `ORDER BY scanned_at` is always valid.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -768,7 +1095,8 @@ public class TheSecurityBotClientTests
         """;
         var client = Make(new StubHandler(HttpStatusCode.OK, body));
 
-        var v = await client.ScanAsync("0xA", default);
+        var r = await client.ScanAsync("0xA", default);
+        var v = r.Verdict;
 
         Assert.Equal(SecurityStatus.Scanned, v.Status);
         Assert.Equal(88, v.Score);
@@ -776,8 +1104,12 @@ public class TheSecurityBotClientTests
         Assert.Equal(11, v.ObservableCount);
         Assert.Equal(3, v.FindingCount);
         Assert.Contains("\"High\":2", v.SeverityCountsJson);
-        Assert.Equal("2026-06-08T10:00:00.0000000Z", v.ScannedAt);
+        Assert.Equal("2026-06-08T10:00:00.0000000Z", v.ScannedAt); // normalized UTC "O"
         Assert.Null(v.LastError);
+        // raw findings retained verbatim for the history row + raw verdict discriminator
+        Assert.NotNull(r.RawFindingsJson);
+        Assert.Contains("\"severity\":\"High\"", r.RawFindingsJson!);
+        Assert.Equal("PASS", r.RawVerdict);
     }
 
     [Fact]
@@ -788,11 +1120,13 @@ public class TheSecurityBotClientTests
         """;
         var client = Make(new StubHandler(HttpStatusCode.OK, body));
 
-        var v = await client.ScanAsync("0xA", default);
+        var r = await client.ScanAsync("0xA", default);
+        var v = r.Verdict;
 
         Assert.Equal(SecurityStatus.NotAuditable, v.Status);
         Assert.Null(v.Score);
         Assert.Null(v.Grade);
+        Assert.Null(r.RawFindingsJson);
     }
 
     [Fact]
@@ -800,11 +1134,31 @@ public class TheSecurityBotClientTests
     {
         var client = Make(new StubHandler(HttpStatusCode.InternalServerError, "{\"error\":\"INTERNAL_ERROR\"}"));
 
-        var v = await client.ScanAsync("0xA", default);
+        var r = await client.ScanAsync("0xA", default);
+        var v = r.Verdict;
 
         Assert.Equal(SecurityStatus.Error, v.Status);
         Assert.NotNull(v.LastError);
         Assert.DoesNotContain("INTERNAL_ERROR", v.LastError!); // raw upstream body not echoed
+        Assert.Null(r.RawFindingsJson);
+    }
+
+    [Fact]
+    public async Task ScanAsync_PreservesFullFindingsFields()
+    {
+        const string body = """
+        {"verdict":"PASS","score":80,"grade":"B","observableCount":11,
+         "findings":[{"patternId":"P9","title":"RPC url leak","severity":"High","verdict":"Present","evidence":"alchemy key in log","fixRef":"P9"}]}
+        """;
+        var client = Make(new StubHandler(HttpStatusCode.OK, body));
+
+        var r = await client.ScanAsync("0xA", default);
+
+        Assert.NotNull(r.RawFindingsJson);
+        Assert.Contains("\"patternId\"", r.RawFindingsJson!);   // full result, not just severity
+        Assert.Contains("\"evidence\"", r.RawFindingsJson!);
+        Assert.Contains("\"fixRef\"", r.RawFindingsJson!);
+        Assert.Equal(1, r.Verdict.FindingCount);
     }
 
     [Fact]
@@ -864,12 +1218,24 @@ namespace ACP_Metabot.Api.Services;
 public interface ITheSecurityBotClient
 {
     /// <summary>
-    /// Scan the target agent over acp-shared. Returns a SecurityVerdict ready to
-    /// upsert. NEVER throws — a non-2xx / transport / parse failure maps to
+    /// Scan the target agent over acp-shared. Returns a ScanResult: the latest-cache
+    /// verdict PLUS the raw findings JSON + raw verdict discriminator for the history
+    /// append. NEVER throws — a non-2xx / transport / parse failure maps to
     /// status=error so the worker loop continues.
     /// </summary>
-    Task<SecurityVerdict> ScanAsync(string agentAddress, CancellationToken ct = default);
+    Task<ScanResult> ScanAsync(string agentAddress, CancellationToken ct = default);
 }
+
+/// <summary>
+/// One scan's outcome: the latest-cache verdict PLUS the raw findings JSON +
+/// raw verdict discriminator needed to append a full security_scan_history row.
+/// RawFindingsJson is the verbatim findings[] array (null for not_auditable /
+/// error / empty). RawVerdict is SecurityBot's verdict discriminator string.
+/// </summary>
+public sealed record ScanResult(
+    SecurityVerdict Verdict,
+    string? RawFindingsJson,
+    string? RawVerdict);
 
 /// <summary>
 /// HTTP client for ACP_SecurityBot's <c>POST /v1/internal/scan</c> over the
@@ -904,7 +1270,7 @@ public sealed class TheSecurityBotClient : ITheSecurityBotClient
         }
     }
 
-    public async Task<SecurityVerdict> ScanAsync(string agentAddress, CancellationToken ct = default)
+    public async Task<ScanResult> ScanAsync(string agentAddress, CancellationToken ct = default)
     {
         var addr = agentAddress.ToLowerInvariant();
         var nowIso = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture);
@@ -923,35 +1289,55 @@ public sealed class TheSecurityBotClient : ITheSecurityBotClient
                 // Log the status only — never the raw upstream body (P30/P63).
                 _log.LogWarning("[thesecuritybot] /v1/internal/scan {Addr} -> {Status}",
                     addr, (int)resp.StatusCode);
-                return Error(addr, nowIso, $"HTTP {(int)resp.StatusCode}");
+                return new ScanResult(Error(addr, nowIso, $"HTTP {(int)resp.StatusCode}"), null, null);
             }
 
             var dto = await resp.Content.ReadFromJsonAsync<ScanResponseDto>(cancellationToken: ct);
-            if (dto is null) return Error(addr, nowIso, "empty response");
+            if (dto is null)
+                return new ScanResult(Error(addr, nowIso, "empty response"), null, null);
 
             if (string.Equals(dto.Verdict, "NOT_AUDITABLE", StringComparison.OrdinalIgnoreCase))
             {
-                return new SecurityVerdict(addr, SecurityStatus.NotAuditable,
+                var na = new SecurityVerdict(addr, SecurityStatus.NotAuditable,
                     null, null, null, null, null, nowIso, null, null);
+                return new ScanResult(na, null, dto.Verdict);
             }
 
-            var findings = dto.Findings ?? new List<ScanFindingDto>();
-            var sevCounts = findings
-                .Where(f => !string.IsNullOrWhiteSpace(f.Severity))
-                .GroupBy(f => f.Severity!, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.Count());
+            // Walk the raw findings[] element once: count + severity histogram +
+            // keep the verbatim JSON for the history row. Defensive: a missing /
+            // non-array findings element degrades to 0 findings + null raw json.
+            int findingCount = 0;
+            var sevCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            string? rawFindingsJson = null;
+            if (dto.Findings is JsonElement fe && fe.ValueKind == JsonValueKind.Array)
+            {
+                rawFindingsJson = fe.GetRawText(); // verbatim array, all fields preserved
+                foreach (var f in fe.EnumerateArray())
+                {
+                    findingCount++;
+                    if (f.ValueKind == JsonValueKind.Object &&
+                        f.TryGetProperty("severity", out var sev) &&
+                        sev.ValueKind == JsonValueKind.String)
+                    {
+                        var s = sev.GetString();
+                        if (!string.IsNullOrWhiteSpace(s))
+                            sevCounts[s] = sevCounts.TryGetValue(s, out var c) ? c + 1 : 1;
+                    }
+                }
+            }
 
-            return new SecurityVerdict(
+            var verdict = new SecurityVerdict(
                 AgentAddress:       addr,
                 Status:             SecurityStatus.Scanned,
                 Score:              dto.Score,
                 Grade:              dto.Grade,
                 ObservableCount:    dto.ObservableCount,
-                FindingCount:       findings.Count,
+                FindingCount:       findingCount,
                 SeverityCountsJson: JsonSerializer.Serialize(sevCounts),
-                ScannedAt:          string.IsNullOrEmpty(dto.ScannedAt) ? nowIso : dto.ScannedAt!,
+                ScannedAt:          NormalizeIso(dto.ScannedAt, nowIso),
                 CorpusVersion:      null, // the internal scan response doesn't expose corpusVersion
                 LastError:          null);
+            return new ScanResult(verdict, rawFindingsJson, dto.Verdict);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -960,8 +1346,21 @@ public sealed class TheSecurityBotClient : ITheSecurityBotClient
         catch (Exception ex)
         {
             _log.LogWarning("[thesecuritybot] scan {Addr} failed: {Type}", addr, ex.GetType().Name);
-            return Error(addr, nowIso, ex.GetType().Name);
+            return new ScanResult(Error(addr, nowIso, ex.GetType().Name), null, null);
         }
+    }
+
+    // Normalize an upstream timestamp to UTC ISO-8601 "O" (…Z) so the
+    // security_scan_history string ORDER BY scanned_at is always valid; fall back
+    // to nowIso on parse failure. dto.UtcDateTime (Kind=Utc) renders with the "Z"
+    // suffix, matching DateTime.UtcNow.ToString("O").
+    private static string NormalizeIso(string? raw, string fallback)
+    {
+        if (string.IsNullOrEmpty(raw)) return fallback;
+        return DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind | DateTimeStyles.AssumeUniversal, out var dto)
+            ? dto.UtcDateTime.ToString("O", CultureInfo.InvariantCulture)
+            : fallback;
     }
 
     private static SecurityVerdict Error(string addr, string nowIso, string reason) =>
@@ -974,23 +1373,20 @@ public sealed class TheSecurityBotClient : ITheSecurityBotClient
         [property: JsonPropertyName("observableCount")] int? ObservableCount,
         [property: JsonPropertyName("totalPatterns")]   int? TotalPatterns,
         [property: JsonPropertyName("scannedAt")]       string? ScannedAt,
-        [property: JsonPropertyName("findings")]        List<ScanFindingDto>? Findings);
-
-    private sealed record ScanFindingDto(
-        [property: JsonPropertyName("severity")] string? Severity);
+        [property: JsonPropertyName("findings")]        JsonElement? Findings);
 }
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `dotnet test ACP_Metabot.Api.Tests --filter "FullyQualifiedName~TheSecurityBotClientTests"`
-Expected: PASS (5 tests).
+Expected: PASS (6 tests — 4 updated `ScanAsync` facts, the unchanged `Ctor_NonDev` guard, and the new `ScanAsync_PreservesFullFindingsFields`).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add ACP_Metabot.Api/Services/TheSecurityBotClient.cs ACP_Metabot.Api.Tests/TheSecurityBotClientTests.cs
-git commit -m "feat(metabot): TheSecurityBotClient (internal scan -> verdict, error-safe)"
+git commit -m "feat(metabot): TheSecurityBotClient (internal scan -> verdict + raw findings, error-safe)"
 ```
 
 ---
@@ -1001,7 +1397,7 @@ git commit -m "feat(metabot): TheSecurityBotClient (internal scan -> verdict, er
 - Create: `ACP_Metabot.Api/Services/SecurityScanWorker.cs`
 - Test: `ACP_Metabot.Api.Tests/SecurityScanWorkerTests.cs`
 
-The worker is default-OFF, resolves its dependencies from a scope per tick (the repos/clients are singletons but the scope pattern matches `MarketplacePulseWorker`), pulls stale agents, scans each with a delay between them, and upserts every verdict. The single tick (`TickOnceAsync`) is public so it can be unit-tested directly without running the hosted loop.
+The worker is default-OFF, resolves its dependencies from a scope per tick (the repos/clients are singletons but the scope pattern matches `MarketplacePulseWorker`), pulls stale agents, scans each with a delay between them, then for each scan upserts the latest-verdict cache row AND appends a full `security_scan_history` row (the durable per-scan result). The single tick (`TickOnceAsync`) is public so it can be unit-tested directly without running the hosted loop.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1023,6 +1419,7 @@ public class SecurityScanWorkerTests : IDisposable
     private readonly string _dbPath;
     private readonly Db _db;
     private readonly SecurityVerdictRepository _repo;
+    private readonly SecurityScanHistoryRepository _histRepo;
     private readonly ServiceProvider _sp;
 
     public SecurityScanWorkerTests()
@@ -1039,11 +1436,13 @@ public class SecurityScanWorkerTests : IDisposable
         _db = new Db(config);
         _db.InitializeSchemaAsync().GetAwaiter().GetResult();
         _repo = new SecurityVerdictRepository(_db);
+        _histRepo = new SecurityScanHistoryRepository(_db);
 
         var services = new ServiceCollection();
         services.AddSingleton(config);
         services.AddSingleton(_db);
         services.AddSingleton(_repo);
+        services.AddSingleton(_histRepo); // worker scope resolves it for the per-scan append
         _sp = services.BuildServiceProvider();
     }
 
@@ -1074,14 +1473,15 @@ public class SecurityScanWorkerTests : IDisposable
     private sealed class FakeClient : ITheSecurityBotClient
     {
         public readonly List<string> Scanned = new();
-        public Func<string, SecurityVerdict>? Map;
-        public Task<SecurityVerdict> ScanAsync(string agentAddress, CancellationToken ct = default)
+        public Func<string, SecurityVerdict>? Map;            // returns the cache verdict; wrapped in ScanResult
+        public string? RawFindingsJson = "[{\"severity\":\"High\"}]";
+        public Task<ScanResult> ScanAsync(string agentAddress, CancellationToken ct = default)
         {
             Scanned.Add(agentAddress);
             var v = Map?.Invoke(agentAddress)
                 ?? new SecurityVerdict(agentAddress, SecurityStatus.Scanned, 90, "A", 11, 0, "{}",
                     DateTime.UtcNow.ToString("O"), null, null);
-            return Task.FromResult(v);
+            return Task.FromResult(new ScanResult(v, RawFindingsJson, "PASS"));
         }
     }
 
@@ -1151,6 +1551,38 @@ public class SecurityScanWorkerTests : IDisposable
 
         var row = await _repo.GetByAgentAsync("0xerr");
         Assert.Equal(SecurityStatus.Error, row!.Status);
+    }
+
+    [Fact]
+    public async Task Tick_AppendsHistoryRow_PerScan()
+    {
+        await InsertOfferingAsync("0xa");
+        var worker = MakeWorker(new FakeClient());
+
+        await worker.TickOnceAsync(CancellationToken.None);
+
+        var hist = await _histRepo.ListByAgentAsync("0xa");
+        Assert.Single(hist);
+        Assert.Equal("[{\"severity\":\"High\"}]", hist[0].FindingsJson); // full findings retained
+        Assert.NotNull(await _repo.GetByAgentAsync("0xa"));              // latest cache still present
+    }
+
+    [Fact]
+    public async Task Tick_RescanSameAgent_TwoHistoryRows_OneCacheRow()
+    {
+        await InsertOfferingAsync("0xa");
+        var worker = MakeWorker(new FakeClient());
+
+        // First scan (agent never-scanned -> stale).
+        await worker.TickOnceAsync(CancellationToken.None);
+        // Age the cache row past the 7-day scanned TTL so the agent is stale again,
+        // then scan a second time.
+        await _repo.UpsertAsync(new SecurityVerdict("0xa", SecurityStatus.Scanned, 90, "A", 11, 0, "{}",
+            DateTime.UtcNow.AddDays(-10).ToString("O"), null, null));
+        await worker.TickOnceAsync(CancellationToken.None);
+
+        Assert.Equal(2, (await _histRepo.ListByAgentAsync("0xa")).Count); // append: two history rows
+        Assert.NotNull(await _repo.GetByAgentAsync("0xa"));               // upsert: single cache row
     }
 }
 ```
@@ -1237,6 +1669,7 @@ public sealed class SecurityScanWorker : BackgroundService
     {
         await using var scope = _scopes.CreateAsyncScope();
         var repo = scope.ServiceProvider.GetRequiredService<SecurityVerdictRepository>();
+        var historyRepo = scope.ServiceProvider.GetRequiredService<SecurityScanHistoryRepository>();
 
         var stale = await repo.GetStaleAgentsAsync(
             DateTime.UtcNow, _activeWindowDays,
@@ -1248,8 +1681,21 @@ public sealed class SecurityScanWorker : BackgroundService
         for (int i = 0; i < stale.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
-            var verdict = await _client.ScanAsync(stale[i], ct);
+            var result = await _client.ScanAsync(stale[i], ct);
+            var verdict = result.Verdict;
+            // (a) latest-verdict cache (drives the digest join) — upsert/overwrite.
             await repo.UpsertAsync(verdict, ct);
+            // (b) append-only history — one immutable row per scan, retaining the
+            // FULL result incl. the raw findings JSON ("save the results of each
+            // scan on a bot"). Appended for scanned/not_auditable/error alike so
+            // the timeline is complete. Cache first (keeps the digest correct),
+            // then append; a crash strictly between the two re-captures next scan.
+            await historyRepo.AppendAsync(
+                verdict.AgentAddress, verdict.ScannedAt, verdict.Status,
+                verdict.Score, verdict.Grade, verdict.ObservableCount,
+                verdict.FindingCount, verdict.SeverityCountsJson,
+                result.RawVerdict, verdict.CorpusVersion,
+                result.RawFindingsJson, verdict.LastError, ct);
             scanned++;
             if (_delay > TimeSpan.Zero && i < stale.Count - 1)
                 await Task.Delay(_delay, ct);
@@ -1262,13 +1708,13 @@ public sealed class SecurityScanWorker : BackgroundService
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `dotnet test ACP_Metabot.Api.Tests --filter "FullyQualifiedName~SecurityScanWorkerTests"`
-Expected: PASS (4 tests).
+Expected: PASS (6 tests — the original 4 plus `Tick_AppendsHistoryRow_PerScan` and `Tick_RescanSameAgent_TwoHistoryRows_OneCacheRow`).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add ACP_Metabot.Api/Services/SecurityScanWorker.cs ACP_Metabot.Api.Tests/SecurityScanWorkerTests.cs
-git commit -m "feat(metabot): SecurityScanWorker (default-off, gentle batch scanner)"
+git commit -m "feat(metabot): SecurityScanWorker (default-off; latest-cache upsert + history append per scan)"
 ```
 
 ---
@@ -1286,6 +1732,7 @@ In `ACP_Metabot.Api/Program.cs`, after the existing `builder.Services.AddSinglet
 
 ```csharp
 builder.Services.AddSingleton<SecurityVerdictRepository>();
+builder.Services.AddSingleton<SecurityScanHistoryRepository>(); // worker scope resolves it; also the seam for the deferred read endpoint
 ```
 
 - [ ] **Step 2: Register the hardened HttpClient + client**
@@ -1336,7 +1783,7 @@ Expected: Build succeeded, 0 errors, 0 warnings.
 
 ```bash
 git add ACP_Metabot.Api/Program.cs
-git commit -m "feat(metabot): register SecurityVerdictRepository + TheSecurityBotClient + SecurityScanWorker"
+git commit -m "feat(metabot): register SecurityVerdictRepository + SecurityScanHistoryRepository + TheSecurityBotClient + SecurityScanWorker"
 ```
 
 ---
@@ -1452,6 +1899,13 @@ public class DigestServiceSecurityTests : IDisposable
         Assert.Equal(SecurityStatus.Scanned, off.Security!.Status);
         Assert.Equal(91, off.Security.Score);
         Assert.Equal("A", off.Security.Grade);
+
+        // P9/P10 leak-guard: the digest reads ONLY the security_verdicts cache —
+        // raw findings/evidence/last_error from the history store must never appear.
+        var json = System.Text.Json.JsonSerializer.Serialize(result);
+        Assert.DoesNotContain("findingsJson", json);
+        Assert.DoesNotContain("evidence", json);
+        Assert.DoesNotContain("lastError", json);
     }
 
     [Fact]
@@ -1667,7 +2121,7 @@ git commit -m "feat(metabot): enrich /v1/digest offerings with security verdict"
 - [ ] **Step 1: Run the full test suite**
 
 Run: `dotnet test ACP_Metabot.Api.Tests`
-Expected: All tests pass (existing + the new SecurityVerdictRepository / TheSecurityBotClient / SecurityScanWorker / DigestServiceSecurity / Db migration tests). No regressions.
+Expected: All tests pass (existing + the new SecurityVerdictRepository / SecurityScanHistoryRepository / TheSecurityBotClient (6) / SecurityScanWorker (6) / DigestServiceSecurity / Db migration (both `security_verdicts` + `security_scan_history`) tests). No regressions.
 
 - [ ] **Step 2: Boot smoke (worker default-OFF path)**
 
@@ -1726,6 +2180,36 @@ Code committed local-only (no push) per "do not deploy to github". To ship:
    offerings carry `security:{status:...}`.
 6. Plugin: republish acp-find-mcp (real PowerShell `npm publish`) so acp_today's
    description reaches users; the `security` field already flows through the gateway.
+
+The `security_scan_history` append-only table is part of THIS same deploy — no extra
+env needed; it populates automatically every time the worker scans an agent (one
+immutable row per scan, incl. the raw findings JSON, kept in Metabot's own DB).
+Monitor its size on the droplet over time (append-only, no pruning yet).
+
+## G. (DEFERRED) Read surface for security_scan_history — offered, not built
+Persistence ships now; the read API is deferred (user asked only that scans be SAVED).
+When/if a per-agent scan-history read is wanted, mirror agentReputationHistory:
+
+1. Gateway route (Program.cs, next to the agentReputationHistory MapGet):
+   GET /v1/securityScanHistory?agent=0x..&limit=N
+   Handler HandleSecurityScanHistory(string agent, int? limit, SecurityScanHistoryRepository histRepo):
+     - lower-case agent FIRST, then validate against ^0x[0-9a-f]{40}$ (BadRequest otherwise),
+     - clamp limit to 1..100 (default 20),
+     - rows = await histRepo.ListByAgentAsync(addr, limit),
+     - return Ok(new { agentAddress = addr, count = rows.Count, history = rows.Select(r => new {
+         scannedAt = r.ScannedAt, status = r.Status, score = r.Score, grade = r.Grade,
+         verdict = r.Verdict, findingCount = r.FindingCount, severityCounts = r.SeverityCountsJson }) })
+     - PUBLIC list returns SUMMARY fields only; raw findings_json is NEVER returned by
+       the public endpoint — it stays server-side (P9/P10).
+   The repo is ALREADY registered (Task 7) — reuse the existing AddSingleton<SecurityScanHistoryRepository>().
+
+2. Plugin tool (acp-find-plugin/mcp-server/server.js, mirror acp_agent_reputation_history):
+   name: acp_agent_security_history
+   args: { agentAddress: required string (normalizeAddress), limit?: number 1..100 default 20 }
+   gateway path: /v1/securityScanHistory?agent=${encodeURIComponent(addr)}&limit=${encodeURIComponent(limit)}
+   GET via callGateway(); add marketplaceUrl to the response; returns the history array.
+   Docs lockstep on release (README What's-new lead block + plugin.json + CHANGELOG),
+   republish via real PowerShell npm publish.
 ```
 
 - [ ] **Step 4: Commit the ops note**
@@ -1743,6 +2227,7 @@ git commit -m "docs: ops handoff for security-vetted acp_today deploy"
 
 **Spec coverage** (against `2026-06-08-metabot-security-vetted-today-design.md`):
 - `security_verdicts` cache (§Components 1) → Task 1 + Task 3. ✅ (all columns: status/score/grade/observable_count/finding_count/severity_counts/scanned_at/corpus_version/last_error). `corpus_version` is stored nullable — the internal scan response does not expose it; documented in `TheSecurityBotClient` (set null) rather than faked.
+- `security_scan_history` append-only store (§Component 1b) → Task 1 (DDL) + Task 2 (`ScanHistoryRow`) + Task 3b (repo) + Task 5 (client carries raw findings JSON) + Task 6 (worker appends one row per scan, all outcomes). ✅ Latest-cache vs append-history split mirrors `agent_reputation_cache`/`agent_reputation_history` + `risk_attest_pro_cache`/`risk_snapshot_history`. Surrogate-id append shape mirrors `risk_snapshot_history` (two scans → two rows); lowercasing matches `SecurityVerdictRepository` (NOT `AgentReputationHistoryRepository`, which does not lowercase — structural mirror only). `scanned_at` normalized to UTC "O" so the string ORDER BY is valid. Read surface DEFERRED (handoff G) — user asked only for persistence; `ListByAgentAsync` built as the test seam + future hook.
 - `TheSecurityBotClient` (§Components 2) → Task 4 (P39 handler) + Task 5. ✅ BaseUrl/key config, X-API-Key, AllowAutoRedirect=false + PinResolvedIp (Task 6 registration), ~30s timeout, P17 fail-fast, NOT_AUDITABLE→not_auditable, non-2xx→error no-throw, no raw-body leak.
 - `SecurityScanWorker` (§Components 3) → Task 6. ✅ tick=60s, stale selection, all-live-agents candidate universe (offerings join), priority (never-scanned → hires → oldest), batch=10, 5s delay, single-flight serial, cancellation.
 - Gateway `/v1/digest` enrichment (§Components 4) → Task 8. ✅ batch GetMany, `{score,grade,status,scannedAt}`, `pending` when absent, no findings/evidence (OfferingSecurity drops them).
@@ -1754,4 +2239,4 @@ git commit -m "docs: ops handoff for security-vetted acp_today deploy"
 
 **Placeholder scan:** No TBD/TODO. The one deliberate "open the neighbouring test to copy the proven constructor" instruction (Task 8 Step 2) is a guard against inventing `ReputationService`/`SaturationCalculator` constructor args — the executor copies a working construction rather than guessing.
 
-**Type consistency:** `SecurityVerdict` (10 fields) is constructed identically in Tasks 3/5/6/8 and the repo `Map`. `SecurityStatus` constants (`scanned`/`not_auditable`/`error`/`pending`) used consistently. `OfferingSecurity.FromVerdict` / `.Pending` used in Task 8. `ITheSecurityBotClient.ScanAsync` signature identical in Task 5 (def), Task 6 (consumer + fake). `GetStaleAgentsAsync` / `GetManyAsync` / `UpsertAsync` / `GetByAgentAsync` signatures match across repo (Task 3) and callers (Tasks 6, 8). `BuildAsync(..., bool includeSecurity)` overload matches the Task 8 test + the Program.cs caller.
+**Type consistency:** `SecurityVerdict` (10 fields) is constructed identically in Tasks 3/5/6/8 and the repo `Map`. `ScanHistoryRow` (13 fields) constructed only in `SecurityScanHistoryRepository.Map` (Task 3b), consumed in Task 3b/6 tests. `SecurityStatus` constants (`scanned`/`not_auditable`/`error`/`pending`) used consistently; `pending` is digest-only and never written to history. `OfferingSecurity.FromVerdict` / `.Pending` used in Task 8. `ITheSecurityBotClient.ScanAsync` returns `Task<ScanResult>` consistently in Task 5 (def + client tests), Task 6 (consumer + `FakeClient`); the worker reads `result.Verdict` / `result.RawFindingsJson` / `result.RawVerdict`. `SecurityScanHistoryRepository.AppendAsync` (12 params + ct, `rawVerdict` not `verdict` to avoid the call-site collision) / `ListByAgentAsync` match between repo (Task 3b), the worker (Task 6), and tests. `GetStaleAgentsAsync` / `GetManyAsync` / `UpsertAsync` / `GetByAgentAsync` signatures match across repo (Task 3) and callers (Tasks 6, 8). `BuildAsync(..., bool includeSecurity)` overload matches the Task 8 test + the Program.cs caller.
