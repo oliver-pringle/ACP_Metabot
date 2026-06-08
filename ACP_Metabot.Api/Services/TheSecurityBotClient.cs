@@ -52,16 +52,18 @@ public sealed class TheSecurityBotClient : ITheSecurityBotClient
         _apiKey = config["TheSecurityBot:ApiKey"] ?? "";
         _log = log;
 
-        // P17: fail-fast in non-Development when BaseUrl is set but the key is
-        // empty (silent-401 closer), matching TheChainlinkBotClient.
-        var baseUrl = config["TheSecurityBot:BaseUrl"] ?? "";
-        var integrationEnabled = !string.IsNullOrEmpty(baseUrl);
-        if (integrationEnabled && string.IsNullOrEmpty(_apiKey) && !env.IsDevelopment())
+        // P17: fail-fast in non-Development when the scanner is ENABLED but the key
+        // is empty — a silent-401 closer. Gating on SECURITY_SCAN_ENABLED (the only
+        // consumer is SecurityScanWorker) keeps the default-OFF deploy crash-free
+        // (no key needed until the operator turns the feature on), while still
+        // surfacing a misconfigured ENABLED deploy loudly instead of 401ing silently.
+        var scanEnabled = config.GetValue<bool?>("SECURITY_SCAN_ENABLED") ?? false;
+        if (scanEnabled && string.IsNullOrEmpty(_apiKey) && !env.IsDevelopment())
         {
             throw new InvalidOperationException(
-                "TheSecurityBot:ApiKey is required in non-Development when " +
-                "TheSecurityBot:BaseUrl is set. Set both env vars in lock-step, " +
-                "or unset BaseUrl to disable the cross-bot integration.");
+                "TheSecurityBot:ApiKey (THESECURITYBOT_API_KEY) is required when " +
+                "SECURITY_SCAN_ENABLED=true in non-Development. Set the key, or leave " +
+                "SECURITY_SCAN_ENABLED unset to keep the scanner off.");
         }
     }
 

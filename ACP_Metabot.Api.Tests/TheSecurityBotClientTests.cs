@@ -155,8 +155,25 @@ public class TheSecurityBotClientTests
     }
 
     [Fact]
-    public void Ctor_NonDev_KeyMissingButBaseUrlSet_Throws()
+    public void Ctor_NonDev_ScanEnabled_KeyMissing_Throws()
     {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["TheSecurityBot:ApiKey"]  = "",
+                ["TheSecurityBot:BaseUrl"] = "http://securitybot-api:5000/",
+                ["SECURITY_SCAN_ENABLED"]  = "true",
+            }).Build();
+        var env = new FakeEnv("Production");
+        Assert.Throws<InvalidOperationException>(() =>
+            new TheSecurityBotClient(new StubFactory(new StubHandler(HttpStatusCode.OK, "{}")),
+                config, env, NullLogger<TheSecurityBotClient>.Instance));
+    }
+
+    [Fact]
+    public void Ctor_NonDev_ScanDisabled_KeyMissing_DoesNotThrow()
+    {
+        // Default-OFF deploy: scanner disabled, no key — must construct fine (no crash-loop).
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -164,8 +181,8 @@ public class TheSecurityBotClientTests
                 ["TheSecurityBot:BaseUrl"] = "http://securitybot-api:5000/",
             }).Build();
         var env = new FakeEnv("Production");
-        Assert.Throws<InvalidOperationException>(() =>
-            new TheSecurityBotClient(new StubFactory(new StubHandler(HttpStatusCode.OK, "{}")),
-                config, env, NullLogger<TheSecurityBotClient>.Instance));
+        var client = new TheSecurityBotClient(new StubFactory(new StubHandler(HttpStatusCode.OK, "{}")),
+            config, env, NullLogger<TheSecurityBotClient>.Instance);
+        Assert.NotNull(client);
     }
 }
