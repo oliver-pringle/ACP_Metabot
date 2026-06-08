@@ -617,6 +617,47 @@ public class Db
                 registered_at TEXT NOT NULL,
                 tx_hash       TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS security_verdicts (
+                agent_address    TEXT PRIMARY KEY,          -- lower-cased
+                status           TEXT NOT NULL,             -- scanned | not_auditable | error
+                score            INTEGER,
+                grade            TEXT,
+                observable_count INTEGER,
+                finding_count    INTEGER,
+                severity_counts  TEXT,                      -- json {severity: count}
+                scanned_at       TEXT NOT NULL,             -- ISO-8601 round-trip (""O"")
+                corpus_version   TEXT,
+                last_error       TEXT                       -- server-side only; never surfaced
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_security_verdicts_status_scanned
+                ON security_verdicts(status, scanned_at);
+
+            -- Scan-history: append-only log of EVERY SecurityBot scan per agent
+            -- (the user asked that the results of each scan be saved, not just the
+            -- latest). security_verdicts above is the latest-only cache that drives
+            -- the digest join; THIS table retains the full result of each scan incl.
+            -- the raw findings JSON. Surrogate id PK (no natural-key uniqueness) so
+            -- re-scans APPEND, never overwrite. Mirrors risk_snapshot_history.
+            CREATE TABLE IF NOT EXISTS security_scan_history (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_address    TEXT NOT NULL,             -- lower-cased
+                scanned_at       TEXT NOT NULL,             -- ISO-8601 round-trip (""O""), UTC-normalized
+                status           TEXT NOT NULL,             -- scanned | not_auditable | error
+                score            INTEGER,
+                grade            TEXT,
+                observable_count INTEGER,
+                finding_count    INTEGER,
+                severity_counts  TEXT,                      -- json {severity: count}
+                verdict          TEXT,                      -- raw SecurityBot verdict discriminator (PASS / NOT_AUDITABLE / ...)
+                corpus_version   TEXT,                      -- forward-compat placeholder; scan response doesn't expose it yet (null today)
+                findings_json    TEXT,                      -- FULL raw findings[] array verbatim; the durable per-scan result
+                last_error       TEXT                       -- server-side only; never surfaced
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_security_scan_history_agent_scanned
+                ON security_scan_history(agent_address, scanned_at DESC);
             ";
         await cmd.ExecuteNonQueryAsync();
 
