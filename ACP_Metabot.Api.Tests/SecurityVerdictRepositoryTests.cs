@@ -91,6 +91,7 @@ public class SecurityVerdictRepositoryTests : IDisposable
         Assert.True(map.ContainsKey("0xa"));
         Assert.False(map.ContainsKey("0xb"));
         Assert.False(map.ContainsKey("0xc"));
+        Assert.Single(map);
     }
 
     [Fact]

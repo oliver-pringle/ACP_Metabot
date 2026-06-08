@@ -1,5 +1,6 @@
 using System.Globalization;
 using ACP_Metabot.Api.Models;
+using Microsoft.Data.Sqlite;
 
 namespace ACP_Metabot.Api.Data;
 
@@ -34,6 +35,8 @@ public sealed class SecurityVerdictRepository
                 corpus_version   = excluded.corpus_version,
                 last_error       = excluded.last_error;";
         cmd.Parameters.AddWithValue("$a",    v.AgentAddress.ToLowerInvariant());
+        // Status is stored as its string value (SecurityStatus.*). GetStaleAgentsAsync's
+        // WHERE clauses compare against the same string literals — keep them in sync.
         cmd.Parameters.AddWithValue("$st",   v.Status);
         cmd.Parameters.AddWithValue("$sc",   (object?)v.Score ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$gr",   (object?)v.Grade ?? DBNull.Value);
@@ -68,6 +71,14 @@ public sealed class SecurityVerdictRepository
         if (agentAddresses.Count == 0) return result;
 
         var lowered = agentAddresses.Select(a => a.ToLowerInvariant()).Distinct().ToList();
+        // SQLite caps host parameters (SQLITE_LIMIT_VARIABLE_NUMBER). The digest
+        // call-site is bounded well below this; guard against future bulk misuse
+        // so it fails loud rather than as an opaque SqliteException.
+        const int sqliteMaxVars = 900;
+        if (lowered.Count > sqliteMaxVars)
+            throw new ArgumentException(
+                $"GetManyAsync: {lowered.Count} addresses exceeds the SQLite variable guard ({sqliteMaxVars}); chunk the call.",
+                nameof(agentAddresses));
         var paramNames = lowered.Select((_, i) => $"$a{i}").ToArray();
 
         await using var conn = _db.OpenConnection();
@@ -137,7 +148,7 @@ public sealed class SecurityVerdictRepository
         return list;
     }
 
-    private static SecurityVerdict Map(Microsoft.Data.Sqlite.SqliteDataReader r) => new(
+    private static SecurityVerdict Map(SqliteDataReader r) => new(
         AgentAddress:       r.GetString(0),
         Status:             r.GetString(1),
         Score:              r.IsDBNull(2) ? null : r.GetInt32(2),
