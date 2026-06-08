@@ -29,6 +29,12 @@ public sealed class RateLimitMiddleware
 
     private long _tickCounter;
     private const int EvictEveryNTicks = 256;
+    // P15 hardening 2026-06-08: hard cap on the per-X-API-Key bucket dictionary so
+    // an attacker rotating random keys at high RPS can't balloon memory between
+    // eviction sweeps. When the cap is hit, NEW unrecognised keys skip the per-
+    // key reservation (per-IP still throttles). Eviction sweep returns the dict
+    // to nominal once stale buckets pass `2 * window`.
+    private const int ApiKeyBucketHardCap = 8192;
 
     // Heavy path prefixes — embedding-heavy (Voyage), LLM-heavy (Claude),
     // RPC-heavy (chain reads), DB-heavy (FTS searches), or subscription
@@ -83,14 +89,25 @@ public sealed class RateLimitMiddleware
             return;
         }
 
+        // API-key bucket. Key is hashed to keep buckets keyed by identity without
+        // persisting the bearer in dictionary state (heap dump safety).
+        // P15 hardening 2026-06-08: when the dictionary is full (memory-growth
+        // attack via random-key rotation), skip the per-key reservation for new
+        // keys — existing key buckets still throttle, and the per-IP bucket below
+        // still bounds anonymous floods.
         if (ctx.Request.Headers.TryGetValue("X-API-Key", out var keyHeader) &&
             !string.IsNullOrEmpty(keyHeader.ToString()))
         {
             var keyHash = HashForBucket(keyHeader.ToString());
-            if (!TryReserve(_apiKeyBuckets, keyHash, _apiKeyCapacity))
+            var atCap = _apiKeyBuckets.Count >= ApiKeyBucketHardCap;
+            var isExisting = _apiKeyBuckets.ContainsKey(keyHash);
+            if (!atCap || isExisting)
             {
-                await Write429(ctx, $"rate limit exceeded; {_apiKeyCapacity} req/min per X-API-Key on heavy endpoints");
-                return;
+                if (!TryReserve(_apiKeyBuckets, keyHash, _apiKeyCapacity))
+                {
+                    await Write429(ctx, $"rate limit exceeded; {_apiKeyCapacity} req/min per X-API-Key on heavy endpoints");
+                    return;
+                }
             }
         }
 

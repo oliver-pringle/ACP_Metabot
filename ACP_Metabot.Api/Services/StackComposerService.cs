@@ -150,8 +150,10 @@ Rules:
     /// for the four delimiters we use, and triple-backtick code fences.
     /// Replaces them with safe placeholders so a malicious description cannot
     /// escape its containment block.
+    /// P12 2026-06-08: promoted to internal static so SearchNarrator reuses the
+    /// same delimiter/code-fence stripping rather than duplicating it.
     /// </summary>
-    private static string SanitizeForPrompt(string s)
+    internal static string SanitizeForPrompt(string s)
     {
         if (string.IsNullOrEmpty(s)) return string.Empty;
         // Strip our delimiter tags (case-insensitive) and code fences.

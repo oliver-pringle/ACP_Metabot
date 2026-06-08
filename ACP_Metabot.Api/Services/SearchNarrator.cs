@@ -125,13 +125,20 @@ public sealed class SearchNarrator
     private static string BuildUserPrompt(
         string query, IReadOnlyList<OfferingMatch> hits, IReadOnlyList<string>? previousQueries)
     {
+        // P12 prompt-injection wrap (2026-06-08): query, previous queries, and
+        // each hit's Description are buyer- / marketplace-controlled untrusted
+        // text. Wrap each in a delimited <untrusted-...> block, strip our
+        // structural delimiters + triple-backtick code fences (shared
+        // StackComposerService.SanitizeForPrompt), strip the narrator's own
+        // closing tags, and length-cap each field so a hostile field cannot
+        // escape its containment block or flood the prompt.
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"Query: {query}");
+        sb.AppendLine($"Query: <untrusted-query>{Wrap(query, 400)}</untrusted-query>");
         if (previousQueries is { Count: > 0 })
         {
             sb.AppendLine("Previous queries:");
             foreach (var q in previousQueries.Take(5))
-                sb.AppendLine($"  - {q}");
+                sb.AppendLine($"  - <untrusted-prev-query>{Wrap(q, 400)}</untrusted-prev-query>");
         }
         sb.AppendLine($"Top {hits.Count} offerings:");
         for (int i = 0; i < hits.Count; i++)
@@ -141,11 +148,26 @@ public sealed class SearchNarrator
             sb.AppendLine($"  {i + 1}. [{h.OfferingName}@{shortAgent}] - ${h.PriceUsdc:F2}, category={h.Category ?? "(none)"}, score={h.Score:F2}");
             if (!string.IsNullOrWhiteSpace(h.Description))
             {
-                var desc = h.Description.Length > 200 ? h.Description.Substring(0, 200) + "..." : h.Description;
-                sb.AppendLine($"     {desc}");
+                sb.AppendLine($"     <untrusted-description>{Wrap(h.Description, 200)}</untrusted-description>");
             }
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// P12: neutralise an untrusted field before it enters the prompt — strip the
+    /// shared structural delimiters + code fences (StackComposerService.SanitizeForPrompt),
+    /// strip the narrator's own closing tags, then hard length-cap.
+    /// </summary>
+    private static string Wrap(string? s, int maxChars)
+    {
+        if (string.IsNullOrEmpty(s)) return string.Empty;
+        var clean = StackComposerService.SanitizeForPrompt(s)
+            .Replace("</untrusted-query>", "[/untrusted-query]", StringComparison.OrdinalIgnoreCase)
+            .Replace("</untrusted-prev-query>", "[/untrusted-prev-query]", StringComparison.OrdinalIgnoreCase)
+            .Replace("</untrusted-description>", "[/untrusted-description]", StringComparison.OrdinalIgnoreCase);
+        if (clean.Length > maxChars) clean = clean.Substring(0, maxChars) + "...";
+        return clean;
     }
 
     private static string ShortAgent(string? address)
@@ -166,7 +188,11 @@ public sealed class SearchNarrator
         var json = trimmed.Substring(start, end - start + 1);
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
-        var summary = root.TryGetProperty("summary", out var s) ? (s.GetString() ?? "") : "";
+        // P45 egress sanitisation (2026-06-08): the model OUTPUT is shipped to a
+        // paying buyer + downstream agents, so neutralise control chars, markdown
+        // links, and bare URLs even though the input side is prompt-wrapped.
+        var summary = root.TryGetProperty("summary", out var s)
+            ? (LlmOutputSanitiser.Sanitise(s.GetString(), 4000) ?? "") : "";
         var reasons = new List<PerResultReason>();
         if (root.TryGetProperty("perResultReason", out var pr) && pr.ValueKind == JsonValueKind.Array)
         {
@@ -174,7 +200,8 @@ public sealed class SearchNarrator
             {
                 if (item.ValueKind != JsonValueKind.Object) continue;
                 var off = item.TryGetProperty("offering", out var o) ? (o.GetString() ?? "") : "";
-                var reason = item.TryGetProperty("reason", out var r) ? (r.GetString() ?? "") : "";
+                var reason = item.TryGetProperty("reason", out var r)
+                    ? (LlmOutputSanitiser.Sanitise(r.GetString(), 600) ?? "") : "";
                 reasons.Add(new PerResultReason(off, reason));
             }
         }
