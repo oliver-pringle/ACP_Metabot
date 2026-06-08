@@ -771,6 +771,80 @@ public class DbMigrationTests : IDisposable
     //                 + agent_risk_cache schema tests
     // -----------------------------------------------------------------
 
+    // -----------------------------------------------------------------
+    // SecurityBot integration — security_verdicts + security_scan_history schema tests
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task InitializeSchema_CreatesSecurityVerdictsTable()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"acp_metabot_secverdict_schema_{Guid.NewGuid():N}.db");
+        try
+        {
+            var config = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["ConnectionStrings:Sqlite"] = $"Data Source={dbPath}"
+                }).Build();
+            var db = new Db(config);
+            await db.InitializeSchemaAsync();
+
+            await using var conn = db.OpenConnection();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT name FROM sqlite_master
+                WHERE name IN ('security_verdicts','ix_security_verdicts_status_scanned')
+                ORDER BY name;";
+            var names = new List<string>();
+            await using (var rdr = await cmd.ExecuteReaderAsync())
+                while (await rdr.ReadAsync()) names.Add(rdr.GetString(0));
+            Assert.Contains("security_verdicts", names);
+            Assert.Contains("ix_security_verdicts_status_scanned", names);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { File.Delete(dbPath); } catch { }
+            try { File.Delete(dbPath + "-wal"); } catch { }
+            try { File.Delete(dbPath + "-shm"); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task InitializeSchema_CreatesSecurityScanHistoryTable()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"acp_metabot_secscanhist_schema_{Guid.NewGuid():N}.db");
+        try
+        {
+            var config = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["ConnectionStrings:Sqlite"] = $"Data Source={dbPath}"
+                }).Build();
+            var db = new Db(config);
+            await db.InitializeSchemaAsync();
+
+            await using var conn = db.OpenConnection();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT name FROM sqlite_master
+                WHERE name IN ('security_scan_history','ix_security_scan_history_agent_scanned')
+                ORDER BY name;";
+            var names = new List<string>();
+            await using (var rdr = await cmd.ExecuteReaderAsync())
+                while (await rdr.ReadAsync()) names.Add(rdr.GetString(0));
+            Assert.Contains("security_scan_history", names);
+            Assert.Contains("ix_security_scan_history_agent_scanned", names);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { File.Delete(dbPath); } catch { }
+            try { File.Delete(dbPath + "-wal"); } catch { }
+            try { File.Delete(dbPath + "-shm"); } catch { }
+        }
+    }
+
     [Fact]
     public async Task Migration_creates_phase3_tables()
     {

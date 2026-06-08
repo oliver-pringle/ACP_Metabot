@@ -34,6 +34,8 @@ builder.Services.AddSingleton<RequestMetricsRepository>();
 builder.Services.AddSingleton<V2KnownSellersRepository>();
 builder.Services.AddSingleton<AgentResourcesRepository>();
 builder.Services.AddSingleton<ReputationFeedRepository>();
+builder.Services.AddSingleton<SecurityVerdictRepository>();
+builder.Services.AddSingleton<SecurityScanHistoryRepository>(); // worker scope resolves it; also the seam for the deferred read endpoint
 builder.Services.AddSingleton<MetricsChannel>();
 
 builder.Services.AddHttpClient();
@@ -78,6 +80,26 @@ builder.Services.AddHttpClient("thechainlinkbot", c =>
 // returns immediately with the requestId; fulfilment is polled separately.
 builder.Services.AddSingleton<TheChainlinkBotClient>();
 builder.Services.AddSingleton<ITheChainlinkBotClient>(sp => sp.GetRequiredService<TheChainlinkBotClient>());
+// Cross-bot HTTP client to ACP_SecurityBot's free internal scan endpoint over
+// acp-shared. BaseAddress from TheSecurityBot:BaseUrl (default: the bridge
+// service name); THESECURITYBOT_API_KEY (-> TheSecurityBot:ApiKey via compose)
+// read by the typed client. P39: pin the resolved IP at connect time + refuse
+// 3xx so a DNS-rebind / compromised-peer redirect can't bounce the key-bearing
+// request to cloud-metadata / link-local.
+builder.Services.AddHttpClient("thesecuritybot", c =>
+{
+    var baseUrl = builder.Configuration["TheSecurityBot:BaseUrl"]
+        ?? "http://securitybot-api:5000/";
+    if (!baseUrl.EndsWith("/")) baseUrl += "/";
+    c.BaseAddress = new Uri(baseUrl);
+    c.Timeout = TimeSpan.FromSeconds(30); // scans probe a live surface; allow a few s
+}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+{
+    AllowAutoRedirect = false,
+    ConnectCallback   = ACP_Metabot.Api.Services.AcpClients.InternalConnectCallbacks.PinResolvedIp,
+});
+builder.Services.AddSingleton<TheSecurityBotClient>();
+builder.Services.AddSingleton<ITheSecurityBotClient>(sp => sp.GetRequiredService<TheSecurityBotClient>());
 builder.Services.AddSingleton<AcpOffChainClient>();
 builder.Services.AddSingleton<ChainEventScanner>();
 builder.Services.AddSingleton<ScoreCalculator>();
@@ -222,6 +244,7 @@ builder.Services.AddSingleton<MetricsWriterService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MetricsWriterService>());
 builder.Services.AddHostedService<AgentProfileEmbedderService>();
 builder.Services.AddHostedService<BackupWorker>();
+builder.Services.AddHostedService<SecurityScanWorker>();
 builder.Services.AddSingleton<ReputationFeedPublisherWorker>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ReputationFeedPublisherWorker>());
 builder.Services.AddSingleton<ReputationFeedSyncWorker>();
@@ -943,7 +966,7 @@ async Task<IResult> HandleReputation(AgentReputationRequest req,
 }
 
 async Task<IResult> HandleDigest(int? days, string? marketplace,
-    string[]? chain, double? priceMaxUsdc, DigestService svc)
+    string[]? chain, double? priceMaxUsdc, bool? includeSecurity, DigestService svc)
 {
     var window = days is null ? 1 : Math.Clamp(days.Value, 1, 90);
     var marketplaceFilter = NormalizeMarketplace(marketplace);
@@ -964,7 +987,7 @@ async Task<IResult> HandleDigest(int? days, string? marketplace,
     if (priceMaxUsdc is double cap && (double.IsNaN(cap) || cap < 0))
         return Results.BadRequest(new { error = "priceMaxUsdc must be a non-negative number" });
 
-    var result = await svc.BuildAsync(window, marketplaceFilter, chainFilter, priceMaxUsdc);
+    var result = await svc.BuildAsync(window, marketplaceFilter, chainFilter, priceMaxUsdc, includeSecurity ?? true);
     return Results.Ok(result);
 }
 
@@ -1041,7 +1064,7 @@ app.MapPost("/search", HandleSearch);
 app.MapPost("/composeStack", HandleCompose);
 app.MapPost("/agentReputation", HandleReputation);
 app.MapGet("/digest", (int? days, string? marketplace, string[]? chain, double? priceMaxUsdc, DigestService svc)
-    => HandleDigest(days, marketplace, chain, priceMaxUsdc, svc));
+    => HandleDigest(days, marketplace, chain, priceMaxUsdc, includeSecurity: null, svc));
 app.MapGet("/agent/{address}", (string address,
     OfferingRepository repo, ReputationService reputation,
     CrossPresenceBuilder crossPresence, PricePercentileCalculator pricePercentile,
@@ -1737,8 +1760,8 @@ app.MapGet("/v1/agentReputationHistory",
         AgentReputationHistoryRepository histRepo)
     => HandleReputationHistory(agent, days, histRepo))
     .RequireRateLimiting("public-reputation");
-app.MapGet("/v1/digest", (int? days, string? marketplace, string[]? chain, double? priceMaxUsdc, DigestService svc)
-    => HandleDigest(days, marketplace, chain, priceMaxUsdc, svc))
+app.MapGet("/v1/digest", (int? days, string? marketplace, string[]? chain, double? priceMaxUsdc, bool? includeSecurity, DigestService svc)
+    => HandleDigest(days, marketplace, chain, priceMaxUsdc, includeSecurity, svc))
     .RequireRateLimiting("public-digest");
 app.MapGet("/v1/agent/{address}", (string address,
     OfferingRepository repo, ReputationService reputation,
