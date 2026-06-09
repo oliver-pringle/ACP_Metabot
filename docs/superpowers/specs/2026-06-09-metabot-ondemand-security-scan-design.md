@@ -47,7 +47,7 @@ acp_security_scan(agentAddress)            [plugin tool, sends X-API-Key]
 
 2. **Operator-gated endpoint — `POST /admin/securityScan` (Metabot `Program.cs`)**
    - **Gating confirmed:** Metabot's inline X-API-Key middleware (`Program.cs`) enforces on every path except `/health` and `/v1/*` (and re-gates `/v1/internal/*`). `/admin/*` is therefore gated — precedent: the operator-only `/admin/pulse/tick-now`. So `POST /admin/securityScan` requires `X-API-Key == INTERNAL_API_KEY`, else 401. (Place it alongside the existing `/admin/pulse/tick-now` operator route.)
-   - Body: `{ "agentAddress": "0x…" }`. Validate against `^0x[0-9a-fA-F]{40}$` (lower-case before validate); 400 `{error:"invalid agentAddress"}` otherwise.
+   - Body: `{ "agentAddress": "0x…" }`. Validate against `^0x[0-9a-fA-F]{40}$` (lower-case before validate); 400 `{error:"invalid_address"}` otherwise.
    - Resolves `SecurityScanService` + both repos from DI, calls `ScanAndPersistAsync`, and returns 200 with the full projection:
      `{ agentAddress, status, score, grade, observableCount, findingCount, severityCounts (object), verdict, scannedAt, findings: [ {patternId,title,severity,verdict,evidence,fixRef}… ] }`.
      `findings` is parsed from the persisted `RawFindingsJson` (null/empty → `[]`). `not_auditable`/`error` return 200 with that status and null score/grade/empty findings (honest outcome, already persisted) — never a 500.
