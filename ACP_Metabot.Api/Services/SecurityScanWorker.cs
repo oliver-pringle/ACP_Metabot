@@ -20,7 +20,6 @@ namespace ACP_Metabot.Api.Services;
 public sealed class SecurityScanWorker : BackgroundService
 {
     private readonly IServiceScopeFactory _scopes;
-    private readonly ITheSecurityBotClient _client;
     private readonly ILogger<SecurityScanWorker> _log;
 
     private readonly bool _enabled;
@@ -32,11 +31,10 @@ public sealed class SecurityScanWorker : BackgroundService
     private readonly TimeSpan _notAuditableTtl;
     private readonly TimeSpan _errorTtl;
 
-    public SecurityScanWorker(IServiceScopeFactory scopes, ITheSecurityBotClient client,
+    public SecurityScanWorker(IServiceScopeFactory scopes,
         IConfiguration config, ILogger<SecurityScanWorker> log)
     {
         _scopes = scopes;
-        _client = client;
         _log = log;
 
         _enabled = config.GetValue<bool?>("SECURITY_SCAN_ENABLED") ?? false;
@@ -74,6 +72,7 @@ public sealed class SecurityScanWorker : BackgroundService
         await using var scope = _scopes.CreateAsyncScope();
         var repo = scope.ServiceProvider.GetRequiredService<SecurityVerdictRepository>();
         var historyRepo = scope.ServiceProvider.GetRequiredService<SecurityScanHistoryRepository>();
+        var scanService = scope.ServiceProvider.GetRequiredService<SecurityScanService>();
 
         var stale = await repo.GetStaleAgentsAsync(
             DateTime.UtcNow, _activeWindowDays,
@@ -85,21 +84,10 @@ public sealed class SecurityScanWorker : BackgroundService
         for (int i = 0; i < stale.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
-            var result = await _client.ScanAsync(stale[i], ct);
-            var verdict = result.Verdict;
-            // (a) latest-verdict cache (drives the digest join) — upsert/overwrite.
-            await repo.UpsertAsync(verdict, ct);
-            // (b) append-only history — one immutable row per scan, retaining the
-            // FULL result incl. the raw findings JSON ("save the results of each
-            // scan on a bot"). Appended for scanned/not_auditable/error alike so
-            // the timeline is complete. Cache first (keeps the digest correct),
-            // then append; a crash strictly between the two re-captures next scan.
-            await historyRepo.AppendAsync(
-                verdict.AgentAddress, verdict.ScannedAt, verdict.Status,
-                verdict.Score, verdict.Grade, verdict.ObservableCount,
-                verdict.FindingCount, verdict.SeverityCountsJson,
-                result.RawVerdict, verdict.CorpusVersion,
-                result.RawFindingsJson, verdict.LastError, ct);
+            // Single write-path: scan -> upsert latest-verdict cache -> append a
+            // full history row (cache first, then append). Identical to the
+            // on-demand POST /admin/securityScan path — see SecurityScanService.
+            await scanService.ScanAndPersistAsync(stale[i], repo, historyRepo, ct);
             scanned++;
             if (_delay > TimeSpan.Zero && i < stale.Count - 1)
                 await Task.Delay(_delay, ct);
