@@ -1782,6 +1782,17 @@ app.MapGet("/v1/agentReputationHistory",
         AgentReputationHistoryRepository histRepo)
     => HandleReputationHistory(agent, days, histRepo))
     .RequireRateLimiting("public-reputation");
+
+// Public, summary-only read of the append-only security_scan_history table.
+// Mirrors /v1/agentReputationHistory (public via the /v1/* X-API-Key bypass,
+// rate-limited under public-reputation). Backs acp-find's acp_agent_security_history.
+// SUMMARY ONLY — raw findings[] + last_error stay server-side (P9/P10/P30/P63);
+// operators get full per-finding detail from the GATED POST /admin/securityScan.
+app.MapGet("/v1/securityScanHistory",
+    ([FromQuery] string agent, [FromQuery] int? limit,
+        SecurityScanHistoryRepository histRepo, CancellationToken ct)
+    => ACP_Metabot.Api.Endpoints.SecurityScanHistoryEndpoint.HandleAsync(agent, limit, histRepo, ct))
+    .RequireRateLimiting("public-reputation");
 app.MapGet("/v1/digest", (int? days, string? marketplace, string[]? chain, double? priceMaxUsdc, bool? includeSecurity, DigestService svc)
     => HandleDigest(days, marketplace, chain, priceMaxUsdc, includeSecurity, svc))
     .RequireRateLimiting("public-digest");
