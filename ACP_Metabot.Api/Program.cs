@@ -1285,6 +1285,24 @@ app.MapPost("/admin/pulse/tick-now",
     return Results.Ok(new { ok = true, delivered });
 });
 
+// Operator-only on-demand SecurityBot scan of any marketplace bot. Gated by the
+// inline X-API-Key middleware (/admin/* is NOT in the bypass list) — same gate as
+// /admin/pulse/tick-now. Body: { agentAddress }. Scans fresh, persists to the same
+// security_verdicts cache + security_scan_history log the worker writes (via the
+// shared SecurityScanService), and returns the full verdict + per-finding detail.
+// Free internal path (acp-shared, no escrow). lastError is never surfaced.
+// operator-only behind X-API-Key; no rate-limit, matching /admin/pulse/tick-now.
+app.MapPost("/admin/securityScan",
+    async (ACP_Metabot.Api.Endpoints.AdminSecurityScanRequest req,
+           SecurityScanService svc,
+           SecurityVerdictRepository repo,
+           SecurityScanHistoryRepository historyRepo,
+           CancellationToken ct) =>
+    {
+        return await ACP_Metabot.Api.Endpoints.SecurityScanEndpoint.HandleAsync(
+            req, repo, historyRepo, svc.ScanAndPersistAsync, ct);
+    });
+
 // ===== v1.8 Portfolio Risk Bot — 5 paid offerings =====
 //
 // All five share the public-compose rate-limit budget. The four one-shot
