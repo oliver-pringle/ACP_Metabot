@@ -36,6 +36,10 @@ builder.Services.AddSingleton<AgentResourcesRepository>();
 builder.Services.AddSingleton<ReputationFeedRepository>();
 builder.Services.AddSingleton<SecurityVerdictRepository>();
 builder.Services.AddSingleton<SecurityScanHistoryRepository>(); // worker scope resolves it; also the seam for the deferred read endpoint
+// Shared scan-and-persist seam. Depends on ITheSecurityBotClient (registered
+// below at the thesecuritybot HttpClient block). Resolved by SecurityScanWorker's
+// per-tick scope AND the on-demand POST /admin/securityScan endpoint — one write-path.
+builder.Services.AddSingleton<SecurityScanService>();
 builder.Services.AddSingleton<MetricsChannel>();
 
 builder.Services.AddHttpClient();
