@@ -36,6 +36,10 @@ builder.Services.AddSingleton<AgentResourcesRepository>();
 builder.Services.AddSingleton<ReputationFeedRepository>();
 builder.Services.AddSingleton<SecurityVerdictRepository>();
 builder.Services.AddSingleton<SecurityScanHistoryRepository>(); // worker scope resolves it; also the seam for the deferred read endpoint
+// Shared scan-and-persist seam. Depends on ITheSecurityBotClient (registered
+// below at the thesecuritybot HttpClient block). Resolved by SecurityScanWorker's
+// per-tick scope AND the on-demand POST /admin/securityScan endpoint — one write-path.
+builder.Services.AddSingleton<SecurityScanService>();
 builder.Services.AddSingleton<MetricsChannel>();
 
 builder.Services.AddHttpClient();
@@ -1280,6 +1284,24 @@ app.MapPost("/admin/pulse/tick-now",
     var delivered = await worker.TickOnceAsync(ct);
     return Results.Ok(new { ok = true, delivered });
 });
+
+// Operator-only on-demand SecurityBot scan of any marketplace bot. Gated by the
+// inline X-API-Key middleware (/admin/* is NOT in the bypass list) — same gate as
+// /admin/pulse/tick-now. Body: { agentAddress }. Scans fresh, persists to the same
+// security_verdicts cache + security_scan_history log the worker writes (via the
+// shared SecurityScanService), and returns the full verdict + per-finding detail.
+// Free internal path (acp-shared, no escrow). lastError is never surfaced.
+// operator-only behind X-API-Key; no rate-limit, matching /admin/pulse/tick-now.
+app.MapPost("/admin/securityScan",
+    async (ACP_Metabot.Api.Endpoints.AdminSecurityScanRequest req,
+           SecurityScanService svc,
+           SecurityVerdictRepository repo,
+           SecurityScanHistoryRepository historyRepo,
+           CancellationToken ct) =>
+    {
+        return await ACP_Metabot.Api.Endpoints.SecurityScanEndpoint.HandleAsync(
+            req, repo, historyRepo, svc.ScanAndPersistAsync, ct);
+    });
 
 // ===== v1.8 Portfolio Risk Bot — 5 paid offerings =====
 //

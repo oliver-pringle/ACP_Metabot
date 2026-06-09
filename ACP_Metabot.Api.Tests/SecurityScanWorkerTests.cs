@@ -14,7 +14,8 @@ public class SecurityScanWorkerTests : IDisposable
     private readonly Db _db;
     private readonly SecurityVerdictRepository _repo;
     private readonly SecurityScanHistoryRepository _histRepo;
-    private readonly ServiceProvider _sp;
+    private readonly ServiceCollection _services;
+    private ServiceProvider _sp;
 
     public SecurityScanWorkerTests()
     {
@@ -37,6 +38,11 @@ public class SecurityScanWorkerTests : IDisposable
         services.AddSingleton(_db);
         services.AddSingleton(_repo);
         services.AddSingleton(_histRepo); // worker scope resolves it for the per-scan append
+        // The worker resolves SecurityScanService from its per-tick scope. It is
+        // constructed per-test from the FakeClient passed to MakeWorker (so the
+        // service scans through the same fake the test inspects), then registered
+        // as the scope-resolvable singleton.
+        _services = services; // keep the collection so MakeWorker can register the per-test service
         _sp = services.BuildServiceProvider();
     }
 
@@ -81,9 +87,18 @@ public class SecurityScanWorkerTests : IDisposable
 
     private SecurityScanWorker MakeWorker(ITheSecurityBotClient client)
     {
+        // The worker no longer depends on ITheSecurityBotClient — its scope-resolved
+        // SecurityScanService does. Register THIS test's FakeClient + the service so
+        // the worker's per-tick scope resolves a service that scans through the same
+        // fake the test inspects, then rebuild the provider.
+        _sp.Dispose();
+        _services.AddSingleton<ITheSecurityBotClient>(client);
+        _services.AddSingleton<SecurityScanService>();
+        _sp = _services.BuildServiceProvider();
+
         var scopeFactory = _sp.GetRequiredService<IServiceScopeFactory>();
         var config = _sp.GetRequiredService<IConfiguration>();
-        return new SecurityScanWorker(scopeFactory, client, config, NullLogger<SecurityScanWorker>.Instance);
+        return new SecurityScanWorker(scopeFactory, config, NullLogger<SecurityScanWorker>.Instance);
     }
 
     [Fact]
