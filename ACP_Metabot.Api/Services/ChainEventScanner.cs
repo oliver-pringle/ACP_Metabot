@@ -79,6 +79,10 @@ public class ChainEventScanner
     // (jobId-filtered, full-range, ×4 events) is millions of getLogs and never
     // completes — so we report the exact job COUNT and compute detailed status
     // over only the most-recent N jobs. 0 disables the cap. See PlanStatusScan.
+    // Default 200 (was 1000): a recent sample of 200 jobs is well above the
+    // 5-terminal InsufficientData floor and still statistically valid for the
+    // completion/dispute rate, while cutting the status getLogs burst ~5x — the
+    // burst that strands high-volume agents on a 429-prone public RPC.
     private readonly int _statusScanMaxJobs;
     private readonly ILogger<ChainEventScanner> _logger;
     // Block-timestamp LRU; bounded so it can't grow without limit during a long warmer pass.
@@ -96,7 +100,7 @@ public class ChainEventScanner
         _deployBlock      = config.GetValue<long?>("Reputation:ContractDeployBlock") ?? 0L;
         _chunkSize        = config.GetValue<long?>("Reputation:ChunkSize")           ?? 10_000L;
         _maxFirstScanDays = config.GetValue<int?>("Reputation:MaxFirstScanDays")     ?? 90;
-        _statusScanMaxJobs = config.GetValue<int?>("Reputation:StatusScanMaxJobs")   ?? 1000;
+        _statusScanMaxJobs = config.GetValue<int?>("Reputation:StatusScanMaxJobs")   ?? 200;
 
         // Nethereum's RpcClient defaults to a 20s ConnectionTimeout — applied
         // app-wide via the static ClientBase.ConnectionTimeout. Bump it BEFORE
@@ -465,7 +469,11 @@ public class ChainEventScanner
         }
         if (startBlock > headBlock)
         {
-            // Edge: cap pushed past head (config sanity issue). Return zeros.
+            // Edge: cap pushed past head, or a lagging RPC node reports a head below
+            // our last checkpoint. Return zeros (TotalJobs=0 folds to keep-prior). Do
+            // NOT retreat the checkpoint below the prior (fromBlock-1) — persisting a
+            // lower head would make the next delta re-scan already-counted blocks and
+            // double-count them onto the cumulative total.
             return new ChainScanResult(
                 AgentAddress:               agentAddress,
                 TotalJobs:                  0, Completed: 0, Rejected: 0, Expired: 0,
@@ -473,16 +481,17 @@ public class ChainEventScanner
                 LastJobSubmittedAt:         null,
                 AvgResponseSeconds30d:      null,
                 ResponseTimeSampleCount30d: 0,
-                HighestScannedBlock:        headBlock);
+                HighestScannedBlock:        Math.Max(headBlock, fromBlock - 1));
         }
 
         // 1. JobCreated filtered on provider (topic3) — gives the agent's full jobId set.
         //    topic1 (jobId) = any, topic2 (client) = any, topic3 (provider) = agentAddress
         var createdHandler = _web3.Eth.GetEvent<JobCreatedEvent>(_contractAddress);
+        var step1Coverage = new ScanCoverage();
         var createdLogs = await RunChunkedAsync(createdHandler,
             (fromBP, toBP) => createdHandler.CreateFilterInput(
                 (object[]?)null, (object[]?)null, new object[] { agentAddress }, fromBP, toBP),
-            startBlock, headBlock, ct);
+            startBlock, headBlock, ct, step1Coverage);
 
         // Record each job's creation block, then bound the O(jobs) status scan. For a
         // very high-volume agent (20k+ jobs) scanning status per job is millions of
@@ -495,6 +504,21 @@ public class ChainEventScanner
 
         var plan = PlanStatusScan(jobBlocks, startBlock, _statusScanMaxJobs);
         var statusFromBlock = plan.StatusFromBlock;
+
+        // Always-on step-1 diagnostic. The JobCreated count is the EXACT job total
+        // for this window and is independent of the (bounded, flaky) status scan.
+        // failedChunks>0 means step-1 had to abandon chunks (RPC exhausted retries)
+        // so the count may be an undercount — untrustworthy scans must NOT accumulate
+        // or advance the checkpoint (see ChooseHighestScannedBlock + the caller's
+        // ComputeEffectiveTotalJobs). This line is what reveals, on the next pass and
+        // without anyone watching, whether a high-volume agent's step-1 truly saw ~0.
+        var step1Trustworthy = step1Coverage.FailedChunks == 0;
+        var wasColdStartScan = fromBlock <= _deployBlock;
+        _logger.LogInformation(
+            "[chain-scan] {Addr} step1 jobCreated={Count} window=[{Start}..{Head}] chunks={Chunks} failedChunks={Failed} coldStart={Cold} trustworthy={Trust}",
+            agentAddress, jobBlocks.Count, startBlock, headBlock,
+            ((headBlock - startBlock) / _chunkSize) + 1, step1Coverage.FailedChunks,
+            wasColdStartScan, step1Trustworthy);
         if (plan.Capped)
             _logger.LogInformation(
                 "[chain-scan] {Addr} high-volume: {Total} jobs; status scanned for most-recent {N} from block {From}",
@@ -505,81 +529,108 @@ public class ChainEventScanner
         var submittedTimestamps = new Dictionary<System.Numerics.BigInteger, DateTime>();
         DateTime? lastSubmitted = null;
 
-        // 2. JobSubmitted filtered on provider (topic2) — gives T1 for response time.
-        //    topic1 (jobId) = any, topic2 (provider) = agentAddress
-        var submittedHandler = _web3.Eth.GetEvent<JobSubmittedEvent>(_contractAddress);
-        var submittedLogs = await RunChunkedAsync(submittedHandler,
-            (fromBP, toBP) => submittedHandler.CreateFilterInput(
-                (object[]?)null, new object[] { agentAddress }, fromBP, toBP),
-            statusFromBlock, headBlock, ct);
-        foreach (var log in submittedLogs)
-        {
-            if (!jobIds.Contains(log.Event.JobId)) continue;
-            var ts = await GetBlockTimeAsync((long)log.Log.BlockNumber.Value, ct);
-            submittedTimestamps[log.Event.JobId] = ts;
-            if (lastSubmitted is null || ts > lastSubmitted) lastSubmitted = ts;
-        }
-
-        // 3. Other events are NOT indexed on provider, so we filter by jobId set
-        //    in batches (max 50 jobIds per topic filter — well under RPC limits).
-        var fundedHandler    = _web3.Eth.GetEvent<JobFundedEvent>(_contractAddress);
-        var completedHandler = _web3.Eth.GetEvent<JobCompletedEvent>(_contractAddress);
-        var rejectedHandler  = _web3.Eth.GetEvent<JobRejectedEvent>(_contractAddress);
-        var expiredHandler   = _web3.Eth.GetEvent<JobExpiredEvent>(_contractAddress);
-
         long completed = 0, rejected = 0, expired = 0, completedLast30d = 0;
         var thirtyDaysAgo = nowUtc.AddDays(-30);
 
-        const int batchSize = 50;
-        var allJobIds = jobIds.ToList();
-        for (int i = 0; i < allJobIds.Count; i += batchSize)
+        // Steps 2-3 (the bounded status scan) are DECOUPLED from the persisted job
+        // COUNT: TotalJobs comes from step 1 (plan.TotalJobs) and is already known.
+        // If the status scan throws — a getLogs chunk or a GetBlockTime lookup that
+        // exhausts retries under a 429 burst — we log + degrade rather than abort the
+        // whole scan, otherwise a high-volume agent like UW (21,944 jobs from step 1)
+        // would land NO row at all (its row was previously lost exactly this way).
+        // statusScanComplete flows into the InsufficientData flag so a partial-status
+        // row is labelled honestly instead of showing a confident neutral-50.
+        bool statusScanComplete = true;
+        var statusCoverage = new ScanCoverage();
+        try
         {
-            var batch       = allJobIds.GetRange(i, Math.Min(batchSize, allJobIds.Count - i));
-            var topicJobIds = batch.Select(id => (object)id).ToArray();
-
-            // JobFunded: topic1 = jobId (indexed), topic2 = client (indexed) — filter only by jobId
-            var fundedBatch = await RunChunkedAsync(fundedHandler,
-                (fromBP, toBP) => fundedHandler.CreateFilterInput(
-                    topicJobIds, (object[]?)null, fromBP, toBP),
-                statusFromBlock, headBlock, ct);
-            foreach (var log in fundedBatch)
+            // 2. JobSubmitted filtered on provider (topic2) — gives T1 for response time.
+            //    topic1 (jobId) = any, topic2 (provider) = agentAddress
+            var submittedHandler = _web3.Eth.GetEvent<JobSubmittedEvent>(_contractAddress);
+            var submittedLogs = await RunChunkedAsync(submittedHandler,
+                (fromBP, toBP) => submittedHandler.CreateFilterInput(
+                    (object[]?)null, new object[] { agentAddress }, fromBP, toBP),
+                statusFromBlock, headBlock, ct, statusCoverage);
+            foreach (var log in submittedLogs)
             {
-                fundedTimestamps[log.Event.JobId] =
-                    await GetBlockTimeAsync((long)log.Log.BlockNumber.Value, ct);
-            }
-
-            // JobCompleted: topic1 = jobId (indexed), topic2 = evaluator (indexed) — filter on jobId only.
-            var completedBatch = await RunChunkedAsync(completedHandler,
-                (fromBP, toBP) => completedHandler.CreateFilterInput(
-                    topicJobIds, fromBP, toBP),
-                statusFromBlock, headBlock, ct);
-            foreach (var log in completedBatch)
-            {
-                completed++;
+                if (!jobIds.Contains(log.Event.JobId)) continue;
                 var ts = await GetBlockTimeAsync((long)log.Log.BlockNumber.Value, ct);
-                if (ts >= thirtyDaysAgo) completedLast30d++;
+                submittedTimestamps[log.Event.JobId] = ts;
+                if (lastSubmitted is null || ts > lastSubmitted) lastSubmitted = ts;
             }
 
-            // JobRejected: topic1 = jobId (indexed), topic2 = rejector (indexed)
-            var rejectedBatch = await RunChunkedAsync(rejectedHandler,
-                (fromBP, toBP) => rejectedHandler.CreateFilterInput(
-                    topicJobIds, (object[]?)null, fromBP, toBP),
-                statusFromBlock, headBlock, ct);
-            foreach (var log in rejectedBatch)
+            // 3. Other events are NOT indexed on provider, so we filter by jobId set
+            //    in batches (max 50 jobIds per topic filter — well under RPC limits).
+            var fundedHandler    = _web3.Eth.GetEvent<JobFundedEvent>(_contractAddress);
+            var completedHandler = _web3.Eth.GetEvent<JobCompletedEvent>(_contractAddress);
+            var rejectedHandler  = _web3.Eth.GetEvent<JobRejectedEvent>(_contractAddress);
+            var expiredHandler   = _web3.Eth.GetEvent<JobExpiredEvent>(_contractAddress);
+
+            const int batchSize = 50;
+            var allJobIds = jobIds.ToList();
+            for (int i = 0; i < allJobIds.Count; i += batchSize)
             {
-                // Exclude self-rejections (agent rejecting buyer's spec).
-                if (string.Equals(log.Event.Rejector, agentAddress, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                rejected++;
-            }
+                var batch       = allJobIds.GetRange(i, Math.Min(batchSize, allJobIds.Count - i));
+                var topicJobIds = batch.Select(id => (object)id).ToArray();
 
-            // JobExpired: topic1 = jobId (indexed only)
-            var expiredBatch = await RunChunkedAsync(expiredHandler,
-                (fromBP, toBP) => expiredHandler.CreateFilterInput(
-                    topicJobIds, fromBP, toBP),
-                statusFromBlock, headBlock, ct);
-            expired += expiredBatch.Count;
+                // JobFunded: topic1 = jobId (indexed), topic2 = client (indexed) — filter only by jobId
+                var fundedBatch = await RunChunkedAsync(fundedHandler,
+                    (fromBP, toBP) => fundedHandler.CreateFilterInput(
+                        topicJobIds, (object[]?)null, fromBP, toBP),
+                    statusFromBlock, headBlock, ct, statusCoverage);
+                foreach (var log in fundedBatch)
+                {
+                    fundedTimestamps[log.Event.JobId] =
+                        await GetBlockTimeAsync((long)log.Log.BlockNumber.Value, ct);
+                }
+
+                // JobCompleted: topic1 = jobId (indexed), topic2 = evaluator (indexed) — filter on jobId only.
+                var completedBatch = await RunChunkedAsync(completedHandler,
+                    (fromBP, toBP) => completedHandler.CreateFilterInput(
+                        topicJobIds, fromBP, toBP),
+                    statusFromBlock, headBlock, ct, statusCoverage);
+                foreach (var log in completedBatch)
+                {
+                    completed++;
+                    var ts = await GetBlockTimeAsync((long)log.Log.BlockNumber.Value, ct);
+                    if (ts >= thirtyDaysAgo) completedLast30d++;
+                }
+
+                // JobRejected: topic1 = jobId (indexed), topic2 = rejector (indexed)
+                var rejectedBatch = await RunChunkedAsync(rejectedHandler,
+                    (fromBP, toBP) => rejectedHandler.CreateFilterInput(
+                        topicJobIds, (object[]?)null, fromBP, toBP),
+                    statusFromBlock, headBlock, ct, statusCoverage);
+                foreach (var log in rejectedBatch)
+                {
+                    // Exclude self-rejections (agent rejecting buyer's spec).
+                    if (string.Equals(log.Event.Rejector, agentAddress, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    rejected++;
+                }
+
+                // JobExpired: topic1 = jobId (indexed only)
+                var expiredBatch = await RunChunkedAsync(expiredHandler,
+                    (fromBP, toBP) => expiredHandler.CreateFilterInput(
+                        topicJobIds, fromBP, toBP),
+                    statusFromBlock, headBlock, ct, statusCoverage);
+                expired += expiredBatch.Count;
+            }
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            statusScanComplete = false;
+            _logger.LogWarning(ex,
+                "[chain-scan] {Addr} status scan incomplete after step1 ({Total} jobs); persisting exact TotalJobs with partial status",
+                agentAddress, plan.TotalJobs);
+        }
+        // A silently-dropped status chunk (continue-on-fail, no throw) also means
+        // the recent-window terminal counts are a partial sample.
+        if (statusCoverage.FailedChunks > 0) statusScanComplete = false;
 
         // 4. Average response time over completed jobs in last 30d only.
         double? avgResponseSeconds = null;
@@ -606,13 +657,32 @@ public class ChainEventScanner
             LastJobSubmittedAt:         lastSubmitted,
             AvgResponseSeconds30d:      avgResponseSeconds,
             ResponseTimeSampleCount30d: sampleCount,
-            HighestScannedBlock:        headBlock);
+            HighestScannedBlock:        ChooseHighestScannedBlock(headBlock, fromBlock, step1Trustworthy),
+            Step1Trustworthy:           step1Trustworthy,
+            WasColdStartScan:           wasColdStartScan,
+            StatusScanComplete:         statusScanComplete);
     }
+
+    // Mutable per-scan chunk-failure sink. When passed to RunChunkedAsync, it
+    // counts chunks that exhausted RPC retries and were skipped (not aborted on).
+    // Used by ScanAgentAsync to decide whether the step-1 count is trustworthy
+    // enough to accumulate + advance the checkpoint. Null sink = caller doesn't
+    // care about coverage (still gets continue-on-fail robustness).
+    private sealed class ScanCoverage { public int FailedChunks; }
+
+    // Pure: where to leave the scan checkpoint. A trustworthy scan advances to
+    // the head it reached; an untrustworthy one (step-1 dropped chunks) must NOT
+    // advance past the data it missed — leave it exactly one below the original
+    // fromBlock so the next pass re-scans the identical window. Exposed for unit
+    // tests. fromBlock is the raw caller-supplied value (>= 1).
+    public static long ChooseHighestScannedBlock(long head, long fromBlock, bool step1Trustworthy)
+        => step1Trustworthy ? head : fromBlock - 1;
 
     private async Task<List<EventLog<TEvt>>> RunChunkedAsync<TEvt>(
         Event<TEvt> handler,
         Func<BlockParameter, BlockParameter, NewFilterInput> filterBuilder,
-        long fromBlock, long toBlock, CancellationToken ct) where TEvt : IEventDTO, new()
+        long fromBlock, long toBlock, CancellationToken ct,
+        ScanCoverage? coverage = null) where TEvt : IEventDTO, new()
     {
         var all = new List<EventLog<TEvt>>();
         foreach (var (s, e) in BlockRangeChunker.Chunk(fromBlock, toBlock, _chunkSize))
@@ -622,11 +692,30 @@ public class ChainEventScanner
             var toBP   = new BlockParameter(new HexBigInteger(e));
             var filter = filterBuilder(fromBP, toBP);
             // Wrapped in RpcRetry so 429s / 5xx / network flakes on free Base
-            // RPCs don't kill a 390-chunk cold-start mid-scan.
-            var logs = await RpcRetry.ExecuteAsync(
-                () => handler.GetAllChangesAsync(filter),
-                $"getLogs[{s}..{e}]", _logger, ct);
-            all.AddRange(logs);
+            // RPCs don't kill a scan mid-flight. If a single chunk STILL exhausts
+            // its retry budget we log + count it and CONTINUE rather than abort
+            // the whole scan — one flaky chunk must not strand a 390-chunk
+            // cold-start (which is how high-volume agents ended up with no row).
+            // The caller inspects coverage.FailedChunks to decide whether the
+            // resulting count is complete enough to trust.
+            try
+            {
+                var logs = await RpcRetry.ExecuteAsync(
+                    () => handler.GetAllChangesAsync(filter),
+                    $"getLogs[{s}..{e}]", _logger, ct);
+                all.AddRange(logs);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                if (coverage is not null) coverage.FailedChunks++;
+                _logger.LogWarning(
+                    "[chain-scan] chunk getLogs[{From}..{To}] GIVING UP after retries: {Type} {Msg}",
+                    s, e, ex.GetType().Name, ex.Message);
+            }
         }
         return all;
     }

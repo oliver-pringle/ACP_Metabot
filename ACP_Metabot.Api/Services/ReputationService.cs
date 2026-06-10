@@ -295,6 +295,38 @@ public class ReputationService
         return result with { Trajectory = trajectory.Count > 0 ? trajectory : null };
     }
 
+    /// <summary>
+    /// Pure: fold a single scan's per-window JobCreated count into the agent's
+    /// cumulative running total. The scanner returns the count for the scanned
+    /// block window only (a delta scan sees just the new jobs); persisting that
+    /// raw value would clobber an agent's accumulated total on every warmer pass.
+    ///
+    /// Case table (windowCount, priorTotal, wasColdStart, step1Trustworthy):
+    ///  • untrustworthy (step-1 dropped chunks): keep prior (or the partial window
+    ///    when there's no prior) — the scanner won't advance the checkpoint, so the
+    ///    next clean pass re-scans the same window and supersedes this value.
+    ///  • cold-start scan (started at the deploy-block floor): the window is a fresh
+    ///    baseline, but it is CAPPED to the last MaxFirstScanDays — so it can be a
+    ///    subset of lifetime when a prior total survives (e.g. an operator zeroes
+    ///    last_scanned_block without deleting the row). Take the monotonic FLOOR
+    ///    (max of prior and window) so a 90d-capped re-scan never clobbers an
+    ///    accumulated total downward, and never adds (which would double-count the
+    ///    overlap). A genuine reset is a full-row DELETE -> priorTotal null -> window.
+    ///  • delta scan: accumulate — priorTotal + the new window's jobs.
+    /// Monotonic by construction on a finalized chain (jobs never un-happen); both
+    /// the window count and any prior are <= true lifetime, so max/accumulate can
+    /// never exceed it (given no double-count, which the checkpoint policy ensures).
+    /// </summary>
+    public static long ComputeEffectiveTotalJobs(
+        long windowCount, long? priorTotal, bool wasColdStartScan, bool step1Trustworthy)
+    {
+        if (!step1Trustworthy)
+            return priorTotal ?? windowCount;
+        if (wasColdStartScan)
+            return Math.Max(priorTotal ?? 0, windowCount);
+        return (priorTotal ?? 0) + windowCount;
+    }
+
     // Computes a fresh reputation, persists it, and returns the V2 wire object.
     public async Task<AgentReputationResultV2> ComputeAsync(string addr, string source, CancellationToken ct)
     {
@@ -302,17 +334,36 @@ public class ReputationService
         var fromBlock = (await _cacheRepo.GetLastScannedBlockAsync(addr) ?? 0) + 1;
         var chain = await _scanner.ScanAgentAsync(addr, fromBlock, nowUtc, ct);
 
+        // Fold the per-window JobCreated count into a cumulative running total so a
+        // delta scan (which only sees jobs created since last_scanned_block) can
+        // never clobber an agent's accumulated lifetime total down to a day's worth.
+        // GetCachedTotalJobsAsync bypasses the 24h TTL and is null only on a true
+        // from-scratch cold start. An untrustworthy step-1 (dropped chunks) keeps the
+        // prior total — paired with the scanner leaving the checkpoint unadvanced, so
+        // the next pass re-scans the same window and accumulates cleanly (no double
+        // count). See ComputeEffectiveTotalJobs for the full case table.
+        var priorTotal = await _cacheRepo.GetCachedTotalJobsAsync(addr);
+        var effectiveTotal = ComputeEffectiveTotalJobs(
+            chain.TotalJobs, priorTotal, chain.WasColdStartScan, chain.Step1Trustworthy);
+        if (effectiveTotal != chain.TotalJobs)
+            _logger.LogInformation(
+                "[reputation] {addr} totalJobs window={Window} prior={Prior} -> cumulative={Eff} (coldStart={CS} step1Trust={T})",
+                addr, chain.TotalJobs, priorTotal, effectiveTotal,
+                chain.WasColdStartScan, chain.Step1Trustworthy);
+        // The score must see the cumulative total (isColdStart + volume), not the delta.
+        var chainForScore = chain with { TotalJobs = effectiveTotal };
+
         AcpOffChainAgent? offChain = null;
         try { offChain = await _offChain.GetAgentAsync(addr, ct); }
         catch (Exception ex) { _logger.LogWarning(ex, "[reputation] off-chain fetch failed for {addr}", addr); }
 
         long volumeCorpusMax = ComputeVolume30dCorpusMax();
 
-        var inputs = new ScoreCalculator.ScoreInputs(chain, offChain?.LastActiveAt, volumeCorpusMax, nowUtc);
+        var inputs = new ScoreCalculator.ScoreInputs(chainForScore, offChain?.LastActiveAt, volumeCorpusMax, nowUtc);
         var score = _calculator.Compute(inputs);
 
         var rawCounts = new RawCounts(
-            TotalJobs:        chain.TotalJobs,
+            TotalJobs:        effectiveTotal,
             Completed:        chain.Completed,
             Rejected:         chain.Rejected,
             Expired:          chain.Expired,
@@ -321,7 +372,7 @@ public class ReputationService
 
         var flags = new ReputationFlags(
             IsColdStart:      score.IsColdStart,
-            InsufficientData: score.AnyInsufficient,
+            InsufficientData: score.AnyInsufficient || !chain.StatusScanComplete,
             WarmCacheHit:     source == "warmer");
 
         var subScoresJson = System.Text.Json.JsonSerializer.Serialize(score.SubScores);
