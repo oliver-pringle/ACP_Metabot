@@ -75,6 +75,11 @@ public class ChainEventScanner
     private readonly long _deployBlock;
     private readonly long _chunkSize;
     private readonly int _maxFirstScanDays;
+    // Above this many JobCreated events for one agent, the per-job status scan
+    // (jobId-filtered, full-range, ×4 events) is millions of getLogs and never
+    // completes — so we report the exact job COUNT and compute detailed status
+    // over only the most-recent N jobs. 0 disables the cap. See PlanStatusScan.
+    private readonly int _statusScanMaxJobs;
     private readonly ILogger<ChainEventScanner> _logger;
     // Block-timestamp LRU; bounded so it can't grow without limit during a long warmer pass.
     private readonly Dictionary<long, DateTime> _blockTimestamps = new(capacity: 4096);
@@ -91,6 +96,7 @@ public class ChainEventScanner
         _deployBlock      = config.GetValue<long?>("Reputation:ContractDeployBlock") ?? 0L;
         _chunkSize        = config.GetValue<long?>("Reputation:ChunkSize")           ?? 10_000L;
         _maxFirstScanDays = config.GetValue<int?>("Reputation:MaxFirstScanDays")     ?? 90;
+        _statusScanMaxJobs = config.GetValue<int?>("Reputation:StatusScanMaxJobs")   ?? 1000;
 
         // Nethereum's RpcClient defaults to a 20s ConnectionTimeout — applied
         // app-wide via the static ClientBase.ConnectionTimeout. Bump it BEFORE
@@ -402,6 +408,42 @@ public class ChainEventScanner
             .ToArray();
     }
 
+    /// <summary>
+    /// Plan for the bounded per-agent status scan. <see cref="TotalJobs"/> is the EXACT
+    /// JobCreated count; <see cref="StatusJobIds"/> is the subset whose detailed status
+    /// (funded / completed / rejected / expired / response-time) we actually scan, and
+    /// <see cref="StatusFromBlock"/> is the block to scan those events from.
+    /// </summary>
+    public readonly record struct StatusScanPlan(
+        IReadOnlyList<System.Numerics.BigInteger> StatusJobIds,
+        long StatusFromBlock,
+        long TotalJobs,
+        bool Capped);
+
+    /// <summary>
+    /// Pure planner: given each job's creation block, decide which jobs to scan status
+    /// for. When the count is within <paramref name="cap"/> (or cap &lt;= 0) all jobs are
+    /// scanned from <paramref name="fullScanFromBlock"/>. When it exceeds the cap, only
+    /// the most-recent <paramref name="cap"/> jobs are scanned, from the earliest of THOSE
+    /// jobs' blocks (clamped to <paramref name="fullScanFromBlock"/>) — a job's lifecycle
+    /// events never precede its JobCreated, so this window is complete for the sample.
+    /// TotalJobs is always the full count, so high-volume agents stop reading as 0.
+    /// </summary>
+    public static StatusScanPlan PlanStatusScan(
+        IReadOnlyDictionary<System.Numerics.BigInteger, long> jobBlocks,
+        long fullScanFromBlock,
+        int cap)
+    {
+        long total = jobBlocks.Count;
+        if (cap <= 0 || total <= cap)
+            return new StatusScanPlan(jobBlocks.Keys.ToList(), fullScanFromBlock, total, Capped: false);
+
+        var recent = jobBlocks.OrderByDescending(kv => kv.Value).Take(cap).ToList();
+        long minBlock = recent.Min(kv => kv.Value);
+        var ids = recent.Select(kv => kv.Key).ToList();
+        return new StatusScanPlan(ids, Math.Max(fullScanFromBlock, minBlock), total, Capped: true);
+    }
+
     public async Task<ChainScanResult> ScanAgentAsync(
         string agentAddress, long fromBlock, DateTime nowUtc, CancellationToken ct)
     {
@@ -442,11 +484,26 @@ public class ChainEventScanner
                 (object[]?)null, (object[]?)null, new object[] { agentAddress }, fromBP, toBP),
             startBlock, headBlock, ct);
 
-        var jobIds = new HashSet<System.Numerics.BigInteger>();
+        // Record each job's creation block, then bound the O(jobs) status scan. For a
+        // very high-volume agent (20k+ jobs) scanning status per job is millions of
+        // getLogs and never completes — which left Quiver (21,983) / UW Agent (21,952)
+        // stuck at TotalJobs=0. We keep the EXACT count (plan.TotalJobs) and scan
+        // detailed status for only the most-recent StatusScanMaxJobs jobs.
+        var jobBlocks = new Dictionary<System.Numerics.BigInteger, long>();
+        foreach (var log in createdLogs)
+            jobBlocks[log.Event.JobId] = (long)log.Log.BlockNumber.Value;
+
+        var plan = PlanStatusScan(jobBlocks, startBlock, _statusScanMaxJobs);
+        var statusFromBlock = plan.StatusFromBlock;
+        if (plan.Capped)
+            _logger.LogInformation(
+                "[chain-scan] {Addr} high-volume: {Total} jobs; status scanned for most-recent {N} from block {From}",
+                agentAddress, plan.TotalJobs, plan.StatusJobIds.Count, statusFromBlock);
+
+        var jobIds = new HashSet<System.Numerics.BigInteger>(plan.StatusJobIds);
         var fundedTimestamps    = new Dictionary<System.Numerics.BigInteger, DateTime>();
         var submittedTimestamps = new Dictionary<System.Numerics.BigInteger, DateTime>();
         DateTime? lastSubmitted = null;
-        foreach (var log in createdLogs) jobIds.Add(log.Event.JobId);
 
         // 2. JobSubmitted filtered on provider (topic2) — gives T1 for response time.
         //    topic1 (jobId) = any, topic2 (provider) = agentAddress
@@ -454,7 +511,7 @@ public class ChainEventScanner
         var submittedLogs = await RunChunkedAsync(submittedHandler,
             (fromBP, toBP) => submittedHandler.CreateFilterInput(
                 (object[]?)null, new object[] { agentAddress }, fromBP, toBP),
-            startBlock, headBlock, ct);
+            statusFromBlock, headBlock, ct);
         foreach (var log in submittedLogs)
         {
             if (!jobIds.Contains(log.Event.JobId)) continue;
@@ -484,7 +541,7 @@ public class ChainEventScanner
             var fundedBatch = await RunChunkedAsync(fundedHandler,
                 (fromBP, toBP) => fundedHandler.CreateFilterInput(
                     topicJobIds, (object[]?)null, fromBP, toBP),
-                startBlock, headBlock, ct);
+                statusFromBlock, headBlock, ct);
             foreach (var log in fundedBatch)
             {
                 fundedTimestamps[log.Event.JobId] =
@@ -495,7 +552,7 @@ public class ChainEventScanner
             var completedBatch = await RunChunkedAsync(completedHandler,
                 (fromBP, toBP) => completedHandler.CreateFilterInput(
                     topicJobIds, fromBP, toBP),
-                startBlock, headBlock, ct);
+                statusFromBlock, headBlock, ct);
             foreach (var log in completedBatch)
             {
                 completed++;
@@ -507,7 +564,7 @@ public class ChainEventScanner
             var rejectedBatch = await RunChunkedAsync(rejectedHandler,
                 (fromBP, toBP) => rejectedHandler.CreateFilterInput(
                     topicJobIds, (object[]?)null, fromBP, toBP),
-                startBlock, headBlock, ct);
+                statusFromBlock, headBlock, ct);
             foreach (var log in rejectedBatch)
             {
                 // Exclude self-rejections (agent rejecting buyer's spec).
@@ -520,7 +577,7 @@ public class ChainEventScanner
             var expiredBatch = await RunChunkedAsync(expiredHandler,
                 (fromBP, toBP) => expiredHandler.CreateFilterInput(
                     topicJobIds, fromBP, toBP),
-                startBlock, headBlock, ct);
+                statusFromBlock, headBlock, ct);
             expired += expiredBatch.Count;
         }
 
@@ -541,7 +598,7 @@ public class ChainEventScanner
 
         return new ChainScanResult(
             AgentAddress:               agentAddress,
-            TotalJobs:                  jobIds.Count,
+            TotalJobs:                  plan.TotalJobs,
             Completed:                  completed,
             Rejected:                   rejected,
             Expired:                    expired,
