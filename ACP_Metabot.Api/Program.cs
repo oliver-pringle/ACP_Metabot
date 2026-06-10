@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.ConfigureKestrel(o => o.AddServerHeader = false);
 
 // Cap request body size at the server level. Per-route validators already
 // reject overlong free-form inputs (MaxQueryLen=1000, MaxUseCaseLen=2000),
