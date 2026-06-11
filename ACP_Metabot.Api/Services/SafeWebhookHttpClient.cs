@@ -85,7 +85,10 @@ public sealed class SafeWebhookHttpClient : IDisposable
                 using var req = requestBuilder(current);
                 try
                 {
-                    res = await _http.SendAsync(req, timeoutCts.Token);
+                    // P4: ResponseHeadersRead — we only read IsSuccessStatusCode +
+                    // Headers.Location, never the body, so a hostile/oversized buyer
+                    // webhook response must not be buffered into the api heap.
+                    res = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token);
                 }
                 catch (TaskCanceledException) when (!ct.IsCancellationRequested)
                 {
