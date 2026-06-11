@@ -180,7 +180,9 @@ Rules:
         try
         {
             using var doc = JsonDocument.Parse(cleaned);
-            var rationale = doc.RootElement.TryGetProperty("rationale", out var r) ? (r.GetString() ?? "") : "";
+            // P45: egress-sanitise LLM-authored text before it lands in the paid
+            // composeStack / buyerOrchestrate deliverable (same as SearchNarrator).
+            var rationale = doc.RootElement.TryGetProperty("rationale", out var r) ? (LlmOutputSanitiser.Sanitise(r.GetString(), 4000) ?? "") : "";
             var entries = new List<StackEntry>();
             if (doc.RootElement.TryGetProperty("stack", out var stack) && stack.ValueKind == JsonValueKind.Array)
             {
@@ -195,7 +197,7 @@ Rules:
                         string.Equals(c.AgentAddress, address, StringComparison.OrdinalIgnoreCase));
                     if (match is null) continue;
 
-                    var role = el.TryGetProperty("role", out var rl) ? rl.GetString() ?? "" : "";
+                    var role = el.TryGetProperty("role", out var rl) ? (LlmOutputSanitiser.Sanitise(rl.GetString(), 600) ?? "") : "";
                     entries.Add(new StackEntry(
                         OfferingName: match.OfferingName,
                         AgentName: match.AgentName,
